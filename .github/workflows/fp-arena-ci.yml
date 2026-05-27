@@ -1,0 +1,64 @@
+name: FP-Arena Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  merge_group:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ci') }}
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout FP-Arena
+      uses: actions/checkout@v4
+      with:
+        path: fp-arena
+
+    # DaCe is pulled from the yakup/dev branch, with submodules (the runtime
+    # headers FP-Arena's generated code includes -- e.g. moodycamel -- live in
+    # DaCe git submodules and a plain pip-from-git install would miss them).
+    - name: Checkout DaCe (yakup/dev)
+      uses: actions/checkout@v4
+      with:
+        repository: spcl/dace
+        ref: yakup/dev
+        submodules: recursive
+        path: dace
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install build toolchain
+      run: |
+        sudo apt-get update
+        # gcc/g++ (C++20) + cmake/ninja drive DaCe's CPU codegen build; the
+        # generated maps use OpenMP (libgomp).
+        sudo apt-get install -y cmake ninja-build gcc g++ libgomp1
+
+    - name: Install DaCe (yakup/dev) and FP-Arena
+      run: |
+        rm -f ~/.dace.conf
+        python -m pip install --upgrade pip
+        # DaCe from the branch checked out above (with submodules).
+        pip install -e ./dace
+        # FP-Arena without deps so it uses the DaCe just installed (any main),
+        # rather than re-pulling pinned main from git.
+        pip install --no-deps ./fp-arena
+        pip install pytest
+
+    - name: Run FP-Arena tests
+      run: |
+        cd fp-arena
+        rm -rf .dacecache tests/.dacecache
+        # Serial run: the tests compile SDFGs and share .dacecache build folders,
+        # which can race under xdist.
+        pytest -v tests/

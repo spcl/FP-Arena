@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.venv/
+venv/
+
+# DaCe build artifacts
+.dacecache/
+*.sdfg
+*.sdfgz
+*.json
+out.sdfg
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

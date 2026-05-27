@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fp-arena"
+version = "0.1.0"
+description = "A rapid-prototyping environment for custom floating-point types in DaCe"
+readme = "README.md"
+license = "BSD-3-Clause"
+authors = [
+    { name = "ETH Zurich and the FP-Arena authors" }
+]
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Code Generators",
+]
+keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision", "prototyping"]
+
+# FP-Arena tracks the DaCe `yakup/dev` branch. To use your own DaCe checkout
+# (any yakup/dev-based branch), install FP-Arena with `--no-deps` and ensure
+# that DaCe is importable; see the README.
+dependencies = [
+    "dace @ git+https://github.com/spcl/dace.git@yakup/dev",
+]
+
+[project.optional-dependencies]
+testing = [
+    "pytest",
+    "pytest-xdist",
+]
+dev = [
+    "fp-arena[testing]",
+]
+
+[project.urls]
+Homepage = "https://github.com/spcl/FP-Arena"
+Repository = "https://github.com/spcl/FP-Arena"
+Issues = "https://github.com/spcl/FP-Arena/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fp_arena*"]
+
+[tool.setuptools.package-data]
+fp_arena = ["runtime/include/**/*.h"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--color=yes"
