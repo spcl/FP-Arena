@@ -1,0 +1,234 @@
+import numpy as np
+import dace
+import fp_arena
+from fp_arena.transformations.change_and_propagate_fp_types import (
+    change_and_propagate_fp_types,
+)
+
+dace.Config.append("compiler", "cpu", "libs", value="mpfr")
+
+
+def test_sdfg_scalar_compute():
+    """Compute 1/3 at 128-bit precision and return as double."""
+    sdfg = dace.SDFG("mpfr_scalar")
+    state = sdfg.add_state()
+
+    sdfg.add_scalar("tmp", dace.mpfr(128), transient=True)
+    sdfg.add_array("out", [1], dace.float64, transient=False)
+
+    tmp_node = state.add_access("tmp")
+    out_node = state.add_write("out")
+
+    init = state.add_tasklet(
+        "init_mpfr",
+        {},
+        {"t"},
+        "t = 1.0 / 3.0;",
+        language=dace.Language.CPP,
+    )
+    conv = state.add_tasklet(
+        "to_double",
+        {"t"},
+        {"o"},
+        "o = (double)t;",
+        language=dace.Language.CPP,
+    )
+
+    state.add_edge(init, "t", tmp_node, None, dace.Memlet("tmp"))
+    state.add_edge(tmp_node, None, conv, "t", dace.Memlet("tmp"))
+    state.add_edge(conv, "o", out_node, None, dace.Memlet("out[0]"))
+
+    csdfg = sdfg.compile()
+
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert abs(out[0] - 1.0 / 3.0) < 1e-15, f"Expected ~0.333…, got {out[0]}"
+
+
+def test_sdfg_array_sum():
+    """Fill an mpfr array with values 1..N, sum into a double output."""
+    N = 4
+    sdfg = dace.SDFG("mpfr_array_sum")
+    state = sdfg.add_state()
+
+    sdfg.add_array("arr", [N], dace.mpfr(128), transient=True)
+    sdfg.add_array("out", [1], dace.float64, transient=False)
+
+    arr_node = state.add_access("arr")
+    out_node = state.add_write("out")
+
+    fill = state.add_tasklet(
+        "fill",
+        {},
+        {"a"},
+        "\n".join(f"a[{i}] = {i + 1};" for i in range(N)),
+        language=dace.Language.CPP,
+    )
+    sumup = state.add_tasklet(
+        "sum",
+        {"a"},
+        {"o"},
+        f"""dace::mpfr<128> acc(0); for (int i = 0; i < {N}; ++i) acc += a[i]; o = (double)acc;""",
+        language=dace.Language.CPP,
+    )
+
+    state.add_edge(fill, "a", arr_node, None, dace.Memlet(f"arr[0:{N}]"))
+    state.add_edge(arr_node, None, sumup, "a", dace.Memlet(f"arr[0:{N}]"))
+    state.add_edge(sumup, "o", out_node, None, dace.Memlet("out[0]"))
+
+    csdfg = sdfg.compile()
+
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    expected = N * (N + 1) / 2  # 1+2+3+4 = 10
+    assert abs(out[0] - expected) < 1e-15, f"Expected {expected}, got {out[0]}"
+
+
+def test_sdfg_binary_ops():
+    """Test each binary operator (+, -, *, /) independently."""
+    cases = [
+        ("add", "lhs + rhs", 7.0, 3.0, 10.0),
+        ("sub", "lhs - rhs", 7.0, 3.0, 4.0),
+        ("mul", "lhs * rhs", 7.0, 3.0, 21.0),
+        ("div", "lhs / rhs", 9.0, 3.0, 3.0),
+    ]
+    for op_name, expr, lv, rv, expected in cases:
+        sdfg = dace.SDFG(f"mpfr_{op_name}")
+        state = sdfg.add_state()
+
+        sdfg.add_array("out", [1], dace.float64, transient=False)
+        out_node = state.add_write("out")
+
+        tasklet = state.add_tasklet(
+            op_name,
+            {},
+            {"o"},
+            f"dace::mpfr<128> lhs({lv}), rhs({rv}), res = {expr}; o = (double)res;",
+            language=dace.Language.CPP,
+        )
+        state.add_edge(tasklet, "o", out_node, None, dace.Memlet("out[0]"))
+
+        csdfg = sdfg.compile()
+
+        out = np.zeros(1, dtype=np.float64)
+        csdfg(out=out)
+        assert abs(out[0] - expected) < 1e-14, (
+            f"operator{op_name}: expected {expected}, got {out[0]}"
+        )
+
+
+def test_sdfg_copy():
+    """Copy one mpfr scalar into another and verify the value is preserved."""
+    sdfg = dace.SDFG("mpfr_copy")
+    state = sdfg.add_state()
+
+    sdfg.add_scalar("src", dace.mpfr(128), transient=True)
+    sdfg.add_scalar("dst", dace.mpfr(128), transient=True)
+    sdfg.add_array("out", [1], dace.float64, transient=False)
+
+    src_node = state.add_access("src")
+    dst_node = state.add_access("dst")
+    out_node = state.add_write("out")
+
+    init = state.add_tasklet(
+        "init", {}, {"s"}, "s = 1.0 / 3.0;", language=dace.Language.CPP
+    )
+    copy = state.add_tasklet("copy", {"s"}, {"d"}, "d = s;", language=dace.Language.CPP)
+    conv = state.add_tasklet(
+        "conv", {"d"}, {"o"}, "o = (double)d;", language=dace.Language.CPP
+    )
+
+    state.add_edge(init, "s", src_node, None, dace.Memlet("src"))
+    state.add_edge(src_node, None, copy, "s", dace.Memlet("src"))
+    state.add_edge(copy, "d", dst_node, None, dace.Memlet("dst"))
+    state.add_edge(dst_node, None, conv, "d", dace.Memlet("dst"))
+    state.add_edge(conv, "o", out_node, None, dace.Memlet("out[0]"))
+
+    csdfg = sdfg.compile()
+
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert abs(out[0] - 1.0 / 3.0) < 1e-15, f"Copy changed value: got {out[0]}"
+
+
+_MPFR128 = dace.mpfr(128)
+_MPFR_RULES = {frozenset({dace.float64, _MPFR128}): _MPFR128}
+
+
+@dace.program
+def _prog_double(x: dace.float64[1], y: dace.float64[1]):
+    y[0] = x[0] * 2.0
+
+
+@dace.program
+def _prog_add_one(A: dace.float64[4], B: dace.float64[4]):
+    for i in dace.map[0:4]:
+        B[i] = A[i] + 1.0
+
+
+@dace.program
+def _prog_chain(A: dace.float64[1], tmp: dace.float64[1], B: dace.float64[1]):
+    tmp[0] = A[0] + 0.5
+    B[0] = tmp[0] * 2.0
+
+
+def test_cap_elementwise():
+    """change_and_propagate: float64 scalar doubled via mpfr(128) internally."""
+    sdfg = _prog_double.to_sdfg()
+    change_and_propagate_fp_types(sdfg, {"x": _MPFR128}, _MPFR_RULES)
+
+    # External interface stays float64; internal casted arrays are mpfr(128).
+    assert sdfg.arrays["x"].dtype == dace.float64
+    assert "fp_casted_x_mpfr128" in sdfg.arrays
+    assert sdfg.arrays["fp_casted_x_mpfr128"].dtype == _MPFR128
+
+    csdfg = sdfg.compile()
+    x = np.array([1.5], dtype=np.float64)
+    y = np.zeros(1, dtype=np.float64)
+    csdfg(x=x, y=y)
+    assert abs(y[0] - 3.0) < 1e-15, f"Expected 3.0, got {y[0]}"
+
+
+def test_cap_array_map():
+    """change_and_propagate: float64 array map promoted to mpfr(128)."""
+    sdfg = _prog_add_one.to_sdfg()
+    change_and_propagate_fp_types(sdfg, {"A": _MPFR128}, _MPFR_RULES)
+
+    assert sdfg.arrays["A"].dtype == dace.float64
+    assert sdfg.arrays["fp_casted_A_mpfr128"].dtype == _MPFR128
+
+    csdfg = sdfg.compile()
+    A = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+    B = np.zeros(4, dtype=np.float64)
+    csdfg(A=A, B=B)
+    np.testing.assert_allclose(B, A + 1.0, atol=1e-15)
+
+
+def test_cap_chain_transient():
+    """change_and_propagate: all arrays promoted to mpfr(128); float64 interface preserved."""
+    sdfg = _prog_chain.to_sdfg()
+    change_and_propagate_fp_types(sdfg, {"A": _MPFR128}, _MPFR_RULES)
+
+    # All three non-transients are changed, so each gets a cast wrapper; external type stays float64.
+    for name in ("A", "tmp", "B"):
+        assert sdfg.arrays[name].dtype == dace.float64
+        assert sdfg.arrays[f"fp_casted_{name}_mpfr128"].dtype == _MPFR128
+
+    csdfg = sdfg.compile()
+    A = np.array([2.0], dtype=np.float64)
+    tmp = np.zeros(1, dtype=np.float64)
+    B = np.zeros(1, dtype=np.float64)
+    csdfg(A=A, tmp=tmp, B=B)
+    # (2.0 + 0.5) * 2.0 = 5.0
+    assert abs(B[0] - 5.0) < 1e-15, f"Expected 5.0, got {B[0]}"
+
+
+if __name__ == "__main__":
+    test_sdfg_scalar_compute()
+    test_sdfg_array_sum()
+    test_sdfg_binary_ops()
+    test_sdfg_copy()
+    test_cap_elementwise()
+    test_cap_array_map()
+    test_cap_chain_transient()
+    print("All SDFG tests passed.")

@@ -43,6 +43,7 @@ _COMPILER_ARG_PATHS = (("compiler", "cpu", "args"), ("compiler", "cuda", "args")
 _HEADERS = (
     os.path.join(INCLUDE_DIR, "fp_arena", "float32sr.h"),
     os.path.join(INCLUDE_DIR, "fp_arena", "float64sr.h"),
+    os.path.join(INCLUDE_DIR, "fp_arena", "mpfr.h"),
 )
 
 #: Backends whose global-code section receives the includes (CPU frame + CUDA).
@@ -51,8 +52,8 @@ _BACKENDS = ("frame", "cuda")
 #: Marker so the includes are only injected once per SDFG.
 _GUARD = "// fp_arena extensions enabled"
 
-#: Substring identifying an FP-Arena C type (used to detect SR usage in an SDFG).
-_CTYPE_MARKER = "fp_arena::"
+#: Substrings identifying an FP-Arena C type (fp_arena:: for SR types, dace::mpfr for mpfr).
+_CTYPE_MARKERS = ("fp_arena::", "dace::mpfr")
 
 
 def fp_arena_global_code() -> str:
@@ -145,13 +146,23 @@ def enable_fp_arena_extensions(sdfg: dace.SDFG) -> dace.SDFG:
 def uses_fp_arena_types(sdfg: dace.SDFG) -> bool:
     """
     :param sdfg: the SDFG to inspect.
-    :returns: ``True`` if any data descriptor in ``sdfg`` or its nested SDFGs has
-        an FP-Arena C type (e.g. ``float32sr``), ``False`` otherwise.
+    :returns: ``True`` if any data descriptor or tasklet body in ``sdfg`` or its
+        nested SDFGs references an FP-Arena C type, ``False`` otherwise.
     """
+    from dace.sdfg import nodes as _dnodes
     for nested in sdfg.all_sdfgs_recursive():
         for desc in nested.arrays.values():
-            if _CTYPE_MARKER in (getattr(desc.dtype, "ctype", "") or ""):
+            if any(m in (getattr(desc.dtype, "ctype", "") or "") for m in _CTYPE_MARKERS):
                 return True
+        for state in nested.states():
+            for node in state.nodes():
+                if isinstance(node, _dnodes.Tasklet):
+                    try:
+                        code_str = node.code.as_string
+                    except AttributeError:
+                        code_str = str(node.code)
+                    if any(m in code_str for m in _CTYPE_MARKERS):
+                        return True
     return False
 
 
