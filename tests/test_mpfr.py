@@ -223,6 +223,93 @@ def test_cap_chain_transient():
     assert abs(B[0] - 5.0) < 1e-15, f"Expected 5.0, got {B[0]}"
 
 
+# ── exponent-bits tests ──────────────────────────────────────────────────────
+#
+# All tests use 5 exponent bits, giving:
+#   emax = 2^(5-1) - 1 = 15
+#   emin = 1 - 15     = -14
+#
+# MPFR exponent convention: x = m * 2^e with 1/2 <= |m| < 1.
+#   16384 = 2^14 = 0.5 * 2^15  →  MPFR exponent 15  (= emax, largest normal)
+#   32768 = 2^15 = 0.5 * 2^16  →  MPFR exponent 16  (> emax → overflow → +inf)
+#
+# Minimum subnormal exponent: emin - (precision - 1) = -14 - 127 = -141.
+# Starting from 1.0 and dividing by 2 n times gives MPFR exponent -(n-1);
+# at n=143 the exponent reaches -142 < -141 and the value flushes to 0.
+
+
+def _make_exp_bits_sdfg(name: str, body: str) -> dace.SDFG:
+    """Build a single-tasklet SDFG that writes one double output."""
+    sdfg = dace.SDFG(name)
+    state = sdfg.add_state()
+    sdfg.add_array("out", [1], dace.float64)
+    out_node = state.add_write("out")
+    tasklet = state.add_tasklet("op", {}, {"o"}, body, language=dace.Language.CPP)
+    state.add_edge(tasklet, "o", out_node, None, dace.Memlet("out[0]"))
+    return sdfg
+
+
+def test_exponent_bits_value_in_range():
+    """With emax=15, 1.0 + 1.0 = 2.0 is within range and unchanged."""
+    sdfg = _make_exp_bits_sdfg(
+        "mpfr_exp_in_range",
+        "dace::set_mpfr_exponent_bits(5);\n"
+        "dace::mpfr<128> a(1.0), b(1.0);\n"
+        "o = (double)(a + b);",
+    )
+    csdfg = sdfg.compile()
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert abs(out[0] - 2.0) < 1e-15, f"Expected 2.0, got {out[0]}"
+
+
+def test_exponent_bits_overflow_construction():
+    """With emax=15, constructing 32768.0 (MPFR exponent 16) gives +inf."""
+    sdfg = _make_exp_bits_sdfg(
+        "mpfr_exp_overflow_ctor",
+        "dace::set_mpfr_exponent_bits(5);\n"
+        "dace::mpfr<128> a(32768.0);\n"  # 2^15, MPFR exp 16 > emax=15
+        "o = (double)a;",
+    )
+    csdfg = sdfg.compile()
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert np.isposinf(out[0]), f"Expected +inf, got {out[0]}"
+
+
+def test_exponent_bits_overflow_arithmetic():
+    """With emax=15, 16384.0 * 2.0 = 32768.0 (MPFR exponent 16) gives +inf."""
+    sdfg = _make_exp_bits_sdfg(
+        "mpfr_exp_overflow_arith",
+        "dace::set_mpfr_exponent_bits(5);\n"
+        "dace::mpfr<128> a(16384.0), b(2.0);\n"  # result exp 16 > emax=15
+        "o = (double)(a * b);",
+    )
+    csdfg = sdfg.compile()
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert np.isposinf(out[0]), f"Expected +inf, got {out[0]}"
+
+
+def test_exponent_bits_underflow_to_zero():
+    """With emin=-14 and precision=128, values below the min subnormal flush to 0.
+
+    Dividing 1.0 by 2 repeatedly: after n steps the MPFR exponent is -(n-1).
+    At n=143 the exponent is -142 < emin-(precision-1)=-141, so it rounds to 0.
+    """
+    sdfg = _make_exp_bits_sdfg(
+        "mpfr_exp_underflow",
+        "dace::set_mpfr_exponent_bits(5);\n"
+        "dace::mpfr<128> a(1.0), two(2.0);\n"
+        "for (int i = 0; i < 200; ++i) a /= two;\n"
+        "o = (double)a;",
+    )
+    csdfg = sdfg.compile()
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert out[0] == 0.0, f"Expected 0.0, got {out[0]}"
+
+
 if __name__ == "__main__":
     test_sdfg_scalar_compute()
     test_sdfg_array_sum()
@@ -231,4 +318,8 @@ if __name__ == "__main__":
     test_cap_elementwise()
     test_cap_array_map()
     test_cap_chain_transient()
+    test_exponent_bits_value_in_range()
+    test_exponent_bits_overflow_construction()
+    test_exponent_bits_overflow_arithmetic()
+    test_exponent_bits_underflow_to_zero()
     print("All SDFG tests passed.")
