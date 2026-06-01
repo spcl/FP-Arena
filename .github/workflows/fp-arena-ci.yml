@@ -42,7 +42,7 @@ jobs:
         sudo apt-get update
         # gcc/g++ (C++20) + cmake/ninja drive DaCe's CPU codegen build; the
         # generated maps use OpenMP (libgomp).
-        sudo apt-get install -y cmake ninja-build gcc g++ libgomp1
+        sudo apt-get install -y cmake ninja-build gcc g++ libgomp1 libmpfr-dev
 
     - name: Install DaCe (yakup/dev) and FP-Arena
       run: |
