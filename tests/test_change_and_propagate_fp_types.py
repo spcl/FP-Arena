@@ -79,6 +79,9 @@ def test_transient_intermediate_propagates():
     assert sdfg.arrays["fp_casted_A_float16"].dtype == dace.float16
     assert sdfg.arrays["fp_casted_C_float16"].dtype == dace.float16
 
+    sdfg.validate()
+    sdfg.compile()
+
 
 def test_all_nontransient_interface_preserved():
     """All non-transient: all arrays get cast wrappers, none change dtype externally."""
@@ -112,6 +115,9 @@ def test_all_nontransient_interface_preserved():
     assert "fp_casted_A_float16" in sdfg.arrays
     assert "fp_casted_C_float16" in sdfg.arrays
 
+    sdfg.validate()
+    sdfg.compile()
+
 
 def test_mixed_precision_promotes():
     """When a f16 and f32 array feed the same tasklet, the output is f32"""
@@ -131,6 +137,9 @@ def test_mixed_precision_promotes():
     # D stays f32, A is demoted to f16; their mix promotes E to f32.
     assert sdfg.arrays["E"].dtype == dace.float32, sdfg.arrays["E"].dtype
 
+    sdfg.validate()
+    sdfg.compile()
+
 
 def test_map_passthrough():
     """Type flows through MapEntry and MapExit connectors."""
@@ -140,7 +149,7 @@ def test_map_passthrough():
 
     s = sdfg.add_state("s")
     me, mx = s.add_map("m", {"i": "0:4"})
-    t = s.add_tasklet("t", {"a"}, {"b"}, "b = a * 2.0", language=dace.Language.CPP)
+    t = s.add_tasklet("t", {"a"}, {"b"}, "b = a * 2.0;", language=dace.Language.CPP)
 
     a_an = s.add_read("A")
     b_an = s.add_write("B")
@@ -157,6 +166,9 @@ def test_map_passthrough():
     change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
 
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
+
+    sdfg.validate()
+    sdfg.compile()
 
 
 def test_reduce_node():
@@ -175,6 +187,9 @@ def test_reduce_node():
 
     assert sdfg.arrays["S"].dtype == dace.float16, sdfg.arrays["S"].dtype
 
+    sdfg.validate()
+    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+
 
 def test_initial_type_pinned():
     """An array listed in initial_types keeps that type even if higher-precision data flows into it."""
@@ -192,6 +207,9 @@ def test_initial_type_pinned():
 
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
 
+    sdfg.validate()
+    sdfg.compile()
+
 
 def test_long_chain_convergence():
     """Fixpoint converges for a longer state chain without hitting the iteration cap."""
@@ -203,6 +221,9 @@ def test_long_chain_convergence():
         assert sdfg.arrays[name].dtype == dace.float16, (
             f"{name}: {sdfg.arrays[name].dtype}"
         )
+
+    sdfg.validate()
+    sdfg.compile()
 
 
 def test_unconnected_array_unchanged():
@@ -230,6 +251,9 @@ def test_unconnected_array_unchanged():
     assert sdfg.arrays["B"].dtype == dace.float16
     assert sdfg.arrays["X"].dtype == dace.float64  # unchanged
 
+    sdfg.validate()
+    sdfg.compile()
+
 
 def test_interface_copy_in_only_for_inputs():
     """Arrays that are only written (output-only) do not get a copy-in state."""
@@ -238,7 +262,7 @@ def test_interface_copy_in_only_for_inputs():
     sdfg.add_array("B", [1], dace.float32, transient=False)
 
     s = sdfg.add_state("s")
-    t = s.add_tasklet("t", {}, {"b"}, "b = 1.0", language=dace.Language.CPP)
+    t = s.add_tasklet("t", {}, {"b"}, "b = 1.0;", language=dace.Language.CPP)
     # B is purely written (no read from outside), A is not used.
     s.add_edge(t, "b", s.add_write("B"), None, dace.Memlet("B[0]"))
 
@@ -256,6 +280,9 @@ def test_interface_copy_in_only_for_inputs():
     assert casted_name not in an_names_in_copy_in, (
         f"Output-only array {casted_name} should not appear in copy_in state"
     )
+
+    sdfg.validate()
+    sdfg.compile()
 
 
 def test_requires_two_fixpoint_passes():
@@ -300,6 +327,9 @@ def test_requires_two_fixpoint_passes():
         f"C should be f32 (requires two passes), got {sdfg.arrays['C'].dtype} — "
         "this failure means the fixpoint loop ran only once"
     )
+
+    sdfg.validate()
+    sdfg.compile()
 
 
 if __name__ == "__main__":
