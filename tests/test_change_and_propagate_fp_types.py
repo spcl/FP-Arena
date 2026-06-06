@@ -332,6 +332,118 @@ def test_requires_two_fixpoint_passes():
     sdfg.compile()
 
 
+def test_three_level_lattice():
+    """With three precision levels, each array takes the widest (join) of its producers."""
+    sdfg = dace.SDFG("three_level")
+    sdfg.add_array("A", [1], dace.float32, transient=False)  # pinned f16
+    sdfg.add_array("B", [1], dace.float32, transient=False)  # source f32
+    sdfg.add_array("C", [1], dace.float64, transient=False)  # source f64
+    sdfg.add_array("AB", [1], dace.float32, transient=True)  # join(f16, f32) = f32
+    sdfg.add_array("AC", [1], dace.float32, transient=True)  # join(f16, f64) = f64
+    sdfg.add_array("ABC", [1], dace.float32, transient=True)  # join(f32, f64) = f64
+
+    s = sdfg.add_state("s")
+    ab = s.add_access("AB")
+
+    t1 = s.add_tasklet("t1", {"a", "b"}, {"o"}, "o = a + b")
+    s.add_edge(s.add_read("A"), None, t1, "a", dace.Memlet("A[0]"))
+    s.add_edge(s.add_read("B"), None, t1, "b", dace.Memlet("B[0]"))
+    s.add_edge(t1, "o", ab, None, dace.Memlet("AB[0]"))
+
+    t2 = s.add_tasklet("t2", {"a", "c"}, {"o"}, "o = a + c")
+    s.add_edge(s.add_read("A"), None, t2, "a", dace.Memlet("A[0]"))
+    s.add_edge(s.add_read("C"), None, t2, "c", dace.Memlet("C[0]"))
+    s.add_edge(t2, "o", s.add_write("AC"), None, dace.Memlet("AC[0]"))
+
+    t3 = s.add_tasklet("t3", {"ab", "c"}, {"o"}, "o = ab + c")
+    s.add_edge(ab, None, t3, "ab", dace.Memlet("AB[0]"))
+    s.add_edge(s.add_read("C"), None, t3, "c", dace.Memlet("C[0]"))
+    s.add_edge(t3, "o", s.add_write("ABC"), None, dace.Memlet("ABC[0]"))
+
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+
+    assert sdfg.arrays["AB"].dtype == dace.float32, sdfg.arrays["AB"].dtype
+    assert sdfg.arrays["AC"].dtype == dace.float64, sdfg.arrays["AC"].dtype
+    assert sdfg.arrays["ABC"].dtype == dace.float64, sdfg.arrays["ABC"].dtype
+
+    sdfg.validate()
+    sdfg.compile()
+
+
+def test_cyclic_dependency_terminates():
+    """A dependency cycle that no seed reaches keeps original precision and terminates."""
+    sdfg = dace.SDFG("cycle")
+    sdfg.add_array("P", [1], dace.float64, transient=True)
+    sdfg.add_array("Q", [1], dace.float64, transient=True)
+
+    s1 = sdfg.add_state("s1")
+    s2 = sdfg.add_state("s2")
+    sdfg.add_edge(s1, s2, dace.InterstateEdge())
+
+    t1 = s1.add_tasklet("t1", {"q"}, {"p"}, "p = q")
+    s1.add_edge(s1.add_read("Q"), None, t1, "q", dace.Memlet("Q[0]"))
+    s1.add_edge(t1, "p", s1.add_write("P"), None, dace.Memlet("P[0]"))
+
+    t2 = s2.add_tasklet("t2", {"p"}, {"q"}, "q = p")
+    s2.add_edge(s2.add_read("P"), None, t2, "p", dace.Memlet("P[0]"))
+    s2.add_edge(t2, "q", s2.add_write("Q"), None, dace.Memlet("Q[0]"))
+
+    change_and_propagate_fp_types(sdfg, {}, RULES)
+
+    assert sdfg.arrays["P"].dtype == dace.float64, sdfg.arrays["P"].dtype
+    assert sdfg.arrays["Q"].dtype == dace.float64, sdfg.arrays["Q"].dtype
+
+    sdfg.save("test_sdfg")
+
+    sdfg.validate()
+    sdfg.compile()
+
+
+def test_end_to_end_float32_runs():
+    """Full pipeline: transform (f64->f32), compile, run, and check numerics."""
+    import numpy as np
+
+    n = 8
+    sdfg = dace.SDFG("e2e_f32")
+    sdfg.add_array("A", [n], dace.float64, transient=False)
+    sdfg.add_array("B", [n], dace.float64, transient=True)
+    sdfg.add_array("C", [n], dace.float64, transient=False)
+
+    s1 = sdfg.add_state("s1")
+    s2 = sdfg.add_state("s2")
+    sdfg.add_edge(s1, s2, dace.InterstateEdge())
+
+    for st, src, dst in [(s1, "A", "B"), (s2, "B", "C")]:
+        me, mx = st.add_map("m", {"i": f"0:{n}"})
+        t = st.add_tasklet(
+            "t", {"x"}, {"y"}, "y = x * 2.0;", language=dace.Language.CPP
+        )
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        mx.add_in_connector(f"IN_{dst}")
+        mx.add_out_connector(f"OUT_{dst}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+        st.add_edge(me, f"OUT_{src}", t, "x", dace.Memlet(f"{src}[i]"))
+        st.add_edge(t, "y", mx, f"IN_{dst}", dace.Memlet(f"{dst}[i]"))
+        st.add_edge(
+            mx, f"OUT_{dst}", st.add_write(dst), None, dace.Memlet(f"{dst}[0:{n}]")
+        )
+
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32}, RULES)
+    sdfg.validate()
+
+    assert sdfg.arrays["B"].dtype == dace.float32, sdfg.arrays["B"].dtype
+    assert sdfg.arrays["A"].dtype == dace.float64
+    assert sdfg.arrays["C"].dtype == dace.float64
+
+    A = np.arange(n, dtype=np.float64)
+    C = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, C=C)
+    np.testing.assert_allclose(C, A * 4.0)
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -343,4 +455,7 @@ if __name__ == "__main__":
     test_unconnected_array_unchanged()
     test_interface_copy_in_only_for_inputs()
     test_requires_two_fixpoint_passes()
+    test_three_level_lattice()
+    test_cyclic_dependency_terminates()
+    test_end_to_end_float32_runs()
     print("All tests passed.")

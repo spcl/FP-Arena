@@ -1,11 +1,10 @@
+from collections import defaultdict, deque
 from functools import reduce
-from typing import Dict, FrozenSet, Optional, Set
+from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 import dace
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
-
-_MAX_FIXPOINT_ITERS = 10
 
 
 # Returns the promoted type of *t1* and *t2* according to *rules*.
@@ -26,12 +25,14 @@ def _promote(
     return rules[key]
 
 
-# Returns the inferred type for the source of *edge*, or None if it cannot be determined.
-def _edge_src_type(node_types: dict, edge) -> Optional[dace.dtypes.typeclass]:
-    src = node_types.get(edge.src)
-    if isinstance(src, dict):
-        return src.get(edge.src_conn)
-    return src
+# None-safe equality for optional typeclasses (``dace.typeclass != None`` is unreliable).
+def _types_equal(
+    a: Optional[dace.dtypes.typeclass],
+    b: Optional[dace.dtypes.typeclass],
+) -> bool:
+    if a is None or b is None:
+        return a is b
+    return bool(a == b)
 
 
 # Returns states using topological_sort, visiting nested regions recursively
@@ -43,132 +44,177 @@ def _states_in_order(cfg: AbstractControlFlowRegion):
             yield from _states_in_order(block)
 
 
-# Runs one pass of type inference and promotion
-def _propagate_state(
-    state: SDFGState,
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
+# Builds the array-level dataflow graph of the SDFG.
+#
+# Returns:
+#   producers: array -> set of arrays that feed any computation writing it
+#   consumers: the reverse map (array -> arrays it feeds into)
+def _build_dataflow(
+    sdfg: dace.SDFG,
+) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+    producers: Dict[str, Set[str]] = defaultdict(set)
+    consumers: Dict[str, Set[str]] = defaultdict(set)
+
+    for state in _states_in_order(sdfg):
+        for node in state.nodes():
+            if isinstance(node, nodes.NestedSDFG):
+                raise NotImplementedError(
+                    "Type propagation does not currently support NestedSDFG nodes. "
+                    f"Found '{node.label}' in state '{state.label}'."
+                )
+
+            if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
+                ins = {
+                    e.data.data
+                    for e in state.in_edges(node)
+                    if e.data is not None and e.data.data is not None
+                }
+                outs = {
+                    e.data.data
+                    for e in state.out_edges(node)
+                    if e.data is not None and e.data.data is not None
+                }
+                for out in outs:
+                    producers[out].update(ins)
+                    for inp in ins:
+                        consumers[inp].add(out)
+
+        # Direct AccessNode -> AccessNode copies.
+        for e in state.edges():
+            if e.data is None or e.data.data is None:
+                continue
+            if isinstance(e.src, nodes.AccessNode) and isinstance(
+                e.dst, nodes.AccessNode
+            ):
+                producers[e.dst.data].add(e.src.data)
+                consumers[e.src.data].add(e.dst.data)
+
+    return producers, consumers
+
+
+# Computes a fixed-point precision for every array.
+#
+# Each array's type is the join (widest, via *rules*) of its producers' types:
+#   - pinned arrays (in *initial_types*) are constants and never recomputed;
+#   - source arrays (no producers) are constants at their original dtype;
+#   - derived arrays start at None (bottom) and only ever widen, so demotion
+#     propagates correctly and the monotone worklist always terminates.
+# Returns name -> dtype, where None means "leave the array's dtype unchanged".
+def _infer_types(
+    sdfg: dace.SDFG,
+    producers: Dict[str, Set[str]],
+    consumers: Dict[str, Set[str]],
     initial_types: Dict[str, dace.dtypes.typeclass],
+    original_types: Dict[str, dace.dtypes.typeclass],
     supported: Set[dace.dtypes.typeclass],
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
-    original_types: Dict[str, dace.dtypes.typeclass],
-) -> Dict:
+) -> Dict[str, Optional[dace.dtypes.typeclass]]:
 
-    node_types: Dict = {}
-
-    for node in sdfg_utils.dfs_topological_sort(state, state.source_nodes()):
-        if isinstance(node, nodes.AccessNode):
-            if node.data in initial_types:
-                # User defined type: never changed by propagation.
-                node_types[node] = initial_types[node.data]
-
-            elif state.in_degree(node) == 0:
-                # Source node: use inferred type, fall back to original if it is a supported fp type.
-                t = inferred[node.data]
-                if t is None:
-                    t = original_types[node.data]
-                node_types[node] = t
-
-            else:
-                # Destination node: collect all incoming supported fp types and promote them.
-                incoming = [
-                    t
-                    for e in state.in_edges(node)
-                    if (t := _edge_src_type(node_types, e)) in supported
-                ]
-                if not incoming:
-                    node_types[node] = inferred[node.data]
-                else:
-                    new_type = reduce(lambda a, b: _promote(a, b, rules), incoming)
-                    old = inferred[node.data]
-                    merged = _promote(
-                        old if (old is not None and old in supported) else None,
-                        new_type,
-                        rules,
-                    )
-                    inferred[node.data] = merged
-                    node_types[node] = inferred[node.data]
-
-        # TODO: This assumes all inputs are used for type inference. There are probalby some cases where this is not true. But this would probably need analysis of the tasklet code.
-        elif isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-            in_types = [
-                t
-                for e in state.in_edges(node)
-                if (t := _edge_src_type(node_types, e)) in supported
-            ]
-            promoted = (
-                reduce(lambda a, b: _promote(a, b, rules), in_types)
-                if in_types
-                else None
-            )
-
-            out: Dict[str, Optional[dace.dtypes.typeclass]] = {}
-            for e in state.out_edges(node):
-                if promoted is None:
-                    out[e.src_conn] = None
-                    continue
-                dst_name = e.data.data if e.data else None
-                if dst_name:
-                    dst_type = inferred.get(dst_name) or original_types.get(dst_name)
-                    out[e.src_conn] = promoted if dst_type in supported else None
-                else:
-                    out[e.src_conn] = None
-            node_types[node] = out
-
-        elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
-            # TODO: Assumes that the MapEntry/Exit connectors follow the IN_/OUT_ convention. Is this safe to assume?
-            out = {}
-            for e in state.in_edges(node):
-                if e.dst_conn and e.dst_conn.startswith("IN_"):
-                    out_conn = "OUT_" + e.dst_conn[3:]
-                    out[out_conn] = _edge_src_type(node_types, e)
-            node_types[node] = out
-
-        elif isinstance(node, nodes.NestedSDFG):
-            raise NotImplementedError(
-                "Type propagation does not currently support NestedSDFG nodes. "
-                f"Found '{node.label}' in state '{state.label}'."
-            )
-
+    inferred: Dict[str, Optional[dace.dtypes.typeclass]] = {}
+    for name in sdfg.arrays:
+        if name in initial_types:
+            inferred[name] = initial_types[name]  # pin: constant
+        elif not producers.get(name):
+            inferred[name] = original_types[name]  # source: constant at original
         else:
-            raise NotImplementedError(
-                f"Unsupported node type {type(node).__name__} in state '{state.label}'"
-            )
+            inferred[name] = None  # derived: bottom, widened below
 
-    return node_types
+    worklist = deque(
+        name
+        for name in sdfg.arrays
+        if name not in initial_types and producers.get(name)
+    )
+    queued = set(worklist)
+    while worklist:
+        name = worklist.popleft()
+        queued.discard(name)
 
+        new: Optional[dace.dtypes.typeclass] = None
+        for prod in producers[name]:
+            t = inferred.get(prod)
+            if t is None or t not in supported:
+                continue
+            new = _promote(new, t, rules)
 
-# Write inferred connector types back onto nodes.
-def _apply_connector_types(
-    global_node_types: Dict[SDFGState, Dict],
-    supported: Set[dace.dtypes.typeclass],
-) -> None:
-    for state, node_types in global_node_types.items():
-        for node, types in node_types.items():
-            if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-                if not isinstance(types, dict):
+        if not _types_equal(new, inferred[name]):
+            inferred[name] = new
+            for cons in consumers.get(name, ()):
+                if cons in initial_types or cons in queued or not producers.get(cons):
                     continue
-                for conn, t in types.items():
-                    if conn is not None and t in supported:
-                        node.out_connectors[conn] = t
+                worklist.append(cons)
+                queued.add(cons)
+
+    return inferred
+
+
+# Prints a report of each array's original and final (inferred) precision
+def _print_type_report(
+    original_types: Dict[str, dace.dtypes.typeclass],
+    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
+) -> None:
+    name_w = max((len(n) for n in original_types), default=0)
+    name_w = max(name_w, len("array"))
+    lines = [
+        "change_and_propagate_fp_types: precision report",
+        f"  {'array':<{name_w}}  {'original':<9}  {'final':<9}",
+    ]
+    for name in sorted(original_types):
+        orig = original_types[name]
+        final = inferred.get(name)
+        if final is None:
+            final = orig
+        marker = "" if _types_equal(final, orig) else "  (changed)"
+        lines.append(
+            f"  {name:<{name_w}}  {orig.to_string():<9}  {final.to_string():<9}{marker}"
+        )
+    print("\n".join(lines))
+
+
+# Writes inferred types onto tasklet/map/library-node connectors.
+def _apply_connector_types(
+    sdfg: dace.SDFG,
+    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
+    supported: Set[dace.dtypes.typeclass],
+    rules: Dict[FrozenSet, dace.dtypes.typeclass],
+) -> None:
+    for state in _states_in_order(sdfg):
+        for node in state.nodes():
+            if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
+                in_types = []
                 for e in state.in_edges(node):
-                    src_t = node_types.get(e.src)
-                    if isinstance(src_t, dict):
-                        src_t = src_t.get(e.src_conn)
-                    if src_t in supported and e.dst_conn is not None:
-                        node.in_connectors[e.dst_conn] = src_t
+                    if e.dst_conn is None or e.data is None or e.data.data is None:
+                        continue
+                    t = inferred.get(e.data.data)
+                    if t in supported:
+                        node.in_connectors[e.dst_conn] = t
+                        in_types.append(t)
+
+                if not in_types:
+                    continue
+                compute = reduce(lambda a, b: _promote(a, b, rules), in_types)
+                if compute not in supported:
+                    continue
+                for e in state.out_edges(node):
+                    if e.src_conn is None or e.data is None or e.data.data is None:
+                        continue
+                    if inferred.get(e.data.data) in supported:
+                        node.out_connectors[e.src_conn] = compute
 
             elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
-                if not isinstance(types, dict):
-                    continue
-                for conn, t in types.items():
+                # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
+                for e in state.in_edges(node):
+                    if not (e.dst_conn and e.dst_conn.startswith("IN_")):
+                        continue
+                    if e.data is None or e.data.data is None:
+                        continue
+                    t = inferred.get(e.data.data)
                     if t not in supported:
                         continue
-                    if conn in node.out_connectors:
-                        node.out_connectors[conn] = t
-                    # Keep in_connectors in sync (MapEntry has both IN_ and OUT_ for each data conn).
-                    in_conn = "IN_" + conn[4:] if conn.startswith("OUT_") else None
-                    if in_conn and in_conn in node.in_connectors:
-                        node.in_connectors[in_conn] = t
+                    out_conn = "OUT_" + e.dst_conn[3:]
+                    if e.dst_conn in node.in_connectors:
+                        node.in_connectors[e.dst_conn] = t
+                    if out_conn in node.out_connectors:
+                        node.out_connectors[out_conn] = t
 
 
 # Adds a map that copies and casts *src_name* to *dst_name*
@@ -280,45 +326,26 @@ def change_and_propagate_fp_types(
         if not sdfg.arrays[name].transient
     }
 
-    # Initialize the inferred types dict with None, then overwrite with initial_types where given.
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]] = {
-        name: None for name in sdfg.arrays
-    }
-    for name, dtype in initial_types.items():
-        inferred[name] = dtype
+    # Build the array-level dataflow graph and solve the precision fixed point.
+    producers, consumers = _build_dataflow(sdfg)
+    inferred = _infer_types(
+        sdfg,
+        producers,
+        consumers,
+        initial_types,
+        original_types,
+        supported,
+        promotion_rules,
+    )
 
-    # Iteratively propagate types until convergence or max iterations reached.
-    global_node_types: Dict[SDFGState, Dict] = {}
-    for iteration in range(_MAX_FIXPOINT_ITERS):
-        changed = False
-        global_node_types.clear()
-
-        # Need to snapshot inferred types at the start of each iteration to detect convergence
-        snapshot = dict(inferred)
-        for state in _states_in_order(sdfg):
-            global_node_types[state] = _propagate_state(
-                state,
-                inferred,
-                initial_types,
-                supported,
-                promotion_rules,
-                original_types,
-            )
-        changed = inferred != snapshot
-
-        if not changed:
-            break
-    else:
-        raise RuntimeError(
-            f"Type propagation did not converge after {_MAX_FIXPOINT_ITERS} iterations."
-        )
+    _print_type_report(original_types, inferred)
 
     # Apply inferred dtypes to SDFG arrays.
     for name, dtype in inferred.items():
         if dtype is not None and sdfg.arrays[name].dtype != dtype:
             sdfg.arrays[name].dtype = dtype
 
-    _apply_connector_types(global_node_types, supported)
+    _apply_connector_types(sdfg, inferred, supported, promotion_rules)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {
