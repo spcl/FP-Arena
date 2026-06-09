@@ -273,12 +273,11 @@ def test_interface_copy_in_only_for_inputs():
     casted_name = "fp_casted_B_float16"
     assert casted_name in sdfg.arrays
 
-    # The copy_in state should exist but should NOT contain a copy for B
+    # B is output-only and A is unused, so nothing needs casting on the way in:
+    # the copy_in state is created lazily and should not exist at all here.
     copy_in = next((st for st in sdfg.states() if st.label == "copy_in"), None)
-    assert copy_in is not None
-    an_names_in_copy_in = {n.data for n in copy_in.nodes() if hasattr(n, "data")}
-    assert casted_name not in an_names_in_copy_in, (
-        f"Output-only array {casted_name} should not appear in copy_in state"
+    assert copy_in is None, (
+        "Output-only arrays should not produce a copy_in state"
     )
 
     sdfg.validate()
