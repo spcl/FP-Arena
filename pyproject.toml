@@ -26,6 +26,7 @@ keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision"
 # that DaCe is importable; see the README.
 dependencies = [
     "dace @ git+https://github.com/spcl/dace.git@yakup/dev",
+    "scipy",
 ]
 
 [project.optional-dependencies]
