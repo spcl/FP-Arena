@@ -325,10 +325,13 @@ def _add_copy_map(
 
 
 # Main entry point to change and propagate fp types through an SDFG.
+# When *instrument* is set, the generated copy_in/copy_out cast states are tagged
+# with DaCe's Timer instrumentation so the runner can separate cast time from compute time.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
     initial_types: Dict[str, dace.dtypes.typeclass],
     promotion_rules: Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass],
+    instrument: bool = False,
 ) -> None:
 
     original_types: Dict[str, dace.dtypes.typeclass] = {
@@ -400,6 +403,8 @@ def change_and_propagate_fp_types(
                     copy_out_state = sdfg.add_state_after(
                         state=sink, label=f"copy_out_{sink.label}"
                     )
+                    if instrument:
+                        copy_out_state.instrument = dace.InstrumentationType.Timer
                 _add_copy_map(
                     copy_out_state,
                     casted_name,
@@ -415,6 +420,8 @@ def change_and_propagate_fp_types(
                 copy_in_state = sdfg.add_state_before(
                     state=sdfg.start_block, label="copy_in"
                 )
+                if instrument:
+                    copy_in_state.instrument = dace.InstrumentationType.Timer
             _add_copy_map(
                 copy_in_state,
                 orig_name,
