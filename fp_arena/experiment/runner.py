@@ -9,7 +9,6 @@ TODO: Select and perturbation runners
 """
 
 import statistics
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -92,6 +91,65 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
     )
 
 
+def _phase_series(report, name_pred, n: int) -> List[float]:
+    """
+    Per-repetition milliseconds for every Timer whose name matches ``name_pred`` in the given instrumentation report.
+    The last ``n`` samples are returned.
+    """
+    matched: List[List[float]] = []
+    if report is not None:
+        for names in report.durations.values():
+            for name, tid_map in names.items():
+                if not name_pred(name):
+                    continue
+                for times_ms in tid_map.values():
+                    matched.append(times_ms[-n:])
+    if not matched:
+        return []
+    out = [0.0] * n
+    for samples in matched:
+        offset = n - len(samples)
+        for i, ms in enumerate(samples):
+            if offset + i >= 0:
+                out[offset + i] += ms
+    return out
+
+
+def _phase_breakdown(sdfg: dace.SDFG, n_reps: int) -> Dict[str, Any]:
+    """
+    Split the latest instrumentation report into copy_in / copy_out / compute
+    series (milliseconds), where ``compute = total - copy_in - copy_out`` per rep.
+    All series are empty when the report carries no Timer data.
+    """
+    report = sdfg.get_latest_report()
+    total = _phase_series(report, lambda nm: nm.startswith("SDFG "), n_reps)
+    copy_in = _phase_series(report, lambda nm: nm == "State copy_in", n_reps)
+    copy_out = _phase_series(
+        report, lambda nm: nm.startswith("State copy_out_"), n_reps
+    )
+
+    if total:
+        ci = copy_in or [0.0] * n_reps
+        co = copy_out or [0.0] * n_reps
+        compute = [max(0.0, total[i] - ci[i] - co[i]) for i in range(n_reps)]
+    else:
+        compute = []
+
+    def _median(xs: List[float]) -> float:
+        return statistics.median(xs) if xs else 0.0
+
+    return {
+        "total_times": total,
+        "copy_in_times": copy_in,
+        "copy_out_times": copy_out,
+        "compute_times": compute,
+        "total_median": _median(total),
+        "copy_in_median": _median(copy_in),
+        "copy_out_median": _median(copy_out),
+        "compute_median": _median(compute),
+    }
+
+
 Reference = Tuple[Any, dace.SDFG]
 
 
@@ -153,35 +211,38 @@ def run_performance(
 ) -> List[PerfResult]:
     """Time each precision point, optionally appending to ``store``."""
     results: List[PerfResult] = []
-    for pin_map in cfg.precisions:
-        sdfg = fresh_sdfg(cfg.experiment)
-        apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
-        apply_target(sdfg, cfg.experiment.target)
-        csdfg = sdfg.compile()
+    prev_each = dace.Config.get("instrumentation", "report_each_invocation")
+    dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    try:
+        for pin_map in cfg.precisions:
+            sdfg = fresh_sdfg(cfg.experiment)
+            apply_precision(
+                sdfg, pin_map, cfg.experiment.promotion_rules, instrument=True
+            )
+            apply_target(sdfg, cfg.experiment.target)
+            sdfg.instrument = dace.InstrumentationType.Timer
+            csdfg = sdfg.compile()
+            sdfg.clear_instrumentation_reports()
 
-        rng = _sample_rngs(cfg.experiment.seed, 1)[0]
-        args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
-        for _ in range(cfg.n_warmup):
-            csdfg(**_copy_args(args))
+            rng = _sample_rngs(cfg.experiment.seed, 1)[0]
+            args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
+            for _ in range(cfg.n_warmup):
+                csdfg(**_copy_args(args))
+            for _ in range(cfg.n_reps):
+                csdfg(**_copy_args(args))
 
-        times: List[float] = []
-        for _ in range(cfg.n_reps):
-            run_args = _copy_args(args)
-            t0 = time.perf_counter()
-            csdfg(**run_args)
-            times.append(time.perf_counter() - t0)
+            csdfg.finalize()
 
-        result = PerfResult(
-            precision=dict(pin_map),
-            times=times,
-            time_median=statistics.median(times),
-            time_std=statistics.pstdev(times) if len(times) > 1 else 0.0,
-            time_min=min(times),
-            seed=cfg.experiment.seed,
-        )
-        results.append(result)
-        if store is not None:
-            store.add_perf(cfg.experiment.name, result)
+            result = PerfResult(
+                precision=dict(pin_map),
+                seed=cfg.experiment.seed,
+                **_phase_breakdown(sdfg, cfg.n_reps),
+            )
+            results.append(result)
+            if store is not None:
+                store.add_perf(cfg.experiment.name, result)
+    finally:
+        dace.Config.set("instrumentation", "report_each_invocation", value=prev_each)
     return results
 
 

@@ -104,8 +104,37 @@ def test_performance_runs():
         ),
     )
     assert len(perfs) == 1
-    assert len(perfs[0].times) == 2
-    assert perfs[0].time_min > 0
+    assert len(perfs[0].total_times) == 2
+    assert perfs[0].total_median > 0
+
+
+def test_performance_phase_breakdown():
+    perfs = run_performance(
+        PerformanceAnalysisConfig(
+            _exp(symbols={"N": 1 << 16}),
+            precisions=[{"a": "fp32", "b": "fp32", "c": "fp32"}, {}],
+            n_warmup=1,
+            n_reps=3,
+        ),
+    )
+    cast, baseline = perfs
+
+    assert len(cast.total_times) == 3
+    assert len(cast.copy_in_times) == 3
+    assert len(cast.copy_out_times) == 3
+    assert len(cast.compute_times) == 3
+    assert cast.copy_in_median > 0
+    assert all(t >= 0 for t in cast.compute_times)
+    for i in range(3):
+        expected = (
+            cast.copy_in_times[i] + cast.copy_out_times[i] + cast.compute_times[i]
+        )
+        assert cast.total_times[i] == pytest.approx(expected)
+
+    assert baseline.copy_in_times == []
+    assert baseline.copy_out_times == []
+    assert baseline.compute_times == baseline.total_times
+    assert baseline.total_median > 0
 
 
 def test_noise_perturbs_inputs():
