@@ -92,38 +92,65 @@ def _build_dataflow(
     return producers, consumers
 
 
+# Arrays reachable in the producer graph from any *seed*, following the producer -> consumer direction.
+def _reachable_from(
+    seeds: Set[str],
+    consumers: Dict[str, Set[str]],
+) -> Set[str]:
+    reached = set(seeds)
+    stack = list(seeds)
+    while stack:
+        cur = stack.pop()
+        for nxt in consumers.get(cur, ()):
+            if nxt not in reached:
+                reached.add(nxt)
+                stack.append(nxt)
+    return reached
+
+
 # Computes a fixed-point precision for every array.
 #
-# Each array's type is the join (widest, via *rules*) of its producers' types:
-#   - pinned arrays (in *initial_types*) are constants and never recomputed;
+# Each array's type is the join (widest, via *rules*) of its producers' types.
+# Arrays are classified once up front:
+#   - pinned arrays (in *initial_types*) are constants;
 #   - source arrays (no producers) are constants at their original dtype;
-#   - derived arrays start at None (bottom) and only ever widen, so demotion
-#     propagates correctly and the monotone worklist always terminates.
-# Returns name -> dtype, where None means "leave the array's dtype unchanged".
+#   - arrays not reachable from any pinned/source seed can never receive a type
+#     from the fixpoint (uninitialized-transient cycles); they keep their
+#     original dtype as constants;
+#   - all remaining (reachable, derived) arrays start at None (bottom) and only
+#     ever widen, so demotion propagates correctly and the monotone worklist
+#     terminates. Every such array is reachable from a seed, so none stays None.
+# Returns name -> dtype for every array.
 def _infer_types(
     sdfg: dace.SDFG,
     producers: Dict[str, Set[str]],
     consumers: Dict[str, Set[str]],
     initial_types: Dict[str, dace.dtypes.typeclass],
     original_types: Dict[str, dace.dtypes.typeclass],
-    supported: Set[dace.dtypes.typeclass],
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
-) -> Dict[str, Optional[dace.dtypes.typeclass]]:
+) -> Dict[str, dace.dtypes.typeclass]:
+
+    seeds = {
+        name for name in sdfg.arrays if name in initial_types or not producers.get(name)
+    }
+    reachable = _reachable_from(seeds, consumers)
 
     inferred: Dict[str, Optional[dace.dtypes.typeclass]] = {}
+    pinned: Set[str] = set()
     for name in sdfg.arrays:
         if name in initial_types:
             inferred[name] = initial_types[name]  # pin: constant
+            pinned.add(name)
         elif not producers.get(name):
             inferred[name] = original_types[name]  # source: constant at original
+            pinned.add(name)
+        elif name not in reachable:
+            inferred[name] = original_types[name]  # unreachable cycle: unchanged
+            pinned.add(name)
         else:
-            inferred[name] = None  # derived: bottom, widened below
+            inferred[name] = None  # reachable derived: bottom, widened below
 
-    worklist = deque(
-        name
-        for name in sdfg.arrays
-        if name not in initial_types and producers.get(name)
-    )
+    worklist = deque(name for name in sdfg.arrays if name not in pinned)
     queued = set(worklist)
     while worklist:
         name = worklist.popleft()
@@ -131,15 +158,15 @@ def _infer_types(
 
         new: Optional[dace.dtypes.typeclass] = None
         for prod in producers[name]:
-            t = inferred.get(prod)
-            if t is None or t not in supported:
+            t = inferred[prod]
+            if t is None:
                 continue
             new = _promote(new, t, rules)
 
         if not _types_equal(new, inferred[name]):
             inferred[name] = new
             for cons in consumers.get(name, ()):
-                if cons in initial_types or cons in queued or not producers.get(cons):
+                if cons in pinned or cons in queued:
                     continue
                 worklist.append(cons)
                 queued.add(cons)
@@ -150,7 +177,7 @@ def _infer_types(
 # Prints a report of each array's original and final (inferred) precision
 def _print_type_report(
     original_types: Dict[str, dace.dtypes.typeclass],
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
+    inferred: Dict[str, dace.dtypes.typeclass],
 ) -> None:
     name_w = max((len(n) for n in original_types), default=0)
     name_w = max(name_w, len("array"))
@@ -160,9 +187,7 @@ def _print_type_report(
     ]
     for name in sorted(original_types):
         orig = original_types[name]
-        final = inferred.get(name)
-        if final is None:
-            final = orig
+        final = inferred[name]
         marker = "" if _types_equal(final, orig) else "  (changed)"
         lines.append(
             f"  {name:<{name_w}}  {orig.to_string():<9}  {final.to_string():<9}{marker}"
@@ -173,8 +198,7 @@ def _print_type_report(
 # Writes inferred types onto tasklet/map/library-node connectors.
 def _apply_connector_types(
     sdfg: dace.SDFG,
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
-    supported: Set[dace.dtypes.typeclass],
+    inferred: Dict[str, dace.dtypes.typeclass],
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
 ) -> None:
     for state in _states_in_order(sdfg):
@@ -184,21 +208,17 @@ def _apply_connector_types(
                 for e in state.in_edges(node):
                     if e.dst_conn is None or e.data is None or e.data.data is None:
                         continue
-                    t = inferred.get(e.data.data)
-                    if t in supported:
-                        node.in_connectors[e.dst_conn] = t
-                        in_types.append(t)
+                    t = inferred[e.data.data]
+                    node.in_connectors[e.dst_conn] = t
+                    in_types.append(t)
 
                 if not in_types:
                     continue
                 compute = reduce(lambda a, b: _promote(a, b, rules), in_types)
-                if compute not in supported:
-                    continue
                 for e in state.out_edges(node):
                     if e.src_conn is None or e.data is None or e.data.data is None:
                         continue
-                    if inferred.get(e.data.data) in supported:
-                        node.out_connectors[e.src_conn] = compute
+                    node.out_connectors[e.src_conn] = compute
 
             elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
                 # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
@@ -207,9 +227,7 @@ def _apply_connector_types(
                         continue
                     if e.data is None or e.data.data is None:
                         continue
-                    t = inferred.get(e.data.data)
-                    if t not in supported:
-                        continue
+                    t = inferred[e.data.data]
                     out_conn = "OUT_" + e.dst_conn[3:]
                     if e.dst_conn in node.in_connectors:
                         node.in_connectors[e.dst_conn] = t
@@ -307,15 +325,14 @@ def _add_copy_map(
 
 
 # Main entry point to change and propagate fp types through an SDFG.
+# When *instrument* is set, the generated copy_in/copy_out cast states are tagged
+# with DaCe's Timer instrumentation so the runner can separate cast time from compute time.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
     initial_types: Dict[str, dace.dtypes.typeclass],
     promotion_rules: Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass],
+    instrument: bool = False,
 ) -> None:
-
-    supported: Set[dace.dtypes.typeclass] = set()
-    for pair in promotion_rules:
-        supported.update(pair)
 
     original_types: Dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items()
@@ -334,7 +351,6 @@ def change_and_propagate_fp_types(
         consumers,
         initial_types,
         original_types,
-        supported,
         promotion_rules,
     )
 
@@ -342,10 +358,10 @@ def change_and_propagate_fp_types(
 
     # Apply inferred dtypes to SDFG arrays.
     for name, dtype in inferred.items():
-        if dtype is not None and sdfg.arrays[name].dtype != dtype:
+        if sdfg.arrays[name].dtype != dtype:
             sdfg.arrays[name].dtype = dtype
 
-    _apply_connector_types(sdfg, inferred, supported, promotion_rules)
+    _apply_connector_types(sdfg, inferred, promotion_rules)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {
@@ -378,15 +394,17 @@ def change_and_propagate_fp_types(
 
         sdfg.add_datadesc(name=orig_name, datadesc=orig_desc)
 
-    copy_in_state = sdfg.add_state_before(state=sdfg.start_block, label="copy_in")
-
     # TODO: This is currently inefficient, copies all changed inputs for each sink state.
     for sink in sdfg.sink_nodes():
-        copy_out_state = sdfg.add_state_after(
-            state=sink, label=f"copy_out_{sink.label}"
-        )
+        copy_out_state = None
         for orig_name, casted_name in repl_dict.items():
             if orig_name in sdfg_outputs:
+                if copy_out_state is None:
+                    copy_out_state = sdfg.add_state_after(
+                        state=sink, label=f"copy_out_{sink.label}"
+                    )
+                    if instrument:
+                        copy_out_state.instrument = dace.InstrumentationType.Timer
                 _add_copy_map(
                     copy_out_state,
                     casted_name,
@@ -395,8 +413,15 @@ def change_and_propagate_fp_types(
                     orig_descs[orig_name],
                 )
 
+    copy_in_state = None
     for orig_name, casted_name in repl_dict.items():
         if orig_name in sdfg_inputs:
+            if copy_in_state is None:
+                copy_in_state = sdfg.add_state_before(
+                    state=sdfg.start_block, label="copy_in"
+                )
+                if instrument:
+                    copy_in_state.instrument = dace.InstrumentationType.Timer
             _add_copy_map(
                 copy_in_state,
                 orig_name,
