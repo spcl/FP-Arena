@@ -106,11 +106,11 @@ def _infer_types(
     consumers: Dict[str, Set[str]],
     initial_types: Dict[str, dace.dtypes.typeclass],
     original_types: Dict[str, dace.dtypes.typeclass],
-    supported: Set[dace.dtypes.typeclass],
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
-) -> Dict[str, Optional[dace.dtypes.typeclass]]:
+) -> Dict[str, dace.dtypes.typeclass]:
 
     inferred: Dict[str, Optional[dace.dtypes.typeclass]] = {}
+    pinned: Set[str] = set(initial_types)
     for name in sdfg.arrays:
         if name in initial_types:
             inferred[name] = initial_types[name]  # pin: constant
@@ -125,24 +125,41 @@ def _infer_types(
         if name not in initial_types and producers.get(name)
     )
     queued = set(worklist)
-    while worklist:
-        name = worklist.popleft()
-        queued.discard(name)
 
-        new: Optional[dace.dtypes.typeclass] = None
-        for prod in producers[name]:
-            t = inferred.get(prod)
-            if t is None or t not in supported:
-                continue
-            new = _promote(new, t, rules)
+    def _run_worklist() -> None:
+        while worklist:
+            name = worklist.popleft()
+            queued.discard(name)
 
-        if not _types_equal(new, inferred[name]):
-            inferred[name] = new
+            new: Optional[dace.dtypes.typeclass] = None
+            for prod in producers[name]:
+                t = inferred.get(prod)
+                if t is None:
+                    continue
+                new = _promote(new, t, rules)
+
+            if not _types_equal(new, inferred[name]):
+                inferred[name] = new
+                for cons in consumers.get(name, ()):
+                    if cons in pinned or cons in queued or not producers.get(cons):
+                        continue
+                    worklist.append(cons)
+                    queued.add(cons)
+
+    _run_worklist()
+
+    unresolved = [name for name, t in inferred.items() if t is None]
+    if unresolved:
+        for name in unresolved:
+            inferred[name] = original_types[name]
+            pinned.add(name)
+        for name in unresolved:
             for cons in consumers.get(name, ()):
-                if cons in initial_types or cons in queued or not producers.get(cons):
+                if cons in pinned or cons in queued or not producers.get(cons):
                     continue
                 worklist.append(cons)
                 queued.add(cons)
+        _run_worklist()
 
     return inferred
 
@@ -150,7 +167,7 @@ def _infer_types(
 # Prints a report of each array's original and final (inferred) precision
 def _print_type_report(
     original_types: Dict[str, dace.dtypes.typeclass],
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
+    inferred: Dict[str, dace.dtypes.typeclass],
 ) -> None:
     name_w = max((len(n) for n in original_types), default=0)
     name_w = max(name_w, len("array"))
@@ -160,9 +177,7 @@ def _print_type_report(
     ]
     for name in sorted(original_types):
         orig = original_types[name]
-        final = inferred.get(name)
-        if final is None:
-            final = orig
+        final = inferred[name]
         marker = "" if _types_equal(final, orig) else "  (changed)"
         lines.append(
             f"  {name:<{name_w}}  {orig.to_string():<9}  {final.to_string():<9}{marker}"
@@ -173,8 +188,7 @@ def _print_type_report(
 # Writes inferred types onto tasklet/map/library-node connectors.
 def _apply_connector_types(
     sdfg: dace.SDFG,
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]],
-    supported: Set[dace.dtypes.typeclass],
+    inferred: Dict[str, dace.dtypes.typeclass],
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
 ) -> None:
     for state in _states_in_order(sdfg):
@@ -184,21 +198,17 @@ def _apply_connector_types(
                 for e in state.in_edges(node):
                     if e.dst_conn is None or e.data is None or e.data.data is None:
                         continue
-                    t = inferred.get(e.data.data)
-                    if t in supported:
-                        node.in_connectors[e.dst_conn] = t
-                        in_types.append(t)
+                    t = inferred[e.data.data]
+                    node.in_connectors[e.dst_conn] = t
+                    in_types.append(t)
 
                 if not in_types:
                     continue
                 compute = reduce(lambda a, b: _promote(a, b, rules), in_types)
-                if compute not in supported:
-                    continue
                 for e in state.out_edges(node):
                     if e.src_conn is None or e.data is None or e.data.data is None:
                         continue
-                    if inferred.get(e.data.data) in supported:
-                        node.out_connectors[e.src_conn] = compute
+                    node.out_connectors[e.src_conn] = compute
 
             elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
                 # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
@@ -207,9 +217,7 @@ def _apply_connector_types(
                         continue
                     if e.data is None or e.data.data is None:
                         continue
-                    t = inferred.get(e.data.data)
-                    if t not in supported:
-                        continue
+                    t = inferred[e.data.data]
                     out_conn = "OUT_" + e.dst_conn[3:]
                     if e.dst_conn in node.in_connectors:
                         node.in_connectors[e.dst_conn] = t
@@ -313,10 +321,6 @@ def change_and_propagate_fp_types(
     promotion_rules: Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass],
 ) -> None:
 
-    supported: Set[dace.dtypes.typeclass] = set()
-    for pair in promotion_rules:
-        supported.update(pair)
-
     original_types: Dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items()
     }
@@ -334,7 +338,6 @@ def change_and_propagate_fp_types(
         consumers,
         initial_types,
         original_types,
-        supported,
         promotion_rules,
     )
 
@@ -342,10 +345,10 @@ def change_and_propagate_fp_types(
 
     # Apply inferred dtypes to SDFG arrays.
     for name, dtype in inferred.items():
-        if dtype is not None and sdfg.arrays[name].dtype != dtype:
+        if sdfg.arrays[name].dtype != dtype:
             sdfg.arrays[name].dtype = dtype
 
-    _apply_connector_types(sdfg, inferred, supported, promotion_rules)
+    _apply_connector_types(sdfg, inferred, promotion_rules)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {
@@ -378,36 +381,29 @@ def change_and_propagate_fp_types(
 
         sdfg.add_datadesc(name=orig_name, datadesc=orig_desc)
 
+    copy_in_state = sdfg.add_state_before(state=sdfg.start_block, label="copy_in")
+
     # TODO: This is currently inefficient, copies all changed inputs for each sink state.
     for sink in sdfg.sink_nodes():
-        copy_out_state = None
+        copy_out_state = sdfg.add_state_after(
+            state=sink, label=f"copy_out_{sink.label}"
+        )
         for orig_name, casted_name in repl_dict.items():
-            if orig_name not in sdfg_outputs:
-                continue
-            if copy_out_state is None:
-                copy_out_state = sdfg.add_state_after(
-                    state=sink, label=f"copy_out_{sink.label}"
+            if orig_name in sdfg_outputs:
+                _add_copy_map(
+                    copy_out_state,
+                    casted_name,
+                    sdfg.arrays[casted_name],
+                    orig_name,
+                    orig_descs[orig_name],
                 )
+
+    for orig_name, casted_name in repl_dict.items():
+        if orig_name in sdfg_inputs:
             _add_copy_map(
-                copy_out_state,
-                casted_name,
-                sdfg.arrays[casted_name],
+                copy_in_state,
                 orig_name,
                 orig_descs[orig_name],
+                casted_name,
+                sdfg.arrays[casted_name],
             )
-
-    copy_in_state = None
-    for orig_name, casted_name in repl_dict.items():
-        if orig_name not in sdfg_inputs:
-            continue
-        if copy_in_state is None:
-            copy_in_state = sdfg.add_state_before(
-                state=sdfg.start_block, label="copy_in"
-            )
-        _add_copy_map(
-            copy_in_state,
-            orig_name,
-            orig_descs[orig_name],
-            casted_name,
-            sdfg.arrays[casted_name],
-        )
