@@ -381,15 +381,15 @@ def change_and_propagate_fp_types(
 
         sdfg.add_datadesc(name=orig_name, datadesc=orig_desc)
 
-    copy_in_state = sdfg.add_state_before(state=sdfg.start_block, label="copy_in")
-
     # TODO: This is currently inefficient, copies all changed inputs for each sink state.
     for sink in sdfg.sink_nodes():
-        copy_out_state = sdfg.add_state_after(
-            state=sink, label=f"copy_out_{sink.label}"
-        )
+        copy_out_state = None
         for orig_name, casted_name in repl_dict.items():
             if orig_name in sdfg_outputs:
+                if copy_out_state is None:
+                    copy_out_state = sdfg.add_state_after(
+                        state=sink, label=f"copy_out_{sink.label}"
+                    )
                 _add_copy_map(
                     copy_out_state,
                     casted_name,
@@ -398,8 +398,13 @@ def change_and_propagate_fp_types(
                     orig_descs[orig_name],
                 )
 
+    copy_in_state = None
     for orig_name, casted_name in repl_dict.items():
         if orig_name in sdfg_inputs:
+            if copy_in_state is None:
+                copy_in_state = sdfg.add_state_before(
+                    state=sdfg.start_block, label="copy_in"
+                )
             _add_copy_map(
                 copy_in_state,
                 orig_name,
