@@ -8,6 +8,7 @@ Drivers that execute the experiment kinds.
 TODO: Select and perturbation runners
 """
 
+import math
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -56,6 +57,10 @@ def _new_acc() -> Dict[str, float]:
         "rel_sum": 0.0,
         "rel_cnt": 0,
         "rel_max": 0.0,
+        "sq_err_sum": 0.0,
+        "sq_ref_sum": 0.0,
+        "ref_abs_sum": 0.0,
+        "ref_abs_max": 0.0,
     }
 
 
@@ -65,11 +70,15 @@ def _accumulate(acc: Dict[str, float], ref: np.ndarray, cand: np.ndarray) -> Non
     c = np.asarray(cand, dtype=np.float64).ravel()
     diff = np.abs(c - r)
     diff = np.where(np.isnan(diff), np.inf, diff)
+    denom = np.abs(r)
     if diff.size:
         acc["abs_sum"] += float(diff.sum())
         acc["abs_cnt"] += int(diff.size)
         acc["abs_max"] = max(acc["abs_max"], float(diff.max()))
-    denom = np.abs(r)
+        acc["sq_err_sum"] += float(np.square(diff).sum())
+        acc["sq_ref_sum"] += float(np.square(r).sum())
+        acc["ref_abs_sum"] += float(denom.sum())
+        acc["ref_abs_max"] = max(acc["ref_abs_max"], float(denom.max()))
     mask = denom > 0
     with np.errstate(invalid="ignore"):
         rel = diff[mask] / denom[mask]
@@ -80,14 +89,39 @@ def _accumulate(acc: Dict[str, float], ref: np.ndarray, cand: np.ndarray) -> Non
         acc["rel_max"] = max(acc["rel_max"], float(rel.max()))
 
 
+def _ratio(num: float, den: float) -> float:
+    """``num/den`` with the zero-reference convention: ``0/0 -> 0``, ``x/0 -> inf``."""
+    if den > 0.0:
+        return num / den
+    return 0.0 if num <= 0.0 else math.inf
+
+
 def _finalize(acc: Dict[str, float]) -> ErrorStats:
     abs_mean = acc["abs_sum"] / acc["abs_cnt"] if acc["abs_cnt"] else 0.0
     rel_mean = acc["rel_sum"] / acc["rel_cnt"] if acc["rel_cnt"] else 0.0
+    err_power = acc["sq_err_sum"]
+    ref_power = acc["sq_ref_sum"]
+    if err_power <= 0.0:
+        snr = math.inf
+    elif ref_power <= 0.0 or not math.isfinite(ref_power) or not math.isfinite(err_power):
+        snr = -math.inf
+    else:
+        snr = 10.0 * math.log10(ref_power / err_power)
+    l1 = acc["abs_sum"]
+    l2 = math.sqrt(err_power)
+    linf = acc["abs_max"]
     return ErrorStats(
         abs_mean=abs_mean,
         abs_max=acc["abs_max"],
         rel_mean=rel_mean,
         rel_max=acc["rel_max"],
+        l1=l1,
+        l2=l2,
+        linf=linf,
+        l1_norm=_ratio(l1, acc["ref_abs_sum"]),
+        l2_norm=_ratio(l2, math.sqrt(ref_power)),
+        linf_norm=_ratio(linf, acc["ref_abs_max"]),
+        snr=snr,
     )
 
 

@@ -200,6 +200,81 @@ def test_overflowing_reference_yields_inf_error_not_nan():
     assert not np.isnan(s.rel_mean)
 
 
+def test_error_norms_match_hand_computed_values():
+    # e = cand - ref = [0, -4]; r = [3, 4] -> ||r||_1 = 7, ||r||_2 = 5, max|r| = 4
+    acc = _new_acc()
+    _accumulate(acc, np.array([3.0, 4.0]), np.array([3.0, 0.0]))
+    s = _finalize(acc)
+
+    assert s.l1 == pytest.approx(4.0)
+    assert s.l2 == pytest.approx(4.0)
+    assert s.linf == pytest.approx(4.0)
+    assert s.linf == s.abs_max
+
+    assert s.l1_norm == pytest.approx(4.0 / 7.0)
+    assert s.l2_norm == pytest.approx(0.8)
+    assert s.linf_norm == pytest.approx(1.0)
+
+    assert s.snr == pytest.approx(10.0 * np.log10(25.0 / 16.0))
+    # snr is the same quantity as the normalized L2 error, in decibels
+    assert s.snr == pytest.approx(-20.0 * np.log10(s.l2_norm))
+
+
+def test_error_norms_concatenate_across_accumulate_calls():
+    # Folding two (ref, cand) pairs must equal one fold over their concatenation,
+    # matching the "all elements over all samples" reduction semantics.
+    ref1, cand1 = np.array([1.0, 2.0]), np.array([1.5, 2.0])
+    ref2, cand2 = np.array([3.0, 4.0]), np.array([3.0, 5.0])
+
+    split = _new_acc()
+    _accumulate(split, ref1, cand1)
+    _accumulate(split, ref2, cand2)
+    whole = _new_acc()
+    _accumulate(whole, np.concatenate([ref1, ref2]), np.concatenate([cand1, cand2]))
+
+    a, b = _finalize(split), _finalize(whole)
+    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr"):
+        assert getattr(a, f) == pytest.approx(getattr(b, f))
+
+
+def test_error_norms_zero_on_exact_match():
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0, 3.0]))
+    s = _finalize(acc)
+    assert s.l1 == 0.0 and s.l2 == 0.0 and s.linf == 0.0
+    assert s.l1_norm == 0.0 and s.l2_norm == 0.0 and s.linf_norm == 0.0
+    assert s.snr == np.inf
+
+
+def test_error_norms_infinite_when_reference_signal_is_zero():
+    acc = _new_acc()
+    _accumulate(acc, np.zeros(2), np.array([0.0, 1.0]))
+    s = _finalize(acc)
+    assert s.l1_norm == np.inf
+    assert s.l2_norm == np.inf
+    assert s.linf_norm == np.inf
+    assert s.snr == -np.inf
+
+
+def test_error_norms_non_finite_error_gives_minus_inf_snr():
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0]), np.array([np.nan, 2.0]))
+    s = _finalize(acc)
+    assert s.l2 == np.inf
+    assert s.snr == -np.inf
+
+
+def test_error_metrics_persist_to_store():
+    db = ResultStore(":memory:")
+    run_error(
+        ErrorAnalysisConfig(_exp(), precisions=[{"a": "fp16"}], reference="fp64"),
+        store=db,
+    )
+    payload = db.query(kind="error")[0].payload["errors"]["c"]
+    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr"):
+        assert f in payload
+
+
 def test_unknown_target_raises():
     with pytest.raises(ValueError, match="Unknown target"):
         apply_target(fresh_sdfg(_exp()), "tpu")

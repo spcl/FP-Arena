@@ -12,12 +12,40 @@ from fp_arena.experiment.config import PrecisionMap
 
 @dataclass
 class ErrorStats:
-    """Error of one array vs the reference, reduced over elements and samples."""
+    """
+    Error metrics of an array versus a reference, reduced over elements and samples.
+
+    Calculations use the error vector `e` (array - reference) and the reference vector `r`.
+
+    Metrics
+    -------
+    abs_mean  : Mean(|e|)
+    abs_max   : Max(|e|)
+
+    rel_mean  : Mean(|e| / |r|)
+    rel_max   : Max(|e| / |r|)
+
+    l1        : sum(|e|)
+    l2        : sqrt(sum(e**2))
+    linf      : max(|e|)  (Equivalent to abs_max)
+
+    l1_norm   : sum(|e|) / sum(|r|)
+    l2_norm   : sqrt(sum(e**2)) / sqrt(sum(r**2))
+    linf_norm : max(|e|) / max(|r|)
+    snr       : 10 * log10(sum(r**2) / sum(e**2))
+    """
 
     abs_mean: float
     abs_max: float
     rel_mean: float
     rel_max: float
+    l1: float
+    l2: float
+    linf: float
+    l1_norm: float
+    l2_norm: float
+    linf_norm: float
+    snr: float
 
     def to_dict(self) -> Dict[str, float]:
         return asdict(self)
