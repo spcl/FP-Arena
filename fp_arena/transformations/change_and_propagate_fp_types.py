@@ -92,14 +92,35 @@ def _build_dataflow(
     return producers, consumers
 
 
+# Arrays reachable in the producer graph from any *seed*, following the producer -> consumer direction.
+def _reachable_from(
+    seeds: Set[str],
+    consumers: Dict[str, Set[str]],
+) -> Set[str]:
+    reached = set(seeds)
+    stack = list(seeds)
+    while stack:
+        cur = stack.pop()
+        for nxt in consumers.get(cur, ()):
+            if nxt not in reached:
+                reached.add(nxt)
+                stack.append(nxt)
+    return reached
+
+
 # Computes a fixed-point precision for every array.
 #
-# Each array's type is the join (widest, via *rules*) of its producers' types:
-#   - pinned arrays (in *initial_types*) are constants and never recomputed;
+# Each array's type is the join (widest, via *rules*) of its producers' types.
+# Arrays are classified once up front:
+#   - pinned arrays (in *initial_types*) are constants;
 #   - source arrays (no producers) are constants at their original dtype;
-#   - derived arrays start at None (bottom) and only ever widen, so demotion
-#     propagates correctly and the monotone worklist always terminates.
-# Returns name -> dtype, where None means "leave the array's dtype unchanged".
+#   - arrays not reachable from any pinned/source seed can never receive a type
+#     from the fixpoint (uninitialized-transient cycles); they keep their
+#     original dtype as constants;
+#   - all remaining (reachable, derived) arrays start at None (bottom) and only
+#     ever widen, so demotion propagates correctly and the monotone worklist
+#     terminates. Every such array is reachable from a seed, so none stays None.
+# Returns name -> dtype for every array.
 def _infer_types(
     sdfg: dace.SDFG,
     producers: Dict[str, Set[str]],
@@ -109,57 +130,46 @@ def _infer_types(
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
 ) -> Dict[str, dace.dtypes.typeclass]:
 
+    seeds = {
+        name for name in sdfg.arrays if name in initial_types or not producers.get(name)
+    }
+    reachable = _reachable_from(seeds, consumers)
+
     inferred: Dict[str, Optional[dace.dtypes.typeclass]] = {}
-    pinned: Set[str] = set(initial_types)
+    pinned: Set[str] = set()
     for name in sdfg.arrays:
         if name in initial_types:
             inferred[name] = initial_types[name]  # pin: constant
+            pinned.add(name)
         elif not producers.get(name):
             inferred[name] = original_types[name]  # source: constant at original
-        else:
-            inferred[name] = None  # derived: bottom, widened below
-
-    worklist = deque(
-        name
-        for name in sdfg.arrays
-        if name not in initial_types and producers.get(name)
-    )
-    queued = set(worklist)
-
-    def _run_worklist() -> None:
-        while worklist:
-            name = worklist.popleft()
-            queued.discard(name)
-
-            new: Optional[dace.dtypes.typeclass] = None
-            for prod in producers[name]:
-                t = inferred.get(prod)
-                if t is None:
-                    continue
-                new = _promote(new, t, rules)
-
-            if not _types_equal(new, inferred[name]):
-                inferred[name] = new
-                for cons in consumers.get(name, ()):
-                    if cons in pinned or cons in queued or not producers.get(cons):
-                        continue
-                    worklist.append(cons)
-                    queued.add(cons)
-
-    _run_worklist()
-
-    unresolved = [name for name, t in inferred.items() if t is None]
-    if unresolved:
-        for name in unresolved:
-            inferred[name] = original_types[name]
             pinned.add(name)
-        for name in unresolved:
+        elif name not in reachable:
+            inferred[name] = original_types[name]  # unreachable cycle: unchanged
+            pinned.add(name)
+        else:
+            inferred[name] = None  # reachable derived: bottom, widened below
+
+    worklist = deque(name for name in sdfg.arrays if name not in pinned)
+    queued = set(worklist)
+    while worklist:
+        name = worklist.popleft()
+        queued.discard(name)
+
+        new: Optional[dace.dtypes.typeclass] = None
+        for prod in producers[name]:
+            t = inferred[prod]
+            if t is None:
+                continue
+            new = _promote(new, t, rules)
+
+        if not _types_equal(new, inferred[name]):
+            inferred[name] = new
             for cons in consumers.get(name, ()):
-                if cons in pinned or cons in queued or not producers.get(cons):
+                if cons in pinned or cons in queued:
                     continue
                 worklist.append(cons)
                 queued.add(cons)
-        _run_worklist()
 
     return inferred
 
