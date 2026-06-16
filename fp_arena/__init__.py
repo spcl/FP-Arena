@@ -30,7 +30,10 @@ from fp_arena.extensions import (
     INCLUDE_DIR,
 )
 from fp_arena.transformations.change_fp_types import change_fptype
-from fp_arena.transformations.change_and_propagate_fp_types import change_and_propagate_fp_types
+from fp_arena.transformations.change_and_propagate_fp_types import (
+    DEFAULT_PROMOTION_RULES,
+    change_and_propagate_fp_types,
+)
 
 # Register the types and the SDFG convenience method on import (idempotent).
 register()
@@ -63,4 +66,5 @@ __all__ = [
     "INCLUDE_DIR",
     "change_fptype",
     "change_and_propagate_fp_types",
+    "DEFAULT_PROMOTION_RULES",
 ]

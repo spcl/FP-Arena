@@ -6,6 +6,26 @@ import dace
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 
+from fp_arena.dtypes import float32sr, float64sr
+
+
+# Default promotion rules for the standard float/SR types.
+DEFAULT_PROMOTION_RULES: Dict[FrozenSet, dace.dtypes.typeclass] = {
+    # Exact IEEE floats: widen.
+    frozenset({dace.float16, dace.float32}): dace.float32,
+    frozenset({dace.float16, dace.float64}): dace.float64,
+    frozenset({dace.float32, dace.float64}): dace.float64,
+    # Exact float mixed with an SR float: widen, result stays stochastic.
+    frozenset({dace.float16, float32sr}): float32sr,
+    frozenset({dace.float32, float32sr}): float32sr,
+    frozenset({dace.float64, float32sr}): float64sr,
+    frozenset({dace.float16, float64sr}): float64sr,
+    frozenset({dace.float32, float64sr}): float64sr,
+    frozenset({dace.float64, float64sr}): float64sr,
+    # Two SR floats: widen.
+    frozenset({float32sr, float64sr}): float64sr,
+}
+
 
 # Returns the promoted type of *t1* and *t2* according to *rules*.
 def _promote(
@@ -330,9 +350,14 @@ def _add_copy_map(
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
     initial_types: Dict[str, dace.dtypes.typeclass],
-    promotion_rules: Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass],
+    promotion_rules: Optional[
+        Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
+    ] = None,
     instrument: bool = False,
 ) -> None:
+
+    # Use default promotion rules if none are provided.
+    rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
 
     original_types: Dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items()
@@ -351,7 +376,7 @@ def change_and_propagate_fp_types(
         consumers,
         initial_types,
         original_types,
-        promotion_rules,
+        rules,
     )
 
     _print_type_report(original_types, inferred)
@@ -361,7 +386,7 @@ def change_and_propagate_fp_types(
         if sdfg.arrays[name].dtype != dtype:
             sdfg.arrays[name].dtype = dtype
 
-    _apply_connector_types(sdfg, inferred, promotion_rules)
+    _apply_connector_types(sdfg, inferred, rules)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {
