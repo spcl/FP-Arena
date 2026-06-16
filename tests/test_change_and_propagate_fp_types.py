@@ -1,14 +1,10 @@
 import dace
+import pytest
 from dace.libraries.standard.nodes.reduce import Reduce
 from fp_arena.transformations.change_and_propagate_fp_types import (
+    DEFAULT_PROMOTION_RULES,
     change_and_propagate_fp_types,
 )
-
-RULES = {
-    frozenset({dace.float16, dace.float32}): dace.float32,
-    frozenset({dace.float32, dace.float64}): dace.float64,
-    frozenset({dace.float16, dace.float64}): dace.float64,
-}
 
 
 def _tasklet_chain(n_states: int, transient_intermediates: bool = True):
@@ -66,7 +62,7 @@ def test_transient_intermediate_propagates():
     s2.add_edge(s2.add_read("B"), None, t2, "b", dace.Memlet("B[0]"))
     s2.add_edge(t2, "c", s2.add_write("C"), None, dace.Memlet("C[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     # Transient intermediate should be promoted to f16.
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
@@ -105,7 +101,7 @@ def test_all_nontransient_interface_preserved():
     state_C.add_edge(state_C.add_read("B"), None, tc, "b", dace.Memlet("B[0]"))
     state_C.add_edge(tc, "c", state_C.add_write("C"), None, dace.Memlet("C[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     # All are non-transient: external types preserved.
     assert sdfg.arrays["A"].dtype == dace.float32
@@ -132,7 +128,7 @@ def test_mixed_precision_promotes():
     s.add_edge(s.add_read("D"), None, t, "d", dace.Memlet("D[0]"))
     s.add_edge(t, "e", s.add_write("E"), None, dace.Memlet("E[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     # D stays f32, A is demoted to f16; their mix promotes E to f32.
     assert sdfg.arrays["E"].dtype == dace.float32, sdfg.arrays["E"].dtype
@@ -163,7 +159,7 @@ def test_map_passthrough():
     s.add_edge(t, "b", mx, "IN_B", dace.Memlet("B[i]"))
     s.add_edge(mx, "OUT_B", b_an, None, dace.Memlet("B[0:4]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
 
@@ -183,7 +179,7 @@ def test_reduce_node():
     s.add_edge(s.add_read("A"), None, reduce_node, None, dace.Memlet("A[0:4]"))
     s.add_edge(reduce_node, None, s.add_write("S"), None, dace.Memlet("S"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     assert sdfg.arrays["S"].dtype == dace.float16, sdfg.arrays["S"].dtype
 
@@ -203,7 +199,7 @@ def test_initial_type_pinned():
     s.add_edge(t, "b", s.add_write("B"), None, dace.Memlet("B[0]"))
 
     # Even though A is f64, B must stay f16.
-    change_and_propagate_fp_types(sdfg, {"A": dace.float64, "B": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float64, "B": dace.float16})
 
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
 
@@ -215,7 +211,7 @@ def test_long_chain_convergence():
     """Fixpoint converges for a longer state chain without hitting the iteration cap."""
     sdfg, arr_names = _tasklet_chain(n_states=5, transient_intermediates=True)
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     for name in arr_names[1:-1]:  # B0..B3 are transient intermediates
         assert sdfg.arrays[name].dtype == dace.float16, (
@@ -246,7 +242,7 @@ def test_unconnected_array_unchanged():
     s2.add_edge(s2.add_read("X"), None, t2, "x", dace.Memlet("X[0]"))
     s2.add_edge(t2, "y", s2.add_write("X"), None, dace.Memlet("X[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     assert sdfg.arrays["B"].dtype == dace.float16
     assert sdfg.arrays["X"].dtype == dace.float64  # unchanged
@@ -266,7 +262,7 @@ def test_interface_copy_in_only_for_inputs():
     # B is purely written (no read from outside), A is not used.
     s.add_edge(t, "b", s.add_write("B"), None, dace.Memlet("B[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"B": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"B": dace.float16})
 
     # B is non-transient and changed: external B stays f32, casted version is f16.
     assert sdfg.arrays["B"].dtype == dace.float32
@@ -276,9 +272,7 @@ def test_interface_copy_in_only_for_inputs():
     # B is output-only and A is unused, so nothing needs casting on the way in:
     # the copy_in state is created lazily and should not exist at all here.
     copy_in = next((st for st in sdfg.states() if st.label == "copy_in"), None)
-    assert copy_in is None, (
-        "Output-only arrays should not produce a copy_in state"
-    )
+    assert copy_in is None, "Output-only arrays should not produce a copy_in state"
 
     sdfg.validate()
     # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
@@ -315,7 +309,7 @@ def test_requires_two_fixpoint_passes():
     s3.add_edge(s3.add_read("E"), None, t3, "e", dace.Memlet("E[0]"))
     s3.add_edge(t3, "b", s3.add_write("B"), None, dace.Memlet("B[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     # B is written by both S1(f16) and S3(f32) -> promoted to f32.
     assert sdfg.arrays["B"].dtype == dace.float32, (
@@ -359,7 +353,7 @@ def test_three_level_lattice():
     s.add_edge(s.add_read("C"), None, t3, "c", dace.Memlet("C[0]"))
     s.add_edge(t3, "o", s.add_write("ABC"), None, dace.Memlet("ABC[0]"))
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
     assert sdfg.arrays["AB"].dtype == dace.float32, sdfg.arrays["AB"].dtype
     assert sdfg.arrays["AC"].dtype == dace.float64, sdfg.arrays["AC"].dtype
@@ -387,7 +381,7 @@ def test_cyclic_dependency_terminates():
     s2.add_edge(s2.add_read("P"), None, t2, "p", dace.Memlet("P[0]"))
     s2.add_edge(t2, "q", s2.add_write("Q"), None, dace.Memlet("Q[0]"))
 
-    change_and_propagate_fp_types(sdfg, {}, RULES)
+    change_and_propagate_fp_types(sdfg, {})
 
     assert sdfg.arrays["P"].dtype == dace.float64, sdfg.arrays["P"].dtype
     assert sdfg.arrays["Q"].dtype == dace.float64, sdfg.arrays["Q"].dtype
@@ -430,7 +424,7 @@ def test_end_to_end_float32_runs():
             mx, f"OUT_{dst}", st.add_write(dst), None, dace.Memlet(f"{dst}[0:{n}]")
         )
 
-    change_and_propagate_fp_types(sdfg, {"A": dace.float32}, RULES)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32})
     sdfg.validate()
 
     assert sdfg.arrays["B"].dtype == dace.float32, sdfg.arrays["B"].dtype
@@ -441,6 +435,37 @@ def test_end_to_end_float32_runs():
     C = np.zeros(n, dtype=np.float64)
     sdfg(A=A, C=C)
     np.testing.assert_allclose(C, A * 4.0)
+
+
+def test_default_rules_used_and_not_merged():
+    """promotion_rules=None falls back to DEFAULT_PROMOTION_RULES; an explicit
+    dict is used as-is, so omitting a needed pair still raises."""
+
+    def _build():
+        sdfg = dace.SDFG("default_rules")
+        sdfg.add_array("A", [1], dace.float64, transient=False)  # pinned f16
+        sdfg.add_array("B", [1], dace.float64, transient=False)  # source f64
+        sdfg.add_array("C", [1], dace.float64, transient=True)  # join(f16, f64)
+
+        s = sdfg.add_state("s")
+        t = s.add_tasklet("t", {"a", "b"}, {"c"}, "c = a + b")
+        s.add_edge(s.add_read("A"), None, t, "a", dace.Memlet("A[0]"))
+        s.add_edge(s.add_read("B"), None, t, "b", dace.Memlet("B[0]"))
+        s.add_edge(t, "c", s.add_write("C"), None, dace.Memlet("C[0]"))
+        return sdfg
+
+    # No rules -> defaults apply -> join(f16, f64) = f64.
+    sdfg = _build()
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16})
+    assert sdfg.arrays["C"].dtype == dace.float64, sdfg.arrays["C"].dtype
+    assert frozenset({dace.float16, dace.float64}) in DEFAULT_PROMOTION_RULES
+    sdfg.validate()
+
+    # An explicit dict missing {f16, f64}
+    sdfg = _build()
+    incomplete = {frozenset({dace.float16, dace.float32}): dace.float32}
+    with pytest.raises(ValueError):
+        change_and_propagate_fp_types(sdfg, {"A": dace.float16}, incomplete)
 
 
 if __name__ == "__main__":
@@ -457,4 +482,5 @@ if __name__ == "__main__":
     test_three_level_lattice()
     test_cyclic_dependency_terminates()
     test_end_to_end_float32_runs()
+    test_default_rules_used_and_not_merged()
     print("All tests passed.")
