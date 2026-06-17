@@ -21,11 +21,11 @@ classifiers = [
 ]
 keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision", "prototyping"]
 
-# FP-Arena tracks the DaCe `yakup/dev` branch. To use your own DaCe checkout
-# (any yakup/dev-based branch), install FP-Arena with `--no-deps` and ensure
+# FP-Arena tracks the DaCe `extended` branch. To use your own DaCe checkout
+# (any extended-based branch), install FP-Arena with `--no-deps` and ensure
 # that DaCe is importable; see the README.
 dependencies = [
-    "dace @ git+https://github.com/spcl/dace.git@yakup/dev",
+    "dace @ git+https://github.com/spcl/dace.git@extended",
 ]
 
 [project.optional-dependencies]
