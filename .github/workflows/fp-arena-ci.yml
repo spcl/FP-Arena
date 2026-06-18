@@ -22,14 +22,14 @@ jobs:
       with:
         path: fp-arena
 
-    # DaCe is pulled from the yakup/dev branch, with submodules (the runtime
+    # DaCe is pulled from the extended branch, with submodules (the runtime
     # headers FP-Arena's generated code includes -- e.g. moodycamel -- live in
     # DaCe git submodules and a plain pip-from-git install would miss them).
-    - name: Checkout DaCe (yakup/dev)
+    - name: Checkout DaCe (extended)
       uses: actions/checkout@v4
       with:
         repository: spcl/dace
-        ref: yakup/dev
+        ref: extended
         submodules: recursive
         path: dace
 
@@ -44,7 +44,7 @@ jobs:
         # generated maps use OpenMP (libgomp).
         sudo apt-get install -y cmake ninja-build gcc g++ libgomp1
 
-    - name: Install DaCe (yakup/dev) and FP-Arena
+    - name: Install DaCe (extended) and FP-Arena
       run: |
         rm -f ~/.dace.conf
         python -m pip install --upgrade pip
