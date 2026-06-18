@@ -13,9 +13,10 @@ mutates DaCe's global registries at runtime, so no DaCe source file is changed.
 """
 
 import numpy
+import ctypes
 
 import dace
-from dace import dtypes as _ddtypes
+from dace import dtypes as _ddtypes, typeclass
 
 #: C++ namespace-qualified type names emitted into generated code.
 _FLOAT32SR_CTYPE = "fp_arena::float32sr"
@@ -77,6 +78,60 @@ FP_ARENA_TYPECLASSES = {
 }
 
 
+class _mpfr_t(ctypes.Structure):
+    _fields_ = [
+        ("_mpfr_prec", ctypes.c_long),
+        ("_mpfr_sign", ctypes.c_int),
+        ("_mpfr_exp", ctypes.c_long),
+        ("_mpfr_d", ctypes.c_void_p),
+    ]
+
+
+class mpfr(typeclass):
+    """
+    A data type for custom Multiple Precision Floating-Point (MPFR) types.
+
+    Example use: `dace.mpfr(128)` for 128-bit precision.
+    """
+
+    def __init__(self, precision: int):
+        self.precision = precision
+        self.type = numpy.object_
+        self.bytes = ctypes.sizeof(_mpfr_t)
+        self.dtype = self
+        self.typename = f"mpfr{precision}"
+
+    def to_string(self):
+        return self.typename
+
+    def to_json(self):
+        return {"type": "mpfr", "precision": self.precision}
+
+    @staticmethod
+    def from_json(json_obj, context=None):
+        if json_obj["type"] != "mpfr":
+            raise TypeError("Invalid type for mpfr")
+        return mpfr(json_obj["precision"])
+
+    @property
+    def ctype(self):
+        return f"dace::mpfr<{self.precision}>"
+
+    @property
+    def ctype_unaligned(self):
+        return self.ctype
+
+    def as_ctypes(self):
+        return ctypes.c_void_p
+
+    def as_numpy_dtype(self):
+        return numpy.dtype(numpy.object_)
+
+    @property
+    def base_type(self):
+        return self
+
+
 def register():
     """
     Register the FP-Arena types into DaCe's global registries.
@@ -99,5 +154,9 @@ def register():
         if name not in _ddtypes.TYPECLASS_STRINGS:
             _ddtypes.TYPECLASS_STRINGS.append(name)
         _ddtypes.TYPECLASS_TO_STRING.setdefault(tc, tc.ctype)
+
+    # Also expose the parametric mpfr class so `dace.mpfr(128)` works.
+    setattr(_ddtypes, "mpfr", mpfr)
+    setattr(dace, "mpfr", mpfr)
 
     return FP_ARENA_TYPECLASSES
