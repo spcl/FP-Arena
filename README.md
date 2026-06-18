@@ -8,13 +8,13 @@ time — no fork, no DaCe source changes.
 
 ## Install
 
-FP-Arena tracks the latest DaCe `yakup/dev`:
+FP-Arena tracks the latest DaCe [`extended`](https://github.com/spcl/dace/commits/extended/):
 
 ```bash
 pip install git+https://github.com/spcl/FP-Arena.git
 ```
 
-Already have a DaCe checkout (any `yakup/dev`-based branch) you want to use? Install
+Already have a DaCe checkout (any `extended`-based branch) you want to use? Install
 without pulling DaCe:
 
 ```bash
