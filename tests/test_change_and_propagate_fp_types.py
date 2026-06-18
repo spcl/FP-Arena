@@ -112,7 +112,7 @@ def test_all_nontransient_interface_preserved():
     assert "fp_casted_C_float16" in sdfg.arrays
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_mixed_precision_promotes():
@@ -134,7 +134,7 @@ def test_mixed_precision_promotes():
     assert sdfg.arrays["E"].dtype == dace.float32, sdfg.arrays["E"].dtype
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_map_passthrough():
@@ -164,7 +164,7 @@ def test_map_passthrough():
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_reduce_node():
@@ -184,7 +184,7 @@ def test_reduce_node():
     assert sdfg.arrays["S"].dtype == dace.float16, sdfg.arrays["S"].dtype
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_initial_type_pinned():
@@ -204,7 +204,7 @@ def test_initial_type_pinned():
     assert sdfg.arrays["B"].dtype == dace.float16, sdfg.arrays["B"].dtype
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_long_chain_convergence():
@@ -219,7 +219,7 @@ def test_long_chain_convergence():
         )
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_unconnected_array_unchanged():
@@ -248,7 +248,7 @@ def test_unconnected_array_unchanged():
     assert sdfg.arrays["X"].dtype == dace.float64  # unchanged
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_interface_copy_in_only_for_inputs():
@@ -275,7 +275,7 @@ def test_interface_copy_in_only_for_inputs():
     assert copy_in is None, "Output-only arrays should not produce a copy_in state"
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_requires_two_fixpoint_passes():
@@ -322,7 +322,7 @@ def test_requires_two_fixpoint_passes():
     )
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_three_level_lattice():
@@ -360,7 +360,7 @@ def test_three_level_lattice():
     assert sdfg.arrays["ABC"].dtype == dace.float64, sdfg.arrays["ABC"].dtype
 
     sdfg.validate()
-    # sdfg.compile() TODO: Compilation of half-precision reduction currently fails
+    sdfg.compile()
 
 
 def test_cyclic_dependency_terminates():
