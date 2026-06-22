@@ -1,5 +1,4 @@
 from collections import defaultdict, deque
-from functools import reduce
 from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 import dace
@@ -219,26 +218,19 @@ def _print_type_report(
 def _apply_connector_types(
     sdfg: dace.SDFG,
     inferred: Dict[str, dace.dtypes.typeclass],
-    rules: Dict[FrozenSet, dace.dtypes.typeclass],
 ) -> None:
     for state in _states_in_order(sdfg):
         for node in state.nodes():
             if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-                in_types = []
                 for e in state.in_edges(node):
                     if e.dst_conn is None or e.data is None or e.data.data is None:
                         continue
-                    t = inferred[e.data.data]
-                    node.in_connectors[e.dst_conn] = t
-                    in_types.append(t)
+                    node.in_connectors[e.dst_conn] = inferred[e.data.data]
 
-                if not in_types:
-                    continue
-                compute = reduce(lambda a, b: _promote(a, b, rules), in_types)
                 for e in state.out_edges(node):
                     if e.src_conn is None or e.data is None or e.data.data is None:
                         continue
-                    node.out_connectors[e.src_conn] = compute
+                    node.out_connectors[e.src_conn] = inferred[e.data.data]
 
             elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
                 # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
@@ -386,7 +378,7 @@ def change_and_propagate_fp_types(
         if sdfg.arrays[name].dtype != dtype:
             sdfg.arrays[name].dtype = dtype
 
-    _apply_connector_types(sdfg, inferred, rules)
+    _apply_connector_types(sdfg, inferred)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {

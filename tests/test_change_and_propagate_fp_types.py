@@ -386,8 +386,6 @@ def test_cyclic_dependency_terminates():
     assert sdfg.arrays["P"].dtype == dace.float64, sdfg.arrays["P"].dtype
     assert sdfg.arrays["Q"].dtype == dace.float64, sdfg.arrays["Q"].dtype
 
-    sdfg.save("test_sdfg")
-
     sdfg.validate()
     sdfg.compile()
 
@@ -468,6 +466,61 @@ def test_default_rules_used_and_not_merged():
         change_and_propagate_fp_types(sdfg, {"A": dace.float16}, incomplete)
 
 
+def test_end_to_end_demoted_written_array_runs():
+    """A *written* array is demoted below the precision of the f64 computation that produces it.
+
+    Chain A(f64) -> B -> C with B pinned to f32. The producer of B reads A (f64),
+    so its tasklet computes in f64 but must store into the f32 array B.
+    """
+    import numpy as np
+
+    n = 8
+    sdfg = dace.SDFG("e2e_demoted_write")
+    sdfg.add_array("A", [n], dace.float64, transient=False)
+    sdfg.add_array("B", [n], dace.float64, transient=True)
+    sdfg.add_array("C", [n], dace.float64, transient=False)
+
+    s1 = sdfg.add_state("s1")
+    s2 = sdfg.add_state("s2")
+    sdfg.add_edge(s1, s2, dace.InterstateEdge())
+
+    for st, src, dst in [(s1, "A", "B"), (s2, "B", "C")]:
+        me, mx = st.add_map("m", {"i": f"0:{n}"})
+        t = st.add_tasklet(
+            "t", {"x"}, {"y"}, "y = x * 2.0;", language=dace.Language.CPP
+        )
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        mx.add_in_connector(f"IN_{dst}")
+        mx.add_out_connector(f"OUT_{dst}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+        st.add_edge(me, f"OUT_{src}", t, "x", dace.Memlet(f"{src}[i]"))
+        st.add_edge(t, "y", mx, f"IN_{dst}", dace.Memlet(f"{dst}[i]"))
+        st.add_edge(
+            mx, f"OUT_{dst}", st.add_write(dst), None, dace.Memlet(f"{dst}[0:{n}]")
+        )
+
+    # Demote only the WRITTEN intermediate B; A stays f64, so the producer of B
+    # computes in f64 and must store into an f32 array (the heat3d crash pattern).
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
+    sdfg.validate()
+
+    assert sdfg.arrays["B"].dtype == dace.float32, sdfg.arrays["B"].dtype
+    assert sdfg.arrays["A"].dtype == dace.float64
+
+    A = np.arange(1, n + 1, dtype=np.float64)
+    C = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, C=C)
+
+    # B = (f32)(A*2); C = (f32)(B*2). Small integers are exact in f32, so C == A*4.
+    b_ref = (A * 2.0).astype(np.float32)
+    c_ref = (b_ref.astype(np.float64) * 2.0).astype(np.float32).astype(np.float64)
+    np.testing.assert_allclose(C, c_ref, rtol=1e-6)
+    np.testing.assert_allclose(C, A * 4.0, rtol=1e-6)
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -483,4 +536,5 @@ if __name__ == "__main__":
     test_cyclic_dependency_terminates()
     test_end_to_end_float32_runs()
     test_default_rules_used_and_not_merged()
+    test_end_to_end_demoted_written_array_runs()
     print("All tests passed.")
