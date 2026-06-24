@@ -274,7 +274,12 @@ def run_performance(
             )
             results.append(result)
             if store is not None:
-                store.add_perf(cfg.experiment.name, result)
+                store.add_perf(
+                    cfg.experiment.name,
+                    result,
+                    symbols=cfg.experiment.symbols,
+                    scalars=cfg.experiment.scalar_args,
+                )
     finally:
         dace.Config.set("instrumentation", "report_each_invocation", value=prev_each)
     return results
@@ -298,5 +303,10 @@ def run_error(
         )
         results.append(result)
         if store is not None:
-            store.add_error(cfg.experiment.name, result)
+            store.add_error(
+                cfg.experiment.name,
+                result,
+                symbols=cfg.experiment.symbols,
+                scalars=cfg.experiment.scalar_args,
+            )
     return results

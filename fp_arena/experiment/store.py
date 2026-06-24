@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS results (
     experiment  TEXT NOT NULL,          -- ExperimentConfig.name
     created_at  TEXT NOT NULL,          -- ISO-8601 UTC
     precision   TEXT NOT NULL,          -- JSON: the precision map
+    symbols     TEXT NOT NULL,          -- JSON: the SDFG free-symbol values
+    scalars     TEXT NOT NULL,          -- JSON: the non-array scalar arguments
     payload     TEXT NOT NULL           -- JSON: the full result record
 );
 CREATE INDEX IF NOT EXISTS idx_results_lookup ON results (experiment, kind);
@@ -35,6 +37,8 @@ class StoredResult:
     experiment: str
     created_at: str
     precision: Dict[str, Any]
+    symbols: Dict[str, Any]
+    scalars: Dict[str, Any]
     payload: Dict[str, Any]
 
 
@@ -56,28 +60,59 @@ class ResultStore:
         kind: str,
         experiment: str,
         precision: Dict[str, Any],
+        symbols: Dict[str, Any],
+        scalars: Dict[str, Any],
         payload: Dict[str, Any],
     ) -> int:
         with self._con:
             cur = self._con.execute(
-                "INSERT INTO results (kind, experiment, created_at, precision, payload) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO results (kind, experiment, created_at, precision, symbols, scalars, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     kind,
                     experiment,
                     datetime.now(timezone.utc).isoformat(),
                     json.dumps(precision),
+                    json.dumps(symbols, default=str),
+                    json.dumps(scalars, default=str),
                     json.dumps(payload),
                 ),
             )
             return int(cur.lastrowid)
 
-    def add_perf(self, experiment: str, result: PerfResult) -> int:
+    def add_perf(
+        self,
+        experiment: str,
+        result: PerfResult,
+        symbols: Optional[Dict[str, Any]] = None,
+        scalars: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Append one :class:`PerfResult`. :returns: the new row id."""
-        return self._add("performance", experiment, result.precision, result.to_dict())
+        return self._add(
+            "performance",
+            experiment,
+            result.precision,
+            symbols or {},
+            scalars or {},
+            result.to_dict(),
+        )
 
-    def add_error(self, experiment: str, result: ErrorResult) -> int:
+    def add_error(
+        self,
+        experiment: str,
+        result: ErrorResult,
+        symbols: Optional[Dict[str, Any]] = None,
+        scalars: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """Append one :class:`ErrorResult`. :returns: the new row id."""
-        return self._add("error", experiment, result.precision, result.to_dict())
+        return self._add(
+            "error",
+            experiment,
+            result.precision,
+            symbols or {},
+            scalars or {},
+            result.to_dict(),
+        )
 
     # TODO: ``add_select`` and ``add_perturbation``.
 
@@ -103,6 +138,8 @@ class ResultStore:
                 experiment=r["experiment"],
                 created_at=r["created_at"],
                 precision=json.loads(r["precision"]),
+                symbols=json.loads(r["symbols"]),
+                scalars=json.loads(r["scalars"]),
                 payload=json.loads(r["payload"]),
             )
             for r in rows
