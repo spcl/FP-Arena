@@ -13,6 +13,7 @@ import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from tqdm.auto import tqdm
 
 import dace
 
@@ -184,6 +185,11 @@ def _phase_breakdown(sdfg: dace.SDFG, n_reps: int) -> Dict[str, Any]:
     }
 
 
+def _fmt_pin(pin_map: PrecisionMap) -> str:
+    """Compact one-line summary of a precision point for progress display."""
+    return " ".join(f"{k}={v}" for k, v in pin_map.items())
+
+
 Reference = Tuple[Any, dace.SDFG]
 
 
@@ -226,7 +232,9 @@ def measure_error(
         and not cand_sdfg.arrays[name].transient
     }
 
-    for rng in _sample_rngs(seed, n_samples):
+    for rng in tqdm(
+        _sample_rngs(seed, n_samples), desc="samples", unit="smp", leave=False
+    ):
         ref_args = make_call_args(cand_sdfg, experiment, rng, noise, reads=reads)
         cand_args = _copy_args(ref_args)
         ref_csdfg(**ref_args)
@@ -247,8 +255,10 @@ def run_performance(
     results: List[PerfResult] = []
     prev_each = dace.Config.get("instrumentation", "report_each_invocation")
     dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    points = tqdm(cfg.precisions, desc="performance", unit="pt")
     try:
-        for pin_map in cfg.precisions:
+        for pin_map in points:
+            points.set_postfix_str(_fmt_pin(pin_map))
             sdfg = fresh_sdfg(cfg.experiment)
             apply_precision(
                 sdfg, pin_map, cfg.experiment.promotion_rules, instrument=True
@@ -260,10 +270,20 @@ def run_performance(
 
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
             args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
+            runs = tqdm(
+                total=cfg.n_warmup + cfg.n_reps,
+                desc="warmup",
+                unit="run",
+                leave=False,
+            )
             for _ in range(cfg.n_warmup):
                 csdfg(**_copy_args(args))
+                runs.update(1)
+            runs.set_description("reps")
             for _ in range(cfg.n_reps):
                 csdfg(**_copy_args(args))
+                runs.update(1)
+            runs.close()
 
             csdfg.finalize()
 
@@ -291,7 +311,9 @@ def run_error(
     """Measure per-array error of each precision point, optionally appending to ``store`` database."""
     ref = compile_reference(cfg.experiment, cfg.reference)
     results: List[ErrorResult] = []
-    for pin_map in cfg.precisions:
+    points = tqdm(cfg.precisions, desc="error", unit="pt")
+    for pin_map in points:
+        points.set_postfix_str(_fmt_pin(pin_map))
         result = measure_error(
             cfg.experiment,
             pin_map,

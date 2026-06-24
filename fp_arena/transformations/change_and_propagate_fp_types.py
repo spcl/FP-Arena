@@ -4,6 +4,7 @@ from typing import Dict, FrozenSet, Optional, Set, Tuple
 import dace
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
+from tqdm.auto import tqdm
 
 from fp_arena.dtypes import float32sr, float64sr
 
@@ -211,7 +212,7 @@ def _print_type_report(
         lines.append(
             f"  {name:<{name_w}}  {orig.to_string():<9}  {final.to_string():<9}{marker}"
         )
-    print("\n".join(lines))
+    tqdm.write("\n".join(lines))
 
 
 # Writes inferred types onto tasklet/map/library-node connectors.
