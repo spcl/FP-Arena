@@ -5,7 +5,7 @@ TODO: Select and perturbation configs.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Union
 
 import dace
 
@@ -28,6 +28,7 @@ class ExperimentConfig:
     :param scalar_args: values for non-array scalar arguments.
     :param target: ``"cpu"`` (default) or ``"gpu"``;
     :param seed: base RNG seed for inputs and noise, shared across analyses.
+    :param gpu_block_size: GPU thread-block size ``[x, y, z]`` (x = contiguous dim) set on every GPU_Device map; ``None`` uses DaCe's default.
     """
 
     name: str
@@ -40,6 +41,7 @@ class ExperimentConfig:
     scalar_args: Dict[str, Any] = field(default_factory=dict)
     target: str = "cpu"
     seed: int = 0
+    gpu_block_size: Optional[List[int]] = None
 
 
 @dataclass

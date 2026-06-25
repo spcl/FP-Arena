@@ -232,7 +232,7 @@ def compile_reference(experiment, reference) -> Reference:
     """Build and compile the high-precision reference SDFG once."""
     sdfg = fresh_sdfg(experiment)
     apply_reference(sdfg, reference, experiment.promotion_rules)
-    apply_target(sdfg, experiment.target)
+    apply_target(sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
     return sdfg.compile(), sdfg
 
 
@@ -255,7 +255,7 @@ def measure_error(
 
     cand_sdfg = fresh_sdfg(experiment)
     apply_precision(cand_sdfg, pin_map, experiment.promotion_rules)
-    apply_target(cand_sdfg, experiment.target)
+    apply_target(cand_sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
     cand_csdfg = cand_sdfg.compile()
 
     reads, writes = cand_sdfg.read_and_write_sets()
@@ -311,7 +311,12 @@ def run_performance(
             points.set_postfix_str(_fmt_pin(pin_map))
             sdfg = fresh_sdfg(cfg.experiment)
             apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
-            apply_target(sdfg, target, gpu_simplify=False)
+            apply_target(
+                sdfg,
+                target,
+                gpu_simplify=False,
+                gpu_block_size=cfg.experiment.gpu_block_size,
+            )
             # Time every state; classified into a phase at readout.
             for state in sdfg.all_states():
                 state.instrument = provider

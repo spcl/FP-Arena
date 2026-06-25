@@ -4,7 +4,7 @@ The bridge between an :class:`ExperimentConfig` and DaCe: build a fresh SDFG and
 """
 
 import copy
-from typing import List
+from typing import List, Optional
 
 import dace
 
@@ -92,15 +92,27 @@ def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
     apply_precision(sdfg, ref_map, promotion_rules)
 
 
-def apply_target(sdfg: dace.SDFG, target: str, gpu_simplify: bool = True) -> None:
+def apply_target(
+    sdfg: dace.SDFG,
+    target: str,
+    gpu_simplify: bool = True,
+    gpu_block_size: Optional[List[int]] = None,
+) -> None:
     """
-    Retarget ``sdfg`` in place for the execution target. ``gpu_simplify=False``
-    keeps the transfer/cast/kernel phases as separate states (for per-phase
-    timing); it does not change the generated compute kernels.
+    Retarget ``sdfg`` in place for the execution target.
+    TODO: simplify=False is used to not fuse copy_in, copy_out states so they can be measured separately.
     """
     if target == "cpu":
         return
     if target == "gpu":
         sdfg.apply_gpu_transformations(simplify=gpu_simplify)
+        if gpu_block_size is not None:
+            for state in sdfg.all_states():
+                for node in state.nodes():
+                    if (
+                        isinstance(node, dace.nodes.MapEntry)
+                        and node.map.schedule == dace.dtypes.ScheduleType.GPU_Device
+                    ):
+                        node.map.gpu_block_size = list(gpu_block_size)
         return
     raise ValueError(f"Unknown target {target!r}; expected 'cpu' or 'gpu'")
