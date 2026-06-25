@@ -9,7 +9,6 @@ TODO: Select and perturbation runners
 """
 
 import math
-import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -126,63 +125,99 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
     )
 
 
-def _phase_series(report, name_pred, n: int) -> List[float]:
-    """
-    Per-repetition milliseconds for every Timer whose name matches ``name_pred`` in the given instrumentation report.
-    The last ``n`` samples are returned.
-    """
-    matched: List[List[float]] = []
+#: Device storage types; an edge crossing this boundary is a host<->device copy.
+_GPU_STORAGE = (
+    dace.dtypes.StorageType.GPU_Global,
+    dace.dtypes.StorageType.GPU_Shared,
+)
+
+
+def _transfer_direction(sdfg: dace.SDFG, state) -> Optional[str]:
+    """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
+    for e in state.edges():
+        src, dst = e.src, e.dst
+        if isinstance(src, dace.nodes.AccessNode) and isinstance(
+            dst, dace.nodes.AccessNode
+        ):
+            src_dev = sdfg.arrays[src.data].storage in _GPU_STORAGE
+            dst_dev = sdfg.arrays[dst.data].storage in _GPU_STORAGE
+            if src_dev != dst_dev:
+                return "h2d" if dst_dev else "d2h"
+    return None
+
+
+def _has_cast_map(state) -> bool:
+    """Whether ``state`` contains a precision-cast map."""
+    return any(
+        isinstance(n, dace.nodes.MapEntry) and n.map.label.startswith("cast_map_")
+        for n in state.nodes()
+    )
+
+
+def _classify_state(sdfg: dace.SDFG, state) -> str:
+    """Assign ``state`` to a timing phase: h2d/d2h, cast_in/cast_out, or kernel."""
+    direction = _transfer_direction(sdfg, state)
+    if direction is not None:
+        return direction
+    if _has_cast_map(state):
+        return "cast_out" if state.label.startswith("copy_out") else "cast_in"
+    return "kernel"
+
+
+def _group_per_invocation(samples: List[float], n_invocations: int) -> List[float]:
+    """Sum a timer's per-execution samples into one value per invocation (loop bodies fire repeatedly)."""
+    if n_invocations <= 0 or not samples or len(samples) % n_invocations != 0:
+        return list(samples)
+    k = len(samples) // n_invocations
+    if k == 1:
+        return list(samples)
+    return [math.fsum(samples[i * k : (i + 1) * k]) for i in range(n_invocations)]
+
+
+def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> List[float]:
+    """Per-rep milliseconds summed over matching timers, warmup invocations dropped."""
+    out = [0.0] * n_reps
+    matched = False
     if report is not None:
         for names in report.durations.values():
             for name, tid_map in names.items():
                 if not name_pred(name):
                     continue
                 for times_ms in tid_map.values():
-                    matched.append(times_ms[-n:])
-    if not matched:
-        return []
-    out = [0.0] * n
-    for samples in matched:
-        offset = n - len(samples)
-        for i, ms in enumerate(samples):
-            if offset + i >= 0:
-                out[offset + i] += ms
-    return out
+                    per_inv = _group_per_invocation(times_ms, n_invocations)
+                    tail = per_inv[-n_reps:]
+                    offset = n_reps - len(tail)
+                    for i, ms in enumerate(tail):
+                        out[offset + i] += ms
+                    matched = True
+    return out if matched else []
 
 
-def _phase_breakdown(sdfg: dace.SDFG, n_reps: int) -> Dict[str, Any]:
-    """
-    Split the latest instrumentation report into copy_in / copy_out / compute
-    series (milliseconds), where ``compute = total - copy_in - copy_out`` per rep.
-    All series are empty when the report carries no Timer data.
-    """
+def _phase_breakdown(
+    sdfg: dace.SDFG, n_reps: int, n_invocations: int
+) -> Dict[str, Any]:
+    """Reduce the latest report into per-rep phase series; ``total`` is their sum."""
     report = sdfg.get_latest_report()
-    total = _phase_series(report, lambda nm: nm.startswith("SDFG "), n_reps)
-    copy_in = _phase_series(report, lambda nm: nm == "State copy_in", n_reps)
-    copy_out = _phase_series(
-        report, lambda nm: nm.startswith("State copy_out_"), n_reps
-    )
+    # Map each state's report name -> phase category.
+    cat_of: Dict[str, str] = {}
+    for state in sdfg.all_states():
+        cat_of.setdefault(f"State {state.label}", _classify_state(sdfg, state))
 
-    if total:
-        ci = copy_in or [0.0] * n_reps
-        co = copy_out or [0.0] * n_reps
-        compute = [max(0.0, total[i] - ci[i] - co[i]) for i in range(n_reps)]
-    else:
-        compute = []
+    def series(category: str) -> List[float]:
+        return _phase_series(
+            report, lambda nm: cat_of.get(nm) == category, n_reps, n_invocations
+        )
 
-    def _median(xs: List[float]) -> float:
-        return statistics.median(xs) if xs else 0.0
-
-    return {
-        "total_times": total,
-        "copy_in_times": copy_in,
-        "copy_out_times": copy_out,
-        "compute_times": compute,
-        "total_median": _median(total),
-        "copy_in_median": _median(copy_in),
-        "copy_out_median": _median(copy_out),
-        "compute_median": _median(compute),
+    phases = {
+        "h2d_times": series("h2d"),
+        "cast_in_times": series("cast_in"),
+        "kernel_times": series("kernel"),
+        "cast_out_times": series("cast_out"),
+        "d2h_times": series("d2h"),
     }
+    nonempty = [p for p in phases.values() if p]
+    total = [math.fsum(col) for col in zip(*nonempty)] if nonempty else []
+    return {"total_times": total, **phases}
 
 
 def _fmt_pin(pin_map: PrecisionMap) -> str:
@@ -253,25 +288,40 @@ def run_performance(
 ) -> List[PerfResult]:
     """Time each precision point, optionally appending to ``store``."""
     results: List[PerfResult] = []
+    target = cfg.experiment.target
+    # CPU: host std::chrono; GPU: CUDA events (on-device, not async-launch, time).
+    provider = (
+        dace.InstrumentationType.GPU_Events
+        if target == "gpu"
+        else dace.InstrumentationType.Timer
+    )
+    n_invocations = cfg.n_warmup + cfg.n_reps
+
     prev_each = dace.Config.get("instrumentation", "report_each_invocation")
     dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    prev_streams = dace.Config.get("compiler", "cuda", "max_concurrent_streams")
+    if target == "gpu":
+        # Serialise onto the default stream so each phase's events bracket only
+        # that phase's device work.
+        dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
+
     points = tqdm(cfg.precisions, desc="performance", unit="pt")
     try:
         for pin_map in points:
             points.set_postfix_str(_fmt_pin(pin_map))
             sdfg = fresh_sdfg(cfg.experiment)
-            apply_precision(
-                sdfg, pin_map, cfg.experiment.promotion_rules, instrument=True
-            )
-            apply_target(sdfg, cfg.experiment.target)
-            sdfg.instrument = dace.InstrumentationType.Timer
+            apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
+            apply_target(sdfg, target, gpu_simplify=False)
+            # Time every state; classified into a phase at readout.
+            for state in sdfg.all_states():
+                state.instrument = provider
             csdfg = sdfg.compile()
             sdfg.clear_instrumentation_reports()
 
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
             args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
             runs = tqdm(
-                total=cfg.n_warmup + cfg.n_reps,
+                total=n_invocations,
                 desc="warmup",
                 unit="run",
                 leave=False,
@@ -290,7 +340,7 @@ def run_performance(
             result = PerfResult(
                 precision=dict(pin_map),
                 seed=cfg.experiment.seed,
-                **_phase_breakdown(sdfg, cfg.n_reps),
+                **_phase_breakdown(sdfg, cfg.n_reps, n_invocations),
             )
             results.append(result)
             if store is not None:
@@ -302,6 +352,9 @@ def run_performance(
                 )
     finally:
         dace.Config.set("instrumentation", "report_each_invocation", value=prev_each)
+        dace.Config.set(
+            "compiler", "cuda", "max_concurrent_streams", value=prev_streams
+        )
     return results
 
 

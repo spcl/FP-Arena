@@ -92,11 +92,15 @@ def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
     apply_precision(sdfg, ref_map, promotion_rules)
 
 
-def apply_target(sdfg: dace.SDFG, target: str) -> None:
-    """Retarget ``sdfg`` in place for the experiment's execution target."""
+def apply_target(sdfg: dace.SDFG, target: str, gpu_simplify: bool = True) -> None:
+    """
+    Retarget ``sdfg`` in place for the execution target. ``gpu_simplify=False``
+    keeps the transfer/cast/kernel phases as separate states (for per-phase
+    timing); it does not change the generated compute kernels.
+    """
     if target == "cpu":
         return
     if target == "gpu":
-        sdfg.apply_gpu_transformations()
+        sdfg.apply_gpu_transformations(simplify=gpu_simplify)
         return
     raise ValueError(f"Unknown target {target!r}; expected 'cpu' or 'gpu'")

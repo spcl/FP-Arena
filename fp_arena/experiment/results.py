@@ -54,23 +54,18 @@ class ErrorStats:
 @dataclass
 class PerfResult:
     """
-    Timing for one precision point (milliseconds), from DaCe's in-binary Timer
-    instrumentation (more precise than a Python wall-clock around the call).
-
-    ``total_times`` is the whole-SDFG time per repetition;
-    ``copy_in``, ``copy_out`` and ``compute`` break it down, with ``compute = total - copy_in - copy_out`` per repetition.
-    ``copy_in_times`` and ``copy_out_times`` are empty when there is nothing to cast (no precision change).
+    Per-repetition phase timings (milliseconds) for one precision point, with
+    ``total = h2d + cast_in + kernel + cast_out + d2h``. Only raw lists are kept;
+    derive medians/etc. from them.
     """
 
     precision: PrecisionMap
     total_times: List[float] = field(default_factory=list)
-    copy_in_times: List[float] = field(default_factory=list)
-    copy_out_times: List[float] = field(default_factory=list)
-    compute_times: List[float] = field(default_factory=list)
-    total_median: float = 0.0
-    copy_in_median: float = 0.0
-    copy_out_median: float = 0.0
-    compute_median: float = 0.0
+    h2d_times: List[float] = field(default_factory=list)  # host->device transfer (GPU only)
+    d2h_times: List[float] = field(default_factory=list)  # device->host transfer (GPU only)
+    cast_in_times: List[float] = field(default_factory=list)  # input precision cast
+    cast_out_times: List[float] = field(default_factory=list)  # output precision cast
+    kernel_times: List[float] = field(default_factory=list)  # compute
     seed: int = 0
 
     def to_dict(self) -> Dict[str, Any]:

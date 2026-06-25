@@ -54,6 +54,41 @@ def _exp(**kw):
     return ExperimentConfig(**base)
 
 
+def _has_gpu() -> bool:
+    """Whether a runnable GPU device is present."""
+    import shutil
+    import subprocess
+
+    for smi, args in (("nvidia-smi", ["-L"]), ("rocm-smi", ["--showid"])):
+        if shutil.which(smi) is None:
+            continue
+        try:
+            out = subprocess.run(
+                [smi, *args], capture_output=True, text=True, timeout=15
+            )
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            return True
+    return False
+
+
+requires_gpu = pytest.mark.skipif(not _has_gpu(), reason="no GPU device available")
+
+#: Time-stepped axpy: the kernel runs T times per invocation (tests loop grouping).
+T = dace.symbol("T")
+
+
+@dace.program
+def _axpy_loop(a: dace.float64[N], b: dace.float64[N], c: dace.float64[N]):
+    for _ in range(T):
+        for i in dace.map[0:N]:
+            c[i] = a[i] * b[i] + c[i]
+
+
+_AXPY_LOOP_SDFG = _axpy_loop.to_sdfg(simplify=True)
+
+
 def test_precision_roundtrip():
     for key in ("fp16", "fp32", "fp64", "fp32sr", "fp64sr", "mpfr128"):
         assert registry.key_of(registry.to_typeclass(key)) == key
@@ -105,7 +140,7 @@ def test_performance_runs():
     )
     assert len(perfs) == 1
     assert len(perfs[0].total_times) == 2
-    assert perfs[0].total_median > 0
+    assert all(t > 0 for t in perfs[0].total_times)
 
 
 def test_performance_phase_breakdown():
@@ -120,21 +155,132 @@ def test_performance_phase_breakdown():
     cast, baseline = perfs
 
     assert len(cast.total_times) == 3
-    assert len(cast.copy_in_times) == 3
-    assert len(cast.copy_out_times) == 3
-    assert len(cast.compute_times) == 3
-    assert cast.copy_in_median > 0
-    assert all(t >= 0 for t in cast.compute_times)
+    assert len(cast.cast_in_times) == 3
+    assert len(cast.cast_out_times) == 3
+    assert len(cast.kernel_times) == 3
+    assert all(t > 0 for t in cast.cast_in_times)
+    assert all(t >= 0 for t in cast.kernel_times)
+    # No transfers on CPU.
+    assert cast.h2d_times == []
+    assert cast.d2h_times == []
+    # total == sum of phases per rep.
     for i in range(3):
         expected = (
-            cast.copy_in_times[i] + cast.copy_out_times[i] + cast.compute_times[i]
+            cast.cast_in_times[i] + cast.cast_out_times[i] + cast.kernel_times[i]
         )
         assert cast.total_times[i] == pytest.approx(expected)
 
-    assert baseline.copy_in_times == []
-    assert baseline.copy_out_times == []
-    assert baseline.compute_times == baseline.total_times
-    assert baseline.total_median > 0
+    # No cast: total is kernel.
+    assert baseline.cast_in_times == []
+    assert baseline.cast_out_times == []
+    assert baseline.h2d_times == []
+    assert baseline.d2h_times == []
+    assert baseline.kernel_times == baseline.total_times
+    assert all(t > 0 for t in baseline.total_times)
+
+
+@requires_gpu
+def test_performance_gpu_runs():
+    perfs = run_performance(
+        PerformanceAnalysisConfig(
+            _exp(symbols={"N": 1 << 16}, target="gpu"),
+            precisions=[{"a": "fp32", "b": "fp32", "c": "fp32"}],
+            n_warmup=1,
+            n_reps=3,
+        ),
+    )
+    assert len(perfs) == 1
+    assert len(perfs[0].total_times) == 3
+    assert all(t > 0 for t in perfs[0].total_times)
+
+
+@requires_gpu
+def test_performance_gpu_phase_breakdown():
+    perfs = run_performance(
+        PerformanceAnalysisConfig(
+            _exp(symbols={"N": 1 << 18}, target="gpu"),
+            precisions=[{"a": "fp32", "b": "fp32", "c": "fp32"}, {}],
+            n_warmup=1,
+            n_reps=3,
+        ),
+    )
+    cast, baseline = perfs
+
+    # Every phase is populated; transfers/cast/kernel are strictly positive.
+    for phase in (
+        cast.h2d_times,
+        cast.cast_in_times,
+        cast.kernel_times,
+        cast.cast_out_times,
+        cast.d2h_times,
+    ):
+        assert len(phase) == 3
+        assert all(t >= 0 for t in phase)
+    assert all(t > 0 for t in cast.h2d_times)
+    assert all(t > 0 for t in cast.d2h_times)
+    assert all(t > 0 for t in cast.cast_in_times)
+    assert all(t > 0 for t in cast.kernel_times)
+
+    # total == sum of phases per rep.
+    for i in range(3):
+        expected = (
+            cast.h2d_times[i]
+            + cast.cast_in_times[i]
+            + cast.kernel_times[i]
+            + cast.cast_out_times[i]
+            + cast.d2h_times[i]
+        )
+        assert cast.total_times[i] == pytest.approx(expected)
+
+    # No cast: transfers + kernel only.
+    assert baseline.cast_in_times == []
+    assert baseline.cast_out_times == []
+    assert all(t > 0 for t in baseline.h2d_times)
+    assert all(t > 0 for t in baseline.d2h_times)
+    assert all(t > 0 for t in baseline.kernel_times)
+    for i in range(3):
+        expected = (
+            baseline.h2d_times[i] + baseline.kernel_times[i] + baseline.d2h_times[i]
+        )
+        assert baseline.total_times[i] == pytest.approx(expected)
+
+
+@requires_gpu
+def test_performance_gpu_loop_kernel_grouped_per_invocation():
+    # Kernel fires T times per invocation; must collapse to one value per rep.
+    perfs = run_performance(
+        PerformanceAnalysisConfig(
+            ExperimentConfig(
+                name="axpy_loop",
+                program=_AXPY_LOOP_SDFG,
+                inputs={
+                    "a": stats.uniform(0.5, 1.0),
+                    "b": stats.uniform(0.5, 1.0),
+                    "c": stats.uniform(0.5, 1.0),
+                },
+                promotion_rules=RULES,
+                symbols={"N": 1 << 14, "T": 8},
+                target="gpu",
+            ),
+            precisions=[{"a": "fp32", "b": "fp32", "c": "fp32"}],
+            n_warmup=1,
+            n_reps=3,
+        ),
+    )
+    (r,) = perfs
+    assert len(r.kernel_times) == 3
+    assert len(r.total_times) == 3
+    assert all(t > 0 for t in r.kernel_times)
+
+
+@requires_gpu
+def test_error_gpu_zero_when_candidate_equals_reference():
+    errs = run_error(
+        ErrorAnalysisConfig(
+            _exp(target="gpu"), precisions=[{"a": "fp64"}], reference="fp64"
+        )
+    )
+    assert errs[0].errors["c"].abs_max == 0.0
 
 
 def test_noise_perturbs_inputs():
