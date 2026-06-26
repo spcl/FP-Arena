@@ -65,12 +65,9 @@ def apply_precision(
     sdfg: dace.SDFG,
     pin_map: PrecisionMap,
     promotion_rules,
-    instrument: bool = False,
 ) -> None:
     """
     Retarget ``sdfg`` in place to the precisions in ``pin_map`` via :func:`change_and_propagate_fp_types`
-
-    With ``instrument=True`` the cast states are instrumented with a Timer to seperate cast time from compute time.
     """
     if not pin_map:
         return
@@ -78,7 +75,7 @@ def apply_precision(
     if any(registry.is_mpfr(key) for key in pin_map.values()):
         _ensure_mpfr_linked()
     typed = {name: registry.to_typeclass(key) for name, key in pin_map.items()}
-    change_and_propagate_fp_types(sdfg, typed, promotion_rules, instrument=instrument)
+    change_and_propagate_fp_types(sdfg, typed, promotion_rules)
 
 
 def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
