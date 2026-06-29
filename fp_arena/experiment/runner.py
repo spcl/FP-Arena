@@ -40,6 +40,13 @@ def _copy_args(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _reset_arrays(working: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Refill ``working``'s array buffers in place from ``source``."""
+    for k, v in source.items():
+        if isinstance(v, np.ndarray):
+            working[k][...] = v
+
+
 def _sample_rngs(seed: int, n: int) -> List[np.random.Generator]:
     """
     ``n`` independent, reproducible per-sample generators from one base seed.
@@ -103,7 +110,9 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
     ref_power = acc["sq_ref_sum"]
     if err_power <= 0.0:
         snr = math.inf
-    elif ref_power <= 0.0 or not math.isfinite(ref_power) or not math.isfinite(err_power):
+    elif (
+        ref_power <= 0.0 or not math.isfinite(ref_power) or not math.isfinite(err_power)
+    ):
         snr = -math.inf
     else:
         snr = 10.0 * math.log10(ref_power / err_power)
@@ -324,7 +333,8 @@ def run_performance(
             sdfg.clear_instrumentation_reports()
 
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
-            args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
+            initial_args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
+            args = _copy_args(initial_args)
             runs = tqdm(
                 total=n_invocations,
                 desc="warmup",
@@ -332,11 +342,13 @@ def run_performance(
                 leave=False,
             )
             for _ in range(cfg.n_warmup):
-                csdfg(**_copy_args(args))
+                _reset_arrays(args, initial_args)
+                csdfg(**args)
                 runs.update(1)
             runs.set_description("reps")
             for _ in range(cfg.n_reps):
-                csdfg(**_copy_args(args))
+                _reset_arrays(args, initial_args)
+                csdfg(**args)
                 runs.update(1)
             runs.close()
 
