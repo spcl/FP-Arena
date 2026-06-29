@@ -247,6 +247,73 @@ def _apply_connector_types(
                         node.out_connectors[out_conn] = t
 
 
+def _cast_tasklet(
+    state: dace.SDFGState,
+    name: str,
+    in_dtype: dace.dtypes.typeclass,
+    out_dtype: dace.dtypes.typeclass,
+) -> nodes.Tasklet:
+    """A scalar ``_out = static_cast<out>(_in)`` tasklet."""
+    t = state.add_tasklet(
+        name=name,
+        inputs={"_in"},
+        outputs={"_out"},
+        code=f"_out = static_cast<{out_dtype.ctype}>(_in);",
+        language=dace.Language.CPP,
+    )
+    t.in_connectors["_in"] = in_dtype
+    t.out_connectors["_out"] = out_dtype
+    return t
+
+
+# Inserts a cast tasklet on each map-boundary copy between differently-typed containers.
+def _insert_map_boundary_casts(sdfg: dace.SDFG) -> None:
+    for state in sdfg.all_states():
+        for i, e in enumerate(list(state.edges())):
+            if e.data is None or e.data.data is None:
+                continue
+            mem = e.data.data
+            mem_dtype = sdfg.arrays[mem].dtype
+
+            # Write: AccessNode X -> MapExit, memlet writes a different array.
+            if isinstance(e.src, nodes.AccessNode) and isinstance(e.dst, nodes.MapExit):
+                x = e.src.data
+                if mem == x or sdfg.arrays[x].dtype == mem_dtype:
+                    continue
+                t = _cast_tasklet(
+                    state, f"cast_{x}_to_{mem}_{i}", sdfg.arrays[x].dtype, mem_dtype
+                )
+                read = (
+                    dace.Memlet(data=x, subset=e.data.other_subset)
+                    if e.data.other_subset is not None
+                    else dace.Memlet(data=x)
+                )
+                write = dace.Memlet(data=mem, subset=e.data.subset)
+                state.remove_edge(e)
+                state.add_edge(e.src, None, t, "_in", read)
+                state.add_edge(t, "_out", e.dst, e.dst_conn, write)
+
+            # Read: MapEntry -> AccessNode X, memlet reads a different array.
+            elif isinstance(e.src, nodes.MapEntry) and isinstance(
+                e.dst, nodes.AccessNode
+            ):
+                x = e.dst.data
+                if mem == x or sdfg.arrays[x].dtype == mem_dtype:
+                    continue
+                t = _cast_tasklet(
+                    state, f"cast_{mem}_to_{x}_{i}", mem_dtype, sdfg.arrays[x].dtype
+                )
+                read = dace.Memlet(data=mem, subset=e.data.subset)
+                write = (
+                    dace.Memlet(data=x, subset=e.data.other_subset)
+                    if e.data.other_subset is not None
+                    else dace.Memlet(data=x)
+                )
+                state.remove_edge(e)
+                state.add_edge(e.src, e.src_conn, t, "_in", read)
+                state.add_edge(t, "_out", e.dst, None, write)
+
+
 # Adds a map that copies and casts *src_name* to *dst_name*
 def _add_copy_map(
     state: dace.SDFGState,
@@ -376,6 +443,9 @@ def change_and_propagate_fp_types(
             sdfg.arrays[name].dtype = dtype
 
     _apply_connector_types(sdfg, inferred)
+
+    # Add casts where a map entry/exit copy now connects two different dtypes.
+    _insert_map_boundary_casts(sdfg)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {
