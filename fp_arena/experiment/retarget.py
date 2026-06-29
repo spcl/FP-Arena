@@ -97,12 +97,11 @@ def apply_target(
 ) -> None:
     """
     Retarget ``sdfg`` in place for the execution target.
-    TODO: simplify=False is used to not fuse copy_in, copy_out states so they can be measured separately.
     """
     if target == "cpu":
         return
     if target == "gpu":
-        sdfg.apply_gpu_transformations(simplify=gpu_simplify)
+        sdfg.apply_gpu_transformations()
         if gpu_block_size is not None:
             for state in sdfg.all_states():
                 for node in state.nodes():

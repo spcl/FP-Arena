@@ -404,6 +404,18 @@ def _add_copy_map(
         state.add_edge(tasklet, "_out", dst_an, None, dace.Memlet(expr=dst_name))
 
 
+# Adds a empty tasklet with side effects to prevent state fusion.
+def _add_fusion_barrier(state: dace.SDFGState) -> None:
+    state.add_tasklet(
+        name="fusion_barrier",
+        inputs=set(),
+        outputs=set(),
+        code="// Fusion barrier",
+        language=dace.Language.CPP,
+        side_effects=True,
+    )
+
+
 # Main entry point to change and propagate fp types through an SDFG.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
@@ -488,6 +500,7 @@ def change_and_propagate_fp_types(
                     copy_out_state = sdfg.add_state_after(
                         state=sink, label=f"copy_out_{sink.label}"
                     )
+                    _add_fusion_barrier(copy_out_state)
                 _add_copy_map(
                     copy_out_state,
                     casted_name,
@@ -503,6 +516,7 @@ def change_and_propagate_fp_types(
                 copy_in_state = sdfg.add_state_before(
                     state=sdfg.start_block, label="copy_in"
                 )
+                _add_fusion_barrier(copy_in_state)
             _add_copy_map(
                 copy_in_state,
                 orig_name,
