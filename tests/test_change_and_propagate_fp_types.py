@@ -521,6 +521,45 @@ def test_end_to_end_demoted_written_array_runs():
     np.testing.assert_allclose(C, A * 4.0, rtol=1e-6)
 
 
+def test_boundary_cast_inserted_for_fusion():
+    """Regression: a fused map with mixed precision compiles via a map-boundary cast."""
+    import numpy as np
+    from dace.sdfg import nodes
+    from dace.transformation.dataflow import MapFusion
+
+    M = dace.symbol("M")
+
+    @dace.program
+    def prog(A: dace.float64[M], B: dace.float64[M]):
+        B[:] = A * 2.0
+        A[:] = B * 3.0
+
+    # Fuse the two statements through a transient holding B's value.
+    sdfg = prog.to_sdfg(simplify=True)
+    sdfg.apply_transformations_repeated(MapFusion)
+
+    # fp16 transient written into fp32 B -> a cast must be inserted.
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float16, "B": dace.float32}, DEFAULT_PROMOTION_RULES
+    )
+    sdfg.validate()
+    casts = [
+        n.label
+        for s in sdfg.all_states()
+        for n in s.nodes()
+        if isinstance(n, nodes.Tasklet) and "map_fusion_B_to_B" in n.label
+    ]
+    assert casts, "expected a cast on the fused transient's write into B"
+
+    csdfg = sdfg.compile()
+    A = np.full(4, 3.0, dtype=np.float64)
+    B = np.zeros(4, dtype=np.float64)
+    csdfg(A=A, B=B, M=4)
+    # B = A*2 = 6, A = B*3 = 18 (exact in fp16/fp32).
+    np.testing.assert_allclose(B, 6.0)
+    np.testing.assert_allclose(A, 18.0)
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -537,4 +576,5 @@ if __name__ == "__main__":
     test_end_to_end_float32_runs()
     test_default_rules_used_and_not_merged()
     test_end_to_end_demoted_written_array_runs()
+    test_boundary_cast_inserted_for_fusion()
     print("All tests passed.")
