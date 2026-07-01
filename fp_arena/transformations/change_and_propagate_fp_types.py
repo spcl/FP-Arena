@@ -1,7 +1,9 @@
+import ast
 from collections import defaultdict, deque
 from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 import dace
+from dace.properties import CodeBlock
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 
@@ -412,6 +414,41 @@ def _add_fusion_barrier(state: dace.SDFGState) -> None:
     )
 
 
+# Wraps every float literal in ``expr = dace.<typename>(literal)``.
+class _FloatConstantCaster(ast.NodeTransformer):
+    def __init__(self, typename: str) -> None:
+        self._typename = typename
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if not isinstance(node.value, float):
+            return node
+        return ast.Call(
+            func=ast.Attribute(
+                value=ast.Name(id="dace", ctx=ast.Load()),
+                attr=self._typename,
+                ctx=ast.Load(),
+            ),
+            args=[node],
+            keywords=[],
+        )
+
+
+# Casts all float literals in Python tasklet bodies to *dtype*.
+def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None:
+    caster = _FloatConstantCaster(dtype.to_string())
+    for state in sdfg.all_states():
+        for node in state.nodes():
+            if not (
+                isinstance(node, nodes.Tasklet)
+                and node.language == dace.Language.Python
+            ):
+                continue
+            tree = ast.fix_missing_locations(
+                caster.visit(ast.parse(node.code.as_string))
+            )
+            node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+
+
 # Main entry point to change and propagate fp types through an SDFG.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
@@ -419,10 +456,15 @@ def change_and_propagate_fp_types(
     promotion_rules: Optional[
         Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
     ] = None,
+    constant_type: Optional[dace.dtypes.typeclass] = None,
 ) -> None:
 
     # Use default promotion rules if none are provided.
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
+
+    # Optionally cast every float literal in the computation to a fixed precision.
+    if constant_type is not None:
+        _cast_float_constants(sdfg, constant_type)
 
     original_types: Dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items()

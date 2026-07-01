@@ -38,6 +38,18 @@ def _tasklet_chain(n_states: int, transient_intermediates: bool = True):
     return sdfg, arr_names
 
 
+def _const_sdfg(tasklet_code: str, dtype=dace.float32, language=dace.Language.Python):
+    """A -> t('x' -> 'y', tasklet_code) -> B, both non-transient, same dtype."""
+    sdfg = dace.SDFG("const_test")
+    sdfg.add_array("A", [1], dtype, transient=False)
+    sdfg.add_array("B", [1], dtype, transient=False)
+    s = sdfg.add_state("s")
+    t = s.add_tasklet("t", {"x"}, {"y"}, tasklet_code, language=language)
+    s.add_edge(s.add_read("A"), None, t, "x", dace.Memlet("A[0]"))
+    s.add_edge(t, "y", s.add_write("B"), None, dace.Memlet("B[0]"))
+    return sdfg
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -560,6 +572,71 @@ def test_boundary_cast_inserted_for_fusion():
     np.testing.assert_allclose(A, 18.0)
 
 
+def test_constant_type_default_leaves_literals_untouched():
+    """Without constant_type (the default), float literals are emitted as-is."""
+    sdfg = _const_sdfg("y = x + 0.5")
+    change_and_propagate_fp_types(sdfg, {})
+    code = sdfg.generate_code()[0].clean_code
+    assert "0.5" in code
+    assert "float(0.5)" not in code, code
+
+
+def test_constant_type_casts_float_literals():
+    """constant_type wraps every float literal in a functional cast to that type."""
+    sdfg = _const_sdfg("y = x + 0.5")
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    code = sdfg.generate_code()[0].clean_code
+    assert "float(0.5)" in code, code
+
+    sdfg.validate()
+    sdfg.compile()
+
+
+def test_constant_type_leaves_int_literals():
+    """Only float literals are cast; integer literals are left alone."""
+    sdfg = _const_sdfg("y = x * 2 + 0.5")
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    code = sdfg.generate_code()[0].clean_code
+    assert "float(0.5)" in code, code
+    assert "float(2)" not in code, code
+
+
+def test_constant_type_only_touches_python_tasklets():
+    """A C++ tasklet's constants are left untouched (only Python bodies are rewritten)."""
+    sdfg = _const_sdfg("y = x + 0.5;", language=dace.Language.CPP)
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    code = sdfg.generate_code()[0].clean_code
+    assert "0.5" in code
+    assert "float(0.5)" not in code, code
+
+
+def test_constant_type_end_to_end_float32_precision():
+    """The wrapped constant is evaluated in the requested precision at runtime."""
+    import numpy as np
+
+    n = 64
+
+    @dace.program
+    def prog(A: dace.float64[n], B: dace.float64[n]):
+        B[:] = A + 0.1
+
+    sdfg = prog.to_sdfg(simplify=True)
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=dace.float32
+    )
+    code = sdfg.generate_code()[0].clean_code
+    assert "float(0.1)" in code, code
+
+    rng = np.random.default_rng(0)
+    A = rng.random(n).astype(np.float64)
+    B = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, B=B)
+
+    # Generated code adds the f32 constant to the f32 input in f32 arithmetic.
+    ref = (A.astype(np.float32) + np.float32(0.1)).astype(np.float64)
+    np.testing.assert_array_equal(B, ref)
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -577,4 +654,9 @@ if __name__ == "__main__":
     test_default_rules_used_and_not_merged()
     test_end_to_end_demoted_written_array_runs()
     test_boundary_cast_inserted_for_fusion()
+    test_constant_type_default_leaves_literals_untouched()
+    test_constant_type_casts_float_literals()
+    test_constant_type_leaves_int_literals()
+    test_constant_type_only_touches_python_tasklets()
+    test_constant_type_end_to_end_float32_precision()
     print("All tests passed.")
