@@ -253,13 +253,14 @@ def _cast_tasklet(
     in_dtype: dace.dtypes.typeclass,
     out_dtype: dace.dtypes.typeclass,
 ) -> nodes.Tasklet:
-    """A scalar ``_out = static_cast<out>(_in)`` tasklet."""
+    """A scalar ``_out = out_dtype(_in)`` cast tasklet."""
+
     t = state.add_tasklet(
         name=name,
         inputs={"_in"},
         outputs={"_out"},
-        code=f"_out = static_cast<{out_dtype.ctype}>(_in);",
-        language=dace.Language.CPP,
+        code=f"_out = dace.{out_dtype.to_string()}(_in)",
+        language=dace.Language.Python,
     )
     t.in_connectors["_in"] = in_dtype
     t.out_connectors["_out"] = out_dtype
@@ -329,12 +330,8 @@ def _add_copy_map(
             f"{src_name}{src_arr.shape} vs {dst_name}{dst_arr.shape}"
         )
 
-    tasklet = state.add_tasklet(
-        name=f"cast_{src_name}_to_{dst_name}",
-        inputs={"_in"},
-        outputs={"_out"},
-        code=f"_out = static_cast<{dst_arr.dtype.ctype}>(_in);",
-        language=dace.Language.CPP,
+    tasklet = _cast_tasklet(
+        state, f"cast_{src_name}_to_{dst_name}", src_arr.dtype, dst_arr.dtype
     )
 
     if isinstance(src_arr, dace.data.Array):
