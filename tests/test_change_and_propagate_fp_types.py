@@ -637,6 +637,61 @@ def test_constant_type_end_to_end_float32_precision():
     np.testing.assert_array_equal(B, ref)
 
 
+def test_heat3d_no_fp64_in_generated_code():
+    """heat3d (examples/heat3d.py) lowered from fp64 to fp16: the generated
+    C++ contains fp64 only at the preserved A/B interface."""
+    import re
+
+    N = dace.symbol("N", dtype=dace.int64)
+
+    @dace.program
+    def heat3d(TSTEPS: dace.int64, A: dace.float64[N, N, N], B: dace.float64[N, N, N]):
+        for t in range(1, TSTEPS):
+            B[1:-1, 1:-1, 1:-1] = (
+                0.125
+                * (A[2:, 1:-1, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[:-2, 1:-1, 1:-1])
+                + 0.125
+                * (A[1:-1, 2:, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, :-2, 1:-1])
+                + 0.125
+                * (A[1:-1, 1:-1, 2:] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, 1:-1, :-2])
+                + A[1:-1, 1:-1, 1:-1]
+            )
+            A[1:-1, 1:-1, 1:-1] = (
+                0.125
+                * (B[2:, 1:-1, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[:-2, 1:-1, 1:-1])
+                + 0.125
+                * (B[1:-1, 2:, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, :-2, 1:-1])
+                + 0.125
+                * (B[1:-1, 1:-1, 2:] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, 1:-1, :-2])
+                + B[1:-1, 1:-1, 1:-1]
+            )
+
+    sdfg = heat3d.to_sdfg(simplify=True)
+    change_and_propagate_fp_types(
+        sdfg,
+        {"A": dace.float16, "B": dace.float16},
+        constant_type=dace.float16,
+    )
+    sdfg.validate()
+
+    code_objects = sdfg.generate_code()
+
+    # The computation is in fp16.
+    assert any(
+        "dace::float16" in co.clean_code for co in code_objects
+    ), "expected dace::float16 in the generated code"
+
+    # fp64 only on interface lines: A/B references and interface cast tasklets.
+    allowed = re.compile(r"\b[AB]\b|\bdouble\s+_out;|=\s*double\(_in\)")
+    leaks = [
+        f"[{co.title}] {line.strip()}"
+        for co in code_objects
+        for line in co.clean_code.splitlines()
+        if "double" in line and not allowed.search(line)
+    ]
+    assert not leaks, "fp64 leaked into the computation:\n" + "\n".join(leaks)
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -659,4 +714,5 @@ if __name__ == "__main__":
     test_constant_type_leaves_int_literals()
     test_constant_type_only_touches_python_tasklets()
     test_constant_type_end_to_end_float32_precision()
+    test_heat3d_no_fp64_in_generated_code()
     print("All tests passed.")
