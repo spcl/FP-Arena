@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fp_arena.experiment.results import ErrorResult, PerfResult
+from fp_arena.experiment.results import ErrorResult, PerfResult, PerturbationResult
 
 DEFAULT_DB_PATH = ".fp_arena_results.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind        TEXT NOT NULL,          -- 'performance' | 'error'
+    kind        TEXT NOT NULL,          -- 'performance' | 'error' | 'perturbation'
     experiment  TEXT NOT NULL,          -- ExperimentConfig.name
     created_at  TEXT NOT NULL,          -- ISO-8601 UTC
     precision   TEXT NOT NULL,          -- JSON: the precision map
@@ -114,7 +114,24 @@ class ResultStore:
             result.to_dict(),
         )
 
-    # TODO: ``add_select`` and ``add_perturbation``.
+    def add_perturbation(
+        self,
+        experiment: str,
+        result: PerturbationResult,
+        symbols: Optional[Dict[str, Any]] = None,
+        scalars: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Append one :class:`PerturbationResult`. :returns: the new row id."""
+        return self._add(
+            "perturbation",
+            experiment,
+            result.precision,
+            symbols or {},
+            scalars or {},
+            result.to_dict(),
+        )
+
+    # TODO: ``add_select``.
 
     def query(
         self, experiment: Optional[str] = None, kind: Optional[str] = None

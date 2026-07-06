@@ -11,10 +11,12 @@ from fp_arena.experiment import (
     ExperimentConfig,
     Noise,
     PerformanceAnalysisConfig,
+    PerturbationAnalysisConfig,
     ResultStore,
     registry,
     run_error,
     run_performance,
+    run_perturbation,
 )
 from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.retarget import apply_target, fresh_sdfg
@@ -281,6 +283,74 @@ def test_error_gpu_zero_when_candidate_equals_reference():
         )
     )
     assert errs[0].errors["c"].abs_max == 0.0
+
+
+def test_perturbation_zero_without_distribution():
+    # Noise without a distribution is a no-op, so perturbed == clean exactly.
+    res = run_perturbation(
+        PerturbationAnalysisConfig(_exp(), noise={"a": Noise(absolute=1.0)})
+    )
+    assert len(res) == 1
+    assert res[0].perturbed == "a"
+    assert res[0].precision == {}
+    assert res[0].errors["c"].abs_max == 0.0
+
+
+def test_perturbation_error_scales_with_noise():
+    def run(mag):
+        cfg = PerturbationAnalysisConfig(
+            _exp(),
+            noise={"a": Noise(relative=mag, relative_dist=stats.uniform(-1.0, 2.0))},
+            n_samples=2,
+        )
+        return run_perturbation(cfg)[0].errors["c"]
+
+    small, big = run(1e-6), run(1e-2)
+    assert 0.0 < small.rel_mean < big.rel_mean
+    # axpy: c = a*b + c with positive inputs, so a relative perturbation of `a`
+    # bounded by mag moves c by at most mag relative.
+    assert big.rel_max <= 1e-2 * (1.0 + 1e-9)
+
+
+def test_perturbation_one_input_at_a_time():
+    noise = Noise(relative=1e-3, relative_dist=stats.uniform(-1.0, 2.0))
+    res = run_perturbation(
+        PerturbationAnalysisConfig(_exp(), noise={"a": noise, "b": noise})
+    )
+    assert [r.perturbed for r in res] == ["a", "b"]
+    assert all(r.errors["c"].abs_max > 0.0 for r in res)
+
+
+def test_perturbation_store_roundtrip():
+    db = ResultStore(":memory:")
+    res = run_perturbation(
+        PerturbationAnalysisConfig(
+            _exp(),
+            noise={"a": Noise(relative=1e-3, relative_dist=stats.norm(0.0, 1.0))},
+            precisions=[{"a": "fp32"}],
+        ),
+        store=db,
+    )
+    rows = db.query(kind="perturbation")
+    assert len(rows) == 1
+    assert rows[0].precision == {"a": "fp32"}
+    assert rows[0].payload["perturbed"] == "a"
+    assert rows[0].payload["errors"]["c"]["rel_mean"] == res[0].errors["c"].rel_mean
+
+
+def test_perturbation_unknown_input_raises():
+    with pytest.raises(ValueError, match="not a read input"):
+        run_perturbation(
+            PerturbationAnalysisConfig(
+                _exp(),
+                noise={"z": Noise(absolute=1.0, absolute_dist=stats.norm(0.0, 1.0))},
+            )
+        )
+
+
+def test_perturbation_empty_noise_raises():
+    with pytest.raises(ValueError, match="at least one input"):
+        run_perturbation(PerturbationAnalysisConfig(_exp(), noise={}))
 
 
 def test_noise_perturbs_inputs():

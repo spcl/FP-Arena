@@ -90,4 +90,27 @@ class ErrorResult:
         }
 
 
+@dataclass
+class PerturbationResult:
+    """
+    Per-array output deviation induced by perturbing the single input
+    ``perturbed``, versus the clean run at the same precision point.
+    """
+
+    precision: PrecisionMap
+    perturbed: str
+    errors: Dict[str, ErrorStats]
+    n_samples: int
+    seed: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "precision": self.precision,
+            "perturbed": self.perturbed,
+            "errors": {k: v.to_dict() for k, v in self.errors.items()},
+            "n_samples": self.n_samples,
+            "seed": self.seed,
+        }
+
+
 # TODO(select): Add SelectResult

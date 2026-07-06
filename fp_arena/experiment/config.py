@@ -1,7 +1,7 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """
 Experiment config.
-TODO: Select and perturbation configs.
+TODO: Select config.
 """
 
 from dataclasses import dataclass, field
@@ -69,4 +69,20 @@ class ErrorAnalysisConfig:
     precisions: List[PrecisionMap]
     noise: Dict[str, Noise] = field(default_factory=dict)
     reference: Union[str, Dict[str, str]] = "fp64"
+    n_samples: int = 1
+
+
+@dataclass
+class PerturbationAnalysisConfig:
+    """
+    Measure input sensitivity: perturb one input array at a time and compare
+    each written array against the clean run at the same precision point,
+    aggregated over ``n_samples`` input realisations.
+    ``noise`` names the inputs to perturb (each analysed separately);
+    ``precisions`` lists the points to analyse at (default: the unmodified program).
+    """
+
+    experiment: ExperimentConfig
+    noise: Dict[str, Noise]
+    precisions: List[PrecisionMap]
     n_samples: int = 1

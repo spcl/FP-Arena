@@ -4,8 +4,9 @@ Drivers that execute the experiment kinds.
 
 * :func:`run_performance` -- compile each precision point and time it.
 * :func:`run_error` -- dual-execute each point against a high-precision reference (lockstep on identical inputs).
+* :func:`run_perturbation` -- perturb one input at a time and compare against the clean run at the same precision point.
 
-TODO: Select and perturbation runners
+TODO: Select runner
 """
 
 import math
@@ -19,9 +20,15 @@ import dace
 from fp_arena.experiment.config import (
     ErrorAnalysisConfig,
     PerformanceAnalysisConfig,
+    PerturbationAnalysisConfig,
     PrecisionMap,
 )
-from fp_arena.experiment.results import ErrorResult, ErrorStats, PerfResult
+from fp_arena.experiment.results import (
+    ErrorResult,
+    ErrorStats,
+    PerfResult,
+    PerturbationResult,
+)
 from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.retarget import (
     apply_precision,
@@ -372,6 +379,73 @@ def run_performance(
         dace.Config.set(
             "compiler", "cuda", "max_concurrent_streams", value=prev_streams
         )
+    return results
+
+
+def run_perturbation(
+    cfg: PerturbationAnalysisConfig, store: Optional[ResultStore] = None
+) -> List[PerturbationResult]:
+    """
+    Measure per-array output sensitivity to input noise: for each precision
+    point, execute clean and perturbed inputs (one noisy array at a time) on the
+    same compiled SDFG and reduce the output deviation over ``cfg.n_samples``
+    input realisations. One result per (precision point, perturbed input).
+    """
+    if not cfg.noise:
+        raise ValueError(
+            "PerturbationAnalysisConfig.noise must name at least one input array"
+        )
+    exp = cfg.experiment
+    results: List[PerturbationResult] = []
+    points = tqdm(cfg.precisions, desc="perturbation", unit="pt")
+    for pin_map in points:
+        points.set_postfix_str(_fmt_pin(pin_map))
+        sdfg = fresh_sdfg(exp)
+        apply_precision(sdfg, pin_map, exp.promotion_rules)
+        apply_target(sdfg, exp.target, gpu_block_size=exp.gpu_block_size)
+        csdfg = sdfg.compile()
+
+        reads, writes = sdfg.read_and_write_sets()
+        for name in cfg.noise:
+            if name not in reads or name not in sdfg.arrays:
+                raise ValueError(
+                    f"Perturbed array {name!r} is not a read input of SDFG {sdfg.name!r}"
+                )
+        outputs = sorted(
+            name
+            for name in writes
+            if name in sdfg.arrays
+            and isinstance(sdfg.arrays[name], dace.data.Array)
+            and not sdfg.arrays[name].transient
+        )
+        acc = {pert: {out: _new_acc() for out in outputs} for pert in cfg.noise}
+
+        for rng in tqdm(
+            _sample_rngs(exp.seed, cfg.n_samples), desc="samples", unit="smp", leave=False
+        ):
+            clean_args = make_call_args(sdfg, exp, rng, reads=reads)
+            base_args = _copy_args(clean_args)
+            csdfg(**base_args)
+            for pert_name, pert_noise in cfg.noise.items():
+                pert_args = _copy_args(clean_args)
+                pert_args[pert_name] = pert_noise.apply(clean_args[pert_name], rng)
+                csdfg(**pert_args)
+                for out in outputs:
+                    _accumulate(acc[pert_name][out], base_args[out], pert_args[out])
+
+        for pert_name in cfg.noise:
+            result = PerturbationResult(
+                precision=dict(pin_map),
+                perturbed=pert_name,
+                errors={out: _finalize(a) for out, a in acc[pert_name].items()},
+                n_samples=cfg.n_samples,
+                seed=exp.seed,
+            )
+            results.append(result)
+            if store is not None:
+                store.add_perturbation(
+                    exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
+                )
     return results
 
 
