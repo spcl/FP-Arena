@@ -1,8 +1,9 @@
+import ast
 from collections import defaultdict, deque
-from functools import reduce
 from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 import dace
+from dace.properties import CodeBlock
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 
@@ -219,26 +220,19 @@ def _print_type_report(
 def _apply_connector_types(
     sdfg: dace.SDFG,
     inferred: Dict[str, dace.dtypes.typeclass],
-    rules: Dict[FrozenSet, dace.dtypes.typeclass],
 ) -> None:
     for state in _states_in_order(sdfg):
         for node in state.nodes():
             if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-                in_types = []
                 for e in state.in_edges(node):
                     if e.dst_conn is None or e.data is None or e.data.data is None:
                         continue
-                    t = inferred[e.data.data]
-                    node.in_connectors[e.dst_conn] = t
-                    in_types.append(t)
+                    node.in_connectors[e.dst_conn] = inferred[e.data.data]
 
-                if not in_types:
-                    continue
-                compute = reduce(lambda a, b: _promote(a, b, rules), in_types)
                 for e in state.out_edges(node):
                     if e.src_conn is None or e.data is None or e.data.data is None:
                         continue
-                    node.out_connectors[e.src_conn] = compute
+                    node.out_connectors[e.src_conn] = inferred[e.data.data]
 
             elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
                 # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
@@ -253,6 +247,74 @@ def _apply_connector_types(
                         node.in_connectors[e.dst_conn] = t
                     if out_conn in node.out_connectors:
                         node.out_connectors[out_conn] = t
+
+
+def _cast_tasklet(
+    state: dace.SDFGState,
+    name: str,
+    in_dtype: dace.dtypes.typeclass,
+    out_dtype: dace.dtypes.typeclass,
+) -> nodes.Tasklet:
+    """A scalar ``_out = out_dtype(_in)`` cast tasklet."""
+
+    t = state.add_tasklet(
+        name=name,
+        inputs={"_in"},
+        outputs={"_out"},
+        code=f"_out = dace.{out_dtype.to_string()}(_in)",
+        language=dace.Language.Python,
+    )
+    t.in_connectors["_in"] = in_dtype
+    t.out_connectors["_out"] = out_dtype
+    return t
+
+
+# Inserts a cast tasklet on each map-boundary copy between differently-typed containers.
+def _insert_map_boundary_casts(sdfg: dace.SDFG) -> None:
+    for state in sdfg.all_states():
+        for i, e in enumerate(list(state.edges())):
+            if e.data is None or e.data.data is None:
+                continue
+            mem = e.data.data
+            mem_dtype = sdfg.arrays[mem].dtype
+
+            # Write: AccessNode X -> MapExit, memlet writes a different array.
+            if isinstance(e.src, nodes.AccessNode) and isinstance(e.dst, nodes.MapExit):
+                x = e.src.data
+                if mem == x or sdfg.arrays[x].dtype == mem_dtype:
+                    continue
+                t = _cast_tasklet(
+                    state, f"cast_{x}_to_{mem}_{i}", sdfg.arrays[x].dtype, mem_dtype
+                )
+                read = (
+                    dace.Memlet(data=x, subset=e.data.other_subset)
+                    if e.data.other_subset is not None
+                    else dace.Memlet(data=x)
+                )
+                write = dace.Memlet(data=mem, subset=e.data.subset)
+                state.remove_edge(e)
+                state.add_edge(e.src, None, t, "_in", read)
+                state.add_edge(t, "_out", e.dst, e.dst_conn, write)
+
+            # Read: MapEntry -> AccessNode X, memlet reads a different array.
+            elif isinstance(e.src, nodes.MapEntry) and isinstance(
+                e.dst, nodes.AccessNode
+            ):
+                x = e.dst.data
+                if mem == x or sdfg.arrays[x].dtype == mem_dtype:
+                    continue
+                t = _cast_tasklet(
+                    state, f"cast_{mem}_to_{x}_{i}", mem_dtype, sdfg.arrays[x].dtype
+                )
+                read = dace.Memlet(data=mem, subset=e.data.subset)
+                write = (
+                    dace.Memlet(data=x, subset=e.data.other_subset)
+                    if e.data.other_subset is not None
+                    else dace.Memlet(data=x)
+                )
+                state.remove_edge(e)
+                state.add_edge(e.src, e.src_conn, t, "_in", read)
+                state.add_edge(t, "_out", e.dst, None, write)
 
 
 # Adds a map that copies and casts *src_name* to *dst_name*
@@ -270,12 +332,8 @@ def _add_copy_map(
             f"{src_name}{src_arr.shape} vs {dst_name}{dst_arr.shape}"
         )
 
-    tasklet = state.add_tasklet(
-        name=f"cast_{src_name}_to_{dst_name}",
-        inputs={"_in"},
-        outputs={"_out"},
-        code=f"_out = static_cast<{dst_arr.dtype.ctype}>(_in);",
-        language=dace.Language.CPP,
+    tasklet = _cast_tasklet(
+        state, f"cast_{src_name}_to_{dst_name}", src_arr.dtype, dst_arr.dtype
     )
 
     if isinstance(src_arr, dace.data.Array):
@@ -344,20 +402,69 @@ def _add_copy_map(
         state.add_edge(tasklet, "_out", dst_an, None, dace.Memlet(expr=dst_name))
 
 
+# Adds a empty tasklet with side effects to prevent state fusion.
+def _add_fusion_barrier(state: dace.SDFGState) -> None:
+    state.add_tasklet(
+        name="fusion_barrier",
+        inputs=set(),
+        outputs=set(),
+        code="// Fusion barrier",
+        language=dace.Language.CPP,
+        side_effects=True,
+    )
+
+
+# Wraps every float literal in ``expr = dace.<typename>(literal)``.
+class _FloatConstantCaster(ast.NodeTransformer):
+    def __init__(self, typename: str) -> None:
+        self._typename = typename
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if not isinstance(node.value, float):
+            return node
+        return ast.Call(
+            func=ast.Attribute(
+                value=ast.Name(id="dace", ctx=ast.Load()),
+                attr=self._typename,
+                ctx=ast.Load(),
+            ),
+            args=[node],
+            keywords=[],
+        )
+
+
+# Casts all float literals in Python tasklet bodies to *dtype*.
+def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None:
+    caster = _FloatConstantCaster(dtype.to_string())
+    for state in sdfg.all_states():
+        for node in state.nodes():
+            if not (
+                isinstance(node, nodes.Tasklet)
+                and node.language == dace.Language.Python
+            ):
+                continue
+            tree = ast.fix_missing_locations(
+                caster.visit(ast.parse(node.code.as_string))
+            )
+            node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+
+
 # Main entry point to change and propagate fp types through an SDFG.
-# When *instrument* is set, the generated copy_in/copy_out cast states are tagged
-# with DaCe's Timer instrumentation so the runner can separate cast time from compute time.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
     initial_types: Dict[str, dace.dtypes.typeclass],
     promotion_rules: Optional[
         Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
     ] = None,
-    instrument: bool = False,
+    constant_type: Optional[dace.dtypes.typeclass] = None,
 ) -> None:
 
     # Use default promotion rules if none are provided.
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
+
+    # Optionally cast every float literal in the computation to a fixed precision.
+    if constant_type is not None:
+        _cast_float_constants(sdfg, constant_type)
 
     original_types: Dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items()
@@ -386,7 +493,10 @@ def change_and_propagate_fp_types(
         if sdfg.arrays[name].dtype != dtype:
             sdfg.arrays[name].dtype = dtype
 
-    _apply_connector_types(sdfg, inferred, rules)
+    _apply_connector_types(sdfg, inferred)
+
+    # Add casts where a map entry/exit copy now connects two different dtypes.
+    _insert_map_boundary_casts(sdfg)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {
@@ -428,8 +538,7 @@ def change_and_propagate_fp_types(
                     copy_out_state = sdfg.add_state_after(
                         state=sink, label=f"copy_out_{sink.label}"
                     )
-                    if instrument:
-                        copy_out_state.instrument = dace.InstrumentationType.Timer
+                    _add_fusion_barrier(copy_out_state)
                 _add_copy_map(
                     copy_out_state,
                     casted_name,
@@ -445,8 +554,7 @@ def change_and_propagate_fp_types(
                 copy_in_state = sdfg.add_state_before(
                     state=sdfg.start_block, label="copy_in"
                 )
-                if instrument:
-                    copy_in_state.instrument = dace.InstrumentationType.Timer
+                _add_fusion_barrier(copy_in_state)
             _add_copy_map(
                 copy_in_state,
                 orig_name,
