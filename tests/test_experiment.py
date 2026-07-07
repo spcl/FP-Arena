@@ -33,12 +33,6 @@ def _axpy(a: dace.float64[N], b: dace.float64[N], c: dace.float64[N]):
 
 _AXPY_SDFG = _axpy.to_sdfg(simplify=True)
 
-RULES = {
-    frozenset({dace.float16, dace.float32}): dace.float32,
-    frozenset({dace.float16, dace.float64}): dace.float64,
-    frozenset({dace.float32, dace.float64}): dace.float64,
-}
-
 
 def _exp(**kw):
     base = dict(
@@ -49,7 +43,6 @@ def _exp(**kw):
             "b": stats.uniform(0.5, 1.0),
             "c": stats.uniform(0.5, 1.0),
         },
-        promotion_rules=RULES,
         symbols={"N": 64},
     )
     base.update(kw)
@@ -167,9 +160,7 @@ def test_performance_phase_breakdown():
     assert cast.d2h_times == []
     # total == sum of phases per rep.
     for i in range(3):
-        expected = (
-            cast.cast_in_times[i] + cast.cast_out_times[i] + cast.kernel_times[i]
-        )
+        expected = cast.cast_in_times[i] + cast.cast_out_times[i] + cast.kernel_times[i]
         assert cast.total_times[i] == pytest.approx(expected)
 
     # No cast: total is kernel.
@@ -260,7 +251,6 @@ def test_performance_gpu_loop_kernel_grouped_per_invocation():
                     "b": stats.uniform(0.5, 1.0),
                     "c": stats.uniform(0.5, 1.0),
                 },
-                promotion_rules=RULES,
                 symbols={"N": 1 << 14, "T": 8},
                 target="gpu",
             ),

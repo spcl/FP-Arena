@@ -22,7 +22,7 @@ class ExperimentConfig:
     :param name: identifier used to group results in the database.
     :param program: the ``dace.SDFG`` under test
     :param inputs: per-array input distributions for the *read* arrays.
-    :param promotion_rules: promotion rules for resolving precision conflicts (e.g. ``{frozenset({fp16, fp32}): fp32}``).
+    :param promotion_rules: promotion rules for resolving precision conflicts (e.g. ``{frozenset({fp16, fp32}): fp32}``); ``None`` uses ``DEFAULT_PROMOTION_RULES``.
     :param symbols: values for the SDFG's free symbols (e.g. ``{"N": 100}``);
     :param scalar_args: values for non-array scalar arguments.
     :param target: ``"cpu"`` (default) or ``"gpu"``;
@@ -33,9 +33,9 @@ class ExperimentConfig:
     name: str
     program: dace.SDFG
     inputs: Dict[str, DistributionLike] = field(default_factory=dict)
-    promotion_rules: Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass] = (
-        field(default_factory=dict)
-    )
+    promotion_rules: Optional[
+        Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
+    ] = None
     symbols: Dict[str, int] = field(default_factory=dict)
     scalar_args: Dict[str, Any] = field(default_factory=dict)
     target: str = "cpu"
