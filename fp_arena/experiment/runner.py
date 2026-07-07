@@ -178,10 +178,18 @@ def _classify_state(sdfg: dace.SDFG, state) -> str:
     return "kernel"
 
 
-def _group_per_invocation(samples: List[float], n_invocations: int) -> List[float]:
+def _group_per_invocation(
+    samples: List[float], n_invocations: int, name: str
+) -> List[float]:
     """Sum a timer's per-execution samples into one value per invocation (loop bodies fire repeatedly)."""
-    if n_invocations <= 0 or not samples or len(samples) % n_invocations != 0:
-        return list(samples)
+    if not samples:
+        return []
+    if len(samples) % n_invocations != 0:
+        raise ValueError(
+            f"Timer {name!r} fired {len(samples)} times over {n_invocations} "
+            f"invocations; per-rep phase attribution requires a static "
+            f"per-invocation execution count"
+        )
     k = len(samples) // n_invocations
     if k == 1:
         return list(samples)
@@ -198,11 +206,11 @@ def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> List[fl
                 if not name_pred(name):
                     continue
                 for times_ms in tid_map.values():
-                    per_inv = _group_per_invocation(times_ms, n_invocations)
-                    tail = per_inv[-n_reps:]
-                    offset = n_reps - len(tail)
-                    for i, ms in enumerate(tail):
-                        out[offset + i] += ms
+                    per_inv = _group_per_invocation(times_ms, n_invocations, name)
+                    if not per_inv:
+                        continue
+                    for i, ms in enumerate(per_inv[-n_reps:]):
+                        out[i] += ms
                     matched = True
     return out if matched else []
 

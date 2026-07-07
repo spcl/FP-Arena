@@ -20,7 +20,12 @@ from fp_arena.experiment import (
 )
 from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.retarget import apply_target, fresh_sdfg
-from fp_arena.experiment.runner import _accumulate, _finalize, _new_acc
+from fp_arena.experiment.runner import (
+    _accumulate,
+    _finalize,
+    _group_per_invocation,
+    _new_acc,
+)
 
 N = dace.symbol("N")
 
@@ -386,6 +391,17 @@ def test_error_noise_is_per_analysis():
 def test_is_mpfr():
     assert registry.is_mpfr("mpfr128")
     assert not registry.is_mpfr("fp32")
+
+
+def test_group_per_invocation():
+    # k executions per invocation are summed into one value per invocation.
+    assert _group_per_invocation([1.0, 2.0, 3.0, 4.0], 2, "t") == [3.0, 7.0]
+    # One execution per invocation passes through.
+    assert _group_per_invocation([1.0, 2.0], 2, "t") == [1.0, 2.0]
+    assert _group_per_invocation([], 2, "t") == []
+    # A data-dependent execution count cannot be attributed to reps: fail loudly.
+    with pytest.raises(ValueError, match="static per-invocation"):
+        _group_per_invocation([1.0] * 7, 11, "State s7")
 
 
 def test_overflowing_reference_yields_inf_error_not_nan():
