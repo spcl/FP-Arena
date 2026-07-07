@@ -239,61 +239,75 @@ def _fmt_pin(pin_map: PrecisionMap) -> str:
     return " ".join(f"{k}={v}" for k, v in pin_map.items())
 
 
-Reference = Tuple[Any, dace.SDFG]
+def _output_arrays(sdfg: dace.SDFG) -> List[str]:
+    """Non-transient written array names -- the arrays error metrics are reduced over."""
+    _, writes = sdfg.read_and_write_sets()
+    return sorted(
+        name
+        for name in writes
+        if name in sdfg.arrays
+        and isinstance(sdfg.arrays[name], dace.data.Array)
+        and not sdfg.arrays[name].transient
+    )
 
 
-def compile_reference(experiment, reference) -> Reference:
+#: Per input sample: (pristine call args, reference outputs of the written arrays).
+ReferenceSamples = List[Tuple[Dict[str, Any], Dict[str, Any]]]
+
+
+def compile_reference(experiment, reference):
     """Build and compile the high-precision reference SDFG once."""
     sdfg = fresh_sdfg(experiment)
     apply_reference(sdfg, reference, experiment.promotion_rules)
     apply_target(sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
-    return sdfg.compile(), sdfg
+    return sdfg.compile()
+
+
+def run_reference(
+    experiment, reference, n_samples: int, seed: int, noise=None
+) -> ReferenceSamples:
+    """
+    Execute the reference once per input sample.
+    """
+    ref_csdfg = compile_reference(experiment, reference)
+    program = experiment.program
+    reads, _ = program.read_and_write_sets()
+    outputs = _output_arrays(program)
+    samples: ReferenceSamples = []
+    for rng in tqdm(
+        _sample_rngs(seed, n_samples), desc="reference", unit="smp", leave=False
+    ):
+        args = make_call_args(program, experiment, rng, noise, reads=reads)
+        ref_args = _copy_args(args)
+        ref_csdfg(**ref_args)
+        samples.append((args, {name: ref_args[name] for name in outputs}))
+    return samples
 
 
 def measure_error(
     experiment,
     pin_map: PrecisionMap,
-    reference,
-    n_samples: int,
+    ref_samples: ReferenceSamples,
     seed: int,
-    ref: Optional[Reference] = None,
-    noise=None,
 ) -> ErrorResult:
     """
-    Dual-execute one precision point against the reference and reduce per-array error over ``n_samples`` input realisations.
+    Execute one precision point on the reference's input samples and reduce the per-array error against the cached reference outputs.
     """
-
-    if ref is None:
-        ref = compile_reference(experiment, reference)
-    ref_csdfg, _ = ref
-
     cand_sdfg = fresh_sdfg(experiment)
     apply_precision(cand_sdfg, pin_map, experiment.promotion_rules)
     apply_target(cand_sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
     cand_csdfg = cand_sdfg.compile()
 
-    reads, writes = cand_sdfg.read_and_write_sets()
-    acc = {
-        name: _new_acc()
-        for name in writes
-        if name in cand_sdfg.arrays
-        and isinstance(cand_sdfg.arrays[name], dace.data.Array)
-        and not cand_sdfg.arrays[name].transient
-    }
-
-    for rng in tqdm(
-        _sample_rngs(seed, n_samples), desc="samples", unit="smp", leave=False
-    ):
-        ref_args = make_call_args(cand_sdfg, experiment, rng, noise, reads=reads)
-        cand_args = _copy_args(ref_args)
-        ref_csdfg(**ref_args)
+    acc = {name: _new_acc() for name in _output_arrays(cand_sdfg)}
+    for args, ref_out in tqdm(ref_samples, desc="samples", unit="smp", leave=False):
+        cand_args = _copy_args(args)
         cand_csdfg(**cand_args)
         for name in acc:
-            _accumulate(acc[name], ref_args[name], cand_args[name])
+            _accumulate(acc[name], ref_out[name], cand_args[name])
 
     errors = {name: _finalize(a) for name, a in acc.items()}
     return ErrorResult(
-        precision=dict(pin_map), errors=errors, n_samples=n_samples, seed=seed
+        precision=dict(pin_map), errors=errors, n_samples=len(ref_samples), seed=seed
     )
 
 
@@ -315,8 +329,6 @@ def run_performance(
     dace.Config.set("instrumentation", "report_each_invocation", value=False)
     prev_streams = dace.Config.get("compiler", "cuda", "max_concurrent_streams")
     if target == "gpu":
-        # Serialise onto the default stream so each phase's events bracket only
-        # that phase's device work.
         dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
 
     points = tqdm(cfg.precisions, desc="performance", unit="pt")
@@ -398,19 +410,13 @@ def run_perturbation(
         apply_target(sdfg, exp.target, gpu_block_size=exp.gpu_block_size)
         csdfg = sdfg.compile()
 
-        reads, writes = sdfg.read_and_write_sets()
+        reads, _ = sdfg.read_and_write_sets()
         for name in cfg.noise:
             if name not in reads or name not in sdfg.arrays:
                 raise ValueError(
                     f"Perturbed array {name!r} is not a read input of SDFG {sdfg.name!r}"
                 )
-        outputs = sorted(
-            name
-            for name in writes
-            if name in sdfg.arrays
-            and isinstance(sdfg.arrays[name], dace.data.Array)
-            and not sdfg.arrays[name].transient
-        )
+        outputs = _output_arrays(sdfg)
         acc = {pert: {out: _new_acc() for out in outputs} for pert in cfg.noise}
 
         for rng in tqdm(
@@ -449,26 +455,18 @@ def run_error(
     cfg: ErrorAnalysisConfig, store: Optional[ResultStore] = None
 ) -> List[ErrorResult]:
     """Measure per-array error of each precision point, optionally appending to ``store`` database."""
-    ref = compile_reference(cfg.experiment, cfg.reference)
+    exp = cfg.experiment
+    ref_samples = run_reference(
+        exp, cfg.reference, cfg.n_samples, exp.seed, noise=cfg.noise
+    )
     results: List[ErrorResult] = []
     points = tqdm(cfg.precisions, desc="error", unit="pt")
     for pin_map in points:
         points.set_postfix_str(_fmt_pin(pin_map))
-        result = measure_error(
-            cfg.experiment,
-            pin_map,
-            cfg.reference,
-            cfg.n_samples,
-            cfg.experiment.seed,
-            ref=ref,
-            noise=cfg.noise,
-        )
+        result = measure_error(exp, pin_map, ref_samples, exp.seed)
         results.append(result)
         if store is not None:
             store.add_error(
-                cfg.experiment.name,
-                result,
-                symbols=cfg.experiment.symbols,
-                scalars=cfg.experiment.scalar_args,
+                exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
             )
     return results
