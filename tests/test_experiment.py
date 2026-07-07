@@ -118,14 +118,14 @@ def test_error_decreases_with_precision():
     e16, e32 = errs[0].errors["c"], errs[1].errors["c"]
     assert e32.rel_mean < e16.rel_mean
     assert e32.rel_mean < 1e-5
-    assert e16.abs_max >= 0 and e16.rel_max >= 0
+    assert e16.linf >= 0 and e16.rel_max >= 0
 
 
 def test_error_zero_when_candidate_equals_reference():
     errs = run_error(
         ErrorAnalysisConfig(_exp(), precisions=[{"a": "fp64"}], reference="fp64")
     )
-    assert errs[0].errors["c"].abs_max == 0.0
+    assert errs[0].errors["c"].linf == 0.0
 
 
 def test_performance_runs():
@@ -277,7 +277,7 @@ def test_error_gpu_zero_when_candidate_equals_reference():
             _exp(target="gpu"), precisions=[{"a": "fp64"}], reference="fp64"
         )
     )
-    assert errs[0].errors["c"].abs_max == 0.0
+    assert errs[0].errors["c"].linf == 0.0
 
 
 def test_noise_half_specified_raises():
@@ -313,7 +313,7 @@ def test_perturbation_one_input_at_a_time():
     )
     assert [r.perturbed for r in res] == ["a", "b"]
     assert all(r.precision == {} for r in res)
-    assert all(r.errors["c"].abs_max > 0.0 for r in res)
+    assert all(r.errors["c"].linf > 0.0 for r in res)
 
 
 def test_perturbation_store_roundtrip():
@@ -385,7 +385,7 @@ def test_error_noise_is_per_analysis():
         ),
     )
     s = errs[0].errors["c"]
-    assert np.isfinite(s.rel_mean) and s.abs_max >= 0.0
+    assert np.isfinite(s.rel_mean) and s.linf >= 0.0
 
 
 def test_is_mpfr():
@@ -421,7 +421,6 @@ def test_error_norms_match_hand_computed_values():
     assert s.l1 == pytest.approx(4.0)
     assert s.l2 == pytest.approx(4.0)
     assert s.linf == pytest.approx(4.0)
-    assert s.linf == s.abs_max
 
     assert s.l1_norm == pytest.approx(4.0 / 7.0)
     assert s.l2_norm == pytest.approx(0.8)

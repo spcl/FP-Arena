@@ -20,14 +20,13 @@ class ErrorStats:
     Metrics
     -------
     abs_mean  : Mean(|e|)
-    abs_max   : Max(|e|)
 
     rel_mean  : Mean(|e| / |r|)
     rel_max   : Max(|e| / |r|)
 
     l1        : sum(|e|)
     l2        : sqrt(sum(e**2))
-    linf      : max(|e|)  (Equivalent to abs_max)
+    linf      : max(|e|)
 
     l1_norm   : sum(|e|) / sum(|r|)
     l2_norm   : sqrt(sum(e**2)) / sqrt(sum(r**2))
@@ -36,7 +35,6 @@ class ErrorStats:
     """
 
     abs_mean: float
-    abs_max: float
     rel_mean: float
     rel_max: float
     l1: float
@@ -46,9 +44,6 @@ class ErrorStats:
     l2_norm: float
     linf_norm: float
     snr: float
-
-    def to_dict(self) -> Dict[str, float]:
-        return asdict(self)
 
 
 @dataclass
@@ -86,12 +81,7 @@ class ErrorResult:
     seed: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "precision": self.precision,
-            "errors": {k: v.to_dict() for k, v in self.errors.items()},
-            "n_samples": self.n_samples,
-            "seed": self.seed,
-        }
+        return asdict(self)
 
 
 @dataclass
@@ -108,10 +98,4 @@ class PerturbationResult:
     seed: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "precision": self.precision,
-            "perturbed": self.perturbed,
-            "errors": {k: v.to_dict() for k, v in self.errors.items()},
-            "n_samples": self.n_samples,
-            "seed": self.seed,
-        }
+        return asdict(self)

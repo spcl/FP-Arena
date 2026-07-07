@@ -126,7 +126,6 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
     linf = acc["abs_max"]
     return ErrorStats(
         abs_mean=abs_mean,
-        abs_max=acc["abs_max"],
         rel_mean=rel_mean,
         rel_max=acc["rel_max"],
         l1=l1,
@@ -381,7 +380,7 @@ def run_performance(
             )
             results.append(result)
             if store is not None:
-                store.add_perf(
+                store.add(
                     cfg.experiment.name,
                     result,
                     symbols=cfg.experiment.symbols,
@@ -453,7 +452,7 @@ def run_perturbation(
             )
             results.append(result)
             if store is not None:
-                store.add_perturbation(
+                store.add(
                     exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
                 )
     return results
@@ -474,7 +473,7 @@ def run_error(
         result = measure_error(exp, pin_map, ref_samples, exp.seed)
         results.append(result)
         if store is not None:
-            store.add_error(
+            store.add(
                 exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
             )
     return results

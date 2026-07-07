@@ -7,11 +7,18 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fp_arena.experiment.results import ErrorResult, PerfResult, PerturbationResult
 
 DEFAULT_DB_PATH = ".fp_arena_results.db"
+
+#: The ``kind`` column value for each result type.
+_KIND_OF = {
+    PerfResult: "performance",
+    ErrorResult: "error",
+    PerturbationResult: "perturbation",
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -55,15 +62,17 @@ class ResultStore:
     def close(self) -> None:
         self._con.close()
 
-    def _add(
+    def add(
         self,
-        kind: str,
         experiment: str,
-        precision: Dict[str, Any],
-        symbols: Dict[str, Any],
-        scalars: Dict[str, Any],
-        payload: Dict[str, Any],
+        result: Union[PerfResult, ErrorResult, PerturbationResult],
+        symbols: Optional[Dict[str, Any]] = None,
+        scalars: Optional[Dict[str, Any]] = None,
     ) -> int:
+        """Append one result record. :returns: the new row id."""
+        kind = _KIND_OF.get(type(result))
+        if kind is None:
+            raise TypeError(f"Cannot store a {type(result).__name__}")
         with self._con:
             cur = self._con.execute(
                 "INSERT INTO results (kind, experiment, created_at, precision, symbols, scalars, payload) "
@@ -72,64 +81,13 @@ class ResultStore:
                     kind,
                     experiment,
                     datetime.now(timezone.utc).isoformat(),
-                    json.dumps(precision),
-                    json.dumps(symbols, default=str),
-                    json.dumps(scalars, default=str),
-                    json.dumps(payload),
+                    json.dumps(result.precision),
+                    json.dumps(symbols or {}, default=str),
+                    json.dumps(scalars or {}, default=str),
+                    json.dumps(result.to_dict()),
                 ),
             )
             return int(cur.lastrowid)
-
-    def add_perf(
-        self,
-        experiment: str,
-        result: PerfResult,
-        symbols: Optional[Dict[str, Any]] = None,
-        scalars: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        """Append one :class:`PerfResult`. :returns: the new row id."""
-        return self._add(
-            "performance",
-            experiment,
-            result.precision,
-            symbols or {},
-            scalars or {},
-            result.to_dict(),
-        )
-
-    def add_error(
-        self,
-        experiment: str,
-        result: ErrorResult,
-        symbols: Optional[Dict[str, Any]] = None,
-        scalars: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        """Append one :class:`ErrorResult`. :returns: the new row id."""
-        return self._add(
-            "error",
-            experiment,
-            result.precision,
-            symbols or {},
-            scalars or {},
-            result.to_dict(),
-        )
-
-    def add_perturbation(
-        self,
-        experiment: str,
-        result: PerturbationResult,
-        symbols: Optional[Dict[str, Any]] = None,
-        scalars: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        """Append one :class:`PerturbationResult`. :returns: the new row id."""
-        return self._add(
-            "perturbation",
-            experiment,
-            result.precision,
-            symbols or {},
-            scalars or {},
-            result.to_dict(),
-        )
 
     def query(
         self, experiment: Optional[str] = None, kind: Optional[str] = None
