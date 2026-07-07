@@ -5,8 +5,6 @@ Drivers that execute the experiment kinds.
 * :func:`run_performance` -- compile each precision point and time it.
 * :func:`run_error` -- dual-execute each point against a high-precision reference (lockstep on identical inputs).
 * :func:`run_perturbation` -- perturb one input at a time and compare against the clean run at the same precision point.
-
-TODO: Select runner
 """
 
 import math
@@ -421,7 +419,10 @@ def run_perturbation(
         acc = {pert: {out: _new_acc() for out in outputs} for pert in cfg.noise}
 
         for rng in tqdm(
-            _sample_rngs(exp.seed, cfg.n_samples), desc="samples", unit="smp", leave=False
+            _sample_rngs(exp.seed, cfg.n_samples),
+            desc="samples",
+            unit="smp",
+            leave=False,
         ):
             clean_args = make_call_args(sdfg, exp, rng, reads=reads)
             base_args = _copy_args(clean_args)

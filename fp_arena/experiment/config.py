@@ -1,7 +1,6 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """
 Experiment config.
-TODO: Select config.
 """
 
 from dataclasses import dataclass, field

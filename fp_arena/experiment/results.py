@@ -61,8 +61,12 @@ class PerfResult:
 
     precision: PrecisionMap
     total_times: List[float] = field(default_factory=list)
-    h2d_times: List[float] = field(default_factory=list)  # host->device transfer (GPU only)
-    d2h_times: List[float] = field(default_factory=list)  # device->host transfer (GPU only)
+    h2d_times: List[float] = field(
+        default_factory=list
+    )  # host->device transfer (GPU only)
+    d2h_times: List[float] = field(
+        default_factory=list
+    )  # device->host transfer (GPU only)
     cast_in_times: List[float] = field(default_factory=list)  # input precision cast
     cast_out_times: List[float] = field(default_factory=list)  # output precision cast
     kernel_times: List[float] = field(default_factory=list)  # compute
@@ -111,6 +115,3 @@ class PerturbationResult:
             "n_samples": self.n_samples,
             "seed": self.seed,
         }
-
-
-# TODO(select): Add SelectResult

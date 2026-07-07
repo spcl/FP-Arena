@@ -131,8 +131,6 @@ class ResultStore:
             result.to_dict(),
         )
 
-    # TODO: ``add_select``.
-
     def query(
         self, experiment: Optional[str] = None, kind: Optional[str] = None
     ) -> List[StoredResult]:
