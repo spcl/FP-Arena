@@ -84,5 +84,5 @@ class PerturbationAnalysisConfig:
 
     experiment: ExperimentConfig
     noise: Dict[str, Noise]
-    precisions: List[PrecisionMap]
+    precisions: List[PrecisionMap] = field(default_factory=lambda: [{}])
     n_samples: int = 1
