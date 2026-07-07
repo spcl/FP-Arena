@@ -275,15 +275,14 @@ def test_error_gpu_zero_when_candidate_equals_reference():
     assert errs[0].errors["c"].abs_max == 0.0
 
 
-def test_perturbation_zero_without_distribution():
-    # Noise without a distribution is a no-op, so perturbed == clean exactly.
-    res = run_perturbation(
-        PerturbationAnalysisConfig(_exp(), noise={"a": Noise(absolute=1.0)})
-    )
-    assert len(res) == 1
-    assert res[0].perturbed == "a"
-    assert res[0].precision == {}
-    assert res[0].errors["c"].abs_max == 0.0
+def test_noise_half_specified_raises():
+    # A term needs both its magnitude and its distribution; an inert Noise is an error.
+    with pytest.raises(ValueError, match="half-specified"):
+        Noise(absolute=1.0)
+    with pytest.raises(ValueError, match="half-specified"):
+        Noise(relative_dist=stats.norm(0.0, 1.0))
+    with pytest.raises(ValueError, match="perturbs nothing"):
+        Noise()
 
 
 def test_perturbation_error_scales_with_noise():
@@ -308,6 +307,7 @@ def test_perturbation_one_input_at_a_time():
         PerturbationAnalysisConfig(_exp(), noise={"a": noise, "b": noise})
     )
     assert [r.perturbed for r in res] == ["a", "b"]
+    assert all(r.precision == {} for r in res)
     assert all(r.errors["c"].abs_max > 0.0 for r in res)
 
 
@@ -354,16 +354,6 @@ def test_noise_perturbs_inputs():
         {"a": Noise(absolute=10.0, absolute_dist=stats.norm(0.0, 1.0))},
     )["a"]
     assert not np.allclose(a_clean, a_noisy)
-
-
-def test_noise_without_distribution_is_noop():
-    exp = _exp()
-    sdfg = fresh_sdfg(exp)
-    a_clean = make_call_args(sdfg, exp, np.random.default_rng(0))["a"]
-    a_scaled = make_call_args(
-        sdfg, exp, np.random.default_rng(0), {"a": Noise(absolute=10.0)}
-    )["a"]
-    assert np.array_equal(a_clean, a_scaled)
 
 
 def test_noise_terms_take_distinct_distributions():

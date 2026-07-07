@@ -104,6 +104,9 @@ class Noise:
     Additive perturbation on an input array: ``x + relative*|x|*R + absolute*A``,
     where ``R``/``A`` are draws from ``relative_dist``/``absolute_dist``. Attach
     per array via an analysis config's ``noise`` field.
+
+    Each term needs both its magnitude and its distribution; a half-specified
+    term (or a ``Noise`` that perturbs nothing) raises at construction.
     """
 
     relative: float = 0.0
@@ -111,12 +114,27 @@ class Noise:
     relative_dist: Optional[DistributionLike] = None
     absolute_dist: Optional[DistributionLike] = None
 
+    def __post_init__(self) -> None:
+        for term, mag, dist in (
+            ("relative", self.relative, self.relative_dist),
+            ("absolute", self.absolute, self.absolute_dist),
+        ):
+            if (mag != 0.0) != (dist is not None):
+                raise ValueError(
+                    f"Noise.{term} is half-specified: set both a nonzero "
+                    f"{term} and {term}_dist, or neither"
+                )
+        if self.relative == 0.0 and self.absolute == 0.0:
+            raise ValueError(
+                "Noise perturbs nothing: set a relative and/or absolute term"
+            )
+
     def apply(self, arr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         out = np.array(arr, copy=True)
-        if self.relative and self.relative_dist is not None:
+        if self.relative:
             draw = as_distribution(self.relative_dist).sample(out.shape, out.dtype, rng)
             out = out + self.relative * np.abs(out) * draw
-        if self.absolute and self.absolute_dist is not None:
+        if self.absolute:
             draw = as_distribution(self.absolute_dist).sample(out.shape, out.dtype, rng)
             out = out + self.absolute * draw
         return out
