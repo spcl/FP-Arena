@@ -325,12 +325,7 @@ def run_performance(
             points.set_postfix_str(_fmt_pin(pin_map))
             sdfg = fresh_sdfg(cfg.experiment)
             apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
-            apply_target(
-                sdfg,
-                target,
-                gpu_simplify=False,
-                gpu_block_size=cfg.experiment.gpu_block_size,
-            )
+            apply_target(sdfg, target, gpu_block_size=cfg.experiment.gpu_block_size)
             # Time every state; classified into a phase at readout.
             for state in sdfg.all_states():
                 state.instrument = provider

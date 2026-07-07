@@ -92,7 +92,6 @@ def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
 def apply_target(
     sdfg: dace.SDFG,
     target: str,
-    gpu_simplify: bool = True,
     gpu_block_size: Optional[List[int]] = None,
 ) -> None:
     """
