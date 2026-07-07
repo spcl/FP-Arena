@@ -100,6 +100,9 @@ class mpfr(typeclass):
         self.bytes = ctypes.sizeof(_mpfr_t)
         self.dtype = self
         self.typename = f"mpfr{precision}"
+        # Expose this concrete precision as ``dace.<typename>``
+        setattr(_ddtypes, self.typename, self)
+        setattr(dace, self.typename, self)
 
     def to_string(self):
         return self.typename

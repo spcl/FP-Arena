@@ -1,7 +1,9 @@
+import ast
 from collections import defaultdict, deque
 from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 import dace
+from dace.properties import CodeBlock
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 from tqdm.auto import tqdm
@@ -254,13 +256,14 @@ def _cast_tasklet(
     in_dtype: dace.dtypes.typeclass,
     out_dtype: dace.dtypes.typeclass,
 ) -> nodes.Tasklet:
-    """A scalar ``_out = static_cast<out>(_in)`` tasklet."""
+    """A scalar ``_out = out_dtype(_in)`` cast tasklet."""
+
     t = state.add_tasklet(
         name=name,
         inputs={"_in"},
         outputs={"_out"},
-        code=f"_out = static_cast<{out_dtype.ctype}>(_in);",
-        language=dace.Language.CPP,
+        code=f"_out = dace.{out_dtype.to_string()}(_in)",
+        language=dace.Language.Python,
     )
     t.in_connectors["_in"] = in_dtype
     t.out_connectors["_out"] = out_dtype
@@ -330,12 +333,8 @@ def _add_copy_map(
             f"{src_name}{src_arr.shape} vs {dst_name}{dst_arr.shape}"
         )
 
-    tasklet = state.add_tasklet(
-        name=f"cast_{src_name}_to_{dst_name}",
-        inputs={"_in"},
-        outputs={"_out"},
-        code=f"_out = static_cast<{dst_arr.dtype.ctype}>(_in);",
-        language=dace.Language.CPP,
+    tasklet = _cast_tasklet(
+        state, f"cast_{src_name}_to_{dst_name}", src_arr.dtype, dst_arr.dtype
     )
 
     if isinstance(src_arr, dace.data.Array):
@@ -416,6 +415,41 @@ def _add_fusion_barrier(state: dace.SDFGState) -> None:
     )
 
 
+# Wraps every float literal in ``expr = dace.<typename>(literal)``.
+class _FloatConstantCaster(ast.NodeTransformer):
+    def __init__(self, typename: str) -> None:
+        self._typename = typename
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if not isinstance(node.value, float):
+            return node
+        return ast.Call(
+            func=ast.Attribute(
+                value=ast.Name(id="dace", ctx=ast.Load()),
+                attr=self._typename,
+                ctx=ast.Load(),
+            ),
+            args=[node],
+            keywords=[],
+        )
+
+
+# Casts all float literals in Python tasklet bodies to *dtype*.
+def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None:
+    caster = _FloatConstantCaster(dtype.to_string())
+    for state in sdfg.all_states():
+        for node in state.nodes():
+            if not (
+                isinstance(node, nodes.Tasklet)
+                and node.language == dace.Language.Python
+            ):
+                continue
+            tree = ast.fix_missing_locations(
+                caster.visit(ast.parse(node.code.as_string))
+            )
+            node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+
+
 # Main entry point to change and propagate fp types through an SDFG.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
@@ -423,10 +457,15 @@ def change_and_propagate_fp_types(
     promotion_rules: Optional[
         Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
     ] = None,
+    constant_type: Optional[dace.dtypes.typeclass] = None,
 ) -> None:
 
     # Use default promotion rules if none are provided.
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
+
+    # Optionally cast every float literal in the computation to a fixed precision.
+    if constant_type is not None:
+        _cast_float_constants(sdfg, constant_type)
 
     original_types: Dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items()
