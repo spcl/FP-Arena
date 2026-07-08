@@ -53,7 +53,7 @@ jobs:
         # FP-Arena without deps so it uses the DaCe just installed (any main),
         # rather than re-pulling pinned main from git.
         pip install --no-deps ./fp-arena
-        pip install pytest
+        pip install pytest scipy tqdm
 
     - name: Run FP-Arena tests
       run: |
