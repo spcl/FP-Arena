@@ -262,11 +262,23 @@ def _output_arrays(sdfg: dace.SDFG) -> List[str]:
 ReferenceSamples = List[Tuple[Dict[str, Any], Dict[str, Any]]]
 
 
+def _pin_tag(pin_map: PrecisionMap) -> str:
+    """Identifier-safe tag naming a precision point's build folder."""
+    return "_".join(f"{k}_{v}" for k, v in sorted(pin_map.items())) or "baseline"
+
+
+def _distinguish(sdfg: dace.SDFG, tag: str) -> None:
+    """Unique build folder per point."""
+    safe = "".join(ch if ch.isalnum() else "_" for ch in tag)
+    sdfg.name = f"{sdfg.name}_{safe}"
+
+
 def compile_reference(experiment, reference):
     """Build and compile the high-precision reference SDFG once."""
     sdfg = fresh_sdfg(experiment)
     apply_reference(sdfg, reference, experiment.promotion_rules)
     apply_target(sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
+    _distinguish(sdfg, "reference")
     return sdfg.compile()
 
 
@@ -303,6 +315,7 @@ def measure_error(
     cand_sdfg = fresh_sdfg(experiment)
     apply_precision(cand_sdfg, pin_map, experiment.promotion_rules)
     apply_target(cand_sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
+    _distinguish(cand_sdfg, _pin_tag(pin_map))
     cand_csdfg = cand_sdfg.compile()
 
     acc = {name: _new_acc() for name in _output_arrays(cand_sdfg)}
@@ -345,6 +358,7 @@ def run_performance(
             sdfg = fresh_sdfg(cfg.experiment)
             apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
             apply_target(sdfg, target, gpu_block_size=cfg.experiment.gpu_block_size)
+            _distinguish(sdfg, _pin_tag(pin_map))
             # Time every state; classified into a phase at readout.
             for state in sdfg.all_states():
                 state.instrument = provider
@@ -415,6 +429,7 @@ def run_perturbation(
         sdfg = fresh_sdfg(exp)
         apply_precision(sdfg, pin_map, exp.promotion_rules)
         apply_target(sdfg, exp.target, gpu_block_size=exp.gpu_block_size)
+        _distinguish(sdfg, _pin_tag(pin_map))
         csdfg = sdfg.compile()
 
         reads, _ = sdfg.read_and_write_sets()
@@ -473,7 +488,5 @@ def run_error(
         result = measure_error(exp, pin_map, ref_samples, exp.seed)
         results.append(result)
         if store is not None:
-            store.add(
-                exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
-            )
+            store.add(exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args)
     return results
