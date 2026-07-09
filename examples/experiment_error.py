@@ -1,9 +1,9 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """Measure the heat3d stencil's error in reduced precision against an fp64 reference."""
 
-import dace as dc
 from scipy import stats
 
+from corpus.heat3d import GRID_N, TSTEPS, heat3d_kernel
 from fp_arena.experiment import (
     ErrorAnalysisConfig,
     ExperimentConfig,
@@ -11,37 +11,13 @@ from fp_arena.experiment import (
     run_error,
 )
 
-GRID_N, TSTEPS = 40, 20
 N_SAMPLES = 3
-
-N = dc.symbol("N", dtype=dc.int64)
-
-
-@dc.program
-def kernel(TSTEPS: dc.int64, A: dc.float64[N, N, N], B: dc.float64[N, N, N]):
-    for t in range(1, TSTEPS):
-        B[1:-1, 1:-1, 1:-1] = (
-            0.125 * (A[2:, 1:-1, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[:-2, 1:-1, 1:-1])
-            + 0.125
-            * (A[1:-1, 2:, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, :-2, 1:-1])
-            + 0.125
-            * (A[1:-1, 1:-1, 2:] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, 1:-1, :-2])
-            + A[1:-1, 1:-1, 1:-1]
-        )
-        A[1:-1, 1:-1, 1:-1] = (
-            0.125 * (B[2:, 1:-1, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[:-2, 1:-1, 1:-1])
-            + 0.125
-            * (B[1:-1, 2:, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, :-2, 1:-1])
-            + 0.125
-            * (B[1:-1, 1:-1, 2:] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, 1:-1, :-2])
-            + B[1:-1, 1:-1, 1:-1]
-        )
 
 
 def main():
     experiment = ExperimentConfig(
         name="heat3d",
-        program=kernel.to_sdfg(simplify=True),
+        program=heat3d_kernel.to_sdfg(simplify=True),
         symbols={"N": GRID_N},
         scalar_args={"TSTEPS": TSTEPS},
         target="cpu",

@@ -46,7 +46,7 @@ Issues = "https://github.com/spcl/FP-Arena/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["fp_arena*"]
+include = ["fp_arena*", "corpus*"]
 
 [tool.setuptools.package-data]
 fp_arena = ["runtime/include/**/*.h"]

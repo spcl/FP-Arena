@@ -1,5 +1,6 @@
 import dace
 import pytest
+from corpus.heat3d import heat3d_kernel
 from dace.libraries.standard.nodes.reduce import Reduce
 from fp_arena.transformations.change_and_propagate_fp_types import (
     DEFAULT_PROMOTION_RULES,
@@ -638,35 +639,11 @@ def test_constant_type_end_to_end_float32_precision():
 
 
 def test_heat3d_no_fp64_in_generated_code():
-    """heat3d (examples/heat3d.py) lowered from fp64 to fp16: the generated
+    """heat3d (corpus/heat3d.py) lowered from fp64 to fp16: the generated
     C++ contains fp64 only at the preserved A/B interface."""
     import re
 
-    N = dace.symbol("N", dtype=dace.int64)
-
-    @dace.program
-    def heat3d(TSTEPS: dace.int64, A: dace.float64[N, N, N], B: dace.float64[N, N, N]):
-        for t in range(1, TSTEPS):
-            B[1:-1, 1:-1, 1:-1] = (
-                0.125
-                * (A[2:, 1:-1, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[:-2, 1:-1, 1:-1])
-                + 0.125
-                * (A[1:-1, 2:, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, :-2, 1:-1])
-                + 0.125
-                * (A[1:-1, 1:-1, 2:] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, 1:-1, :-2])
-                + A[1:-1, 1:-1, 1:-1]
-            )
-            A[1:-1, 1:-1, 1:-1] = (
-                0.125
-                * (B[2:, 1:-1, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[:-2, 1:-1, 1:-1])
-                + 0.125
-                * (B[1:-1, 2:, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, :-2, 1:-1])
-                + 0.125
-                * (B[1:-1, 1:-1, 2:] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, 1:-1, :-2])
-                + B[1:-1, 1:-1, 1:-1]
-            )
-
-    sdfg = heat3d.to_sdfg(simplify=True)
+    sdfg = heat3d_kernel.to_sdfg(simplify=True)
     change_and_propagate_fp_types(
         sdfg,
         {"A": dace.float16, "B": dace.float16},
