@@ -100,7 +100,8 @@ def apply_target(
     if target == "cpu":
         return
     if target == "gpu":
-        sdfg.apply_gpu_transformations()
+        # simplify=False keeps host<->device copies and the kernel in separate states so each timing phase is attributable
+        sdfg.apply_gpu_transformations(simplify=False)
         if gpu_block_size is not None:
             for state in sdfg.all_states():
                 for node in state.nodes():
