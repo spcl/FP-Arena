@@ -26,6 +26,8 @@ keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision"
 # that DaCe is importable; see the README.
 dependencies = [
     "dace @ git+https://github.com/spcl/dace.git@extended",
+    "scipy",
+    "tqdm",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +46,7 @@ Issues = "https://github.com/spcl/FP-Arena/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["fp_arena*"]
+include = ["fp_arena*", "corpus*"]
 
 [tool.setuptools.package-data]
 fp_arena = ["runtime/include/**/*.h"]

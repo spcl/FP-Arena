@@ -1,5 +1,6 @@
 import dace
 import pytest
+from corpus.heat3d import heat3d_kernel
 from dace.libraries.standard.nodes.reduce import Reduce
 from fp_arena.transformations.change_and_propagate_fp_types import (
     DEFAULT_PROMOTION_RULES,
@@ -638,35 +639,11 @@ def test_constant_type_end_to_end_float32_precision():
 
 
 def test_heat3d_no_fp64_in_generated_code():
-    """heat3d (examples/heat3d.py) lowered from fp64 to fp16: the generated
+    """heat3d (corpus/heat3d.py) lowered from fp64 to fp16: the generated
     C++ contains fp64 only at the preserved A/B interface."""
     import re
 
-    N = dace.symbol("N", dtype=dace.int64)
-
-    @dace.program
-    def heat3d(TSTEPS: dace.int64, A: dace.float64[N, N, N], B: dace.float64[N, N, N]):
-        for t in range(1, TSTEPS):
-            B[1:-1, 1:-1, 1:-1] = (
-                0.125
-                * (A[2:, 1:-1, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[:-2, 1:-1, 1:-1])
-                + 0.125
-                * (A[1:-1, 2:, 1:-1] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, :-2, 1:-1])
-                + 0.125
-                * (A[1:-1, 1:-1, 2:] - 2.0 * A[1:-1, 1:-1, 1:-1] + A[1:-1, 1:-1, :-2])
-                + A[1:-1, 1:-1, 1:-1]
-            )
-            A[1:-1, 1:-1, 1:-1] = (
-                0.125
-                * (B[2:, 1:-1, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[:-2, 1:-1, 1:-1])
-                + 0.125
-                * (B[1:-1, 2:, 1:-1] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, :-2, 1:-1])
-                + 0.125
-                * (B[1:-1, 1:-1, 2:] - 2.0 * B[1:-1, 1:-1, 1:-1] + B[1:-1, 1:-1, :-2])
-                + B[1:-1, 1:-1, 1:-1]
-            )
-
-    sdfg = heat3d.to_sdfg(simplify=True)
+    sdfg = heat3d_kernel.to_sdfg(simplify=True)
     change_and_propagate_fp_types(
         sdfg,
         {"A": dace.float16, "B": dace.float16},
@@ -677,9 +654,9 @@ def test_heat3d_no_fp64_in_generated_code():
     code_objects = sdfg.generate_code()
 
     # The computation is in fp16.
-    assert any(
-        "dace::float16" in co.clean_code for co in code_objects
-    ), "expected dace::float16 in the generated code"
+    assert any("dace::float16" in co.clean_code for co in code_objects), (
+        "expected dace::float16 in the generated code"
+    )
 
     # fp64 only on interface lines: A/B references and interface cast tasklets.
     allowed = re.compile(r"\b[AB]\b|\bdouble\s+_out;|=\s*double\(_in\)")
@@ -690,6 +667,100 @@ def test_heat3d_no_fp64_in_generated_code():
         if "double" in line and not allowed.search(line)
     ]
     assert not leaks, "fp64 leaked into the computation:\n" + "\n".join(leaks)
+
+
+def test_end_to_end_demoted_written_array_runs():
+    """A *written* array is demoted below the precision of the f64 computation that produces it.
+
+    Chain A(f64) -> B -> C with B pinned to f32. The producer of B reads A (f64),
+    so its tasklet computes in f64 but must store into the f32 array B.
+    """
+    import numpy as np
+
+    n = 8
+    sdfg = dace.SDFG("e2e_demoted_write")
+    sdfg.add_array("A", [n], dace.float64, transient=False)
+    sdfg.add_array("B", [n], dace.float64, transient=True)
+    sdfg.add_array("C", [n], dace.float64, transient=False)
+
+    s1 = sdfg.add_state("s1")
+    s2 = sdfg.add_state("s2")
+    sdfg.add_edge(s1, s2, dace.InterstateEdge())
+
+    for st, src, dst in [(s1, "A", "B"), (s2, "B", "C")]:
+        me, mx = st.add_map("m", {"i": f"0:{n}"})
+        t = st.add_tasklet(
+            "t", {"x"}, {"y"}, "y = x * 2.0;", language=dace.Language.CPP
+        )
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        mx.add_in_connector(f"IN_{dst}")
+        mx.add_out_connector(f"OUT_{dst}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+        st.add_edge(me, f"OUT_{src}", t, "x", dace.Memlet(f"{src}[i]"))
+        st.add_edge(t, "y", mx, f"IN_{dst}", dace.Memlet(f"{dst}[i]"))
+        st.add_edge(
+            mx, f"OUT_{dst}", st.add_write(dst), None, dace.Memlet(f"{dst}[0:{n}]")
+        )
+
+    # Demote only the WRITTEN intermediate B; A stays f64, so the producer of B
+    # computes in f64 and must store into an f32 array (the heat3d crash pattern).
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
+    sdfg.validate()
+
+    assert sdfg.arrays["B"].dtype == dace.float32, sdfg.arrays["B"].dtype
+    assert sdfg.arrays["A"].dtype == dace.float64
+
+    A = np.arange(1, n + 1, dtype=np.float64)
+    C = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, C=C)
+
+    # B = (f32)(A*2); C = (f32)(B*2). Small integers are exact in f32, so C == A*4.
+    b_ref = (A * 2.0).astype(np.float32)
+    c_ref = (b_ref.astype(np.float64) * 2.0).astype(np.float32).astype(np.float64)
+    np.testing.assert_allclose(C, c_ref, rtol=1e-6)
+    np.testing.assert_allclose(C, A * 4.0, rtol=1e-6)
+
+
+def test_boundary_cast_inserted_for_fusion():
+    """Regression: a fused map with mixed precision compiles via a map-boundary cast."""
+    import numpy as np
+    from dace.sdfg import nodes
+    from dace.transformation.dataflow import MapFusion
+
+    M = dace.symbol("M")
+
+    @dace.program
+    def prog(A: dace.float64[M], B: dace.float64[M]):
+        B[:] = A * 2.0
+        A[:] = B * 3.0
+
+    # Fuse the two statements through a transient holding B's value.
+    sdfg = prog.to_sdfg(simplify=True)
+    sdfg.apply_transformations_repeated(MapFusion)
+
+    # fp16 transient written into fp32 B -> a cast must be inserted.
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float16, "B": dace.float32}, DEFAULT_PROMOTION_RULES
+    )
+    sdfg.validate()
+    casts = [
+        n.label
+        for s in sdfg.all_states()
+        for n in s.nodes()
+        if isinstance(n, nodes.Tasklet) and "map_fusion_B_to_B" in n.label
+    ]
+    assert casts, "expected a cast on the fused transient's write into B"
+
+    csdfg = sdfg.compile()
+    A = np.full(4, 3.0, dtype=np.float64)
+    B = np.zeros(4, dtype=np.float64)
+    csdfg(A=A, B=B, M=4)
+    # B = A*2 = 6, A = B*3 = 18 (exact in fp16/fp32).
+    np.testing.assert_allclose(B, 6.0)
+    np.testing.assert_allclose(A, 18.0)
 
 
 if __name__ == "__main__":
@@ -715,4 +786,6 @@ if __name__ == "__main__":
     test_constant_type_only_touches_python_tasklets()
     test_constant_type_end_to_end_float32_precision()
     test_heat3d_no_fp64_in_generated_code()
+    test_end_to_end_demoted_written_array_runs()
+    test_boundary_cast_inserted_for_fusion()
     print("All tests passed.")

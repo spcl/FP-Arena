@@ -22,3 +22,7 @@ out.sdfg
 .idea/
 *.swp
 .DS_Store
+
+
+#Experiment results database
+*.db
