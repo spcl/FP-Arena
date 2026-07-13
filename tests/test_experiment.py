@@ -388,9 +388,10 @@ def test_error_noise_is_per_analysis():
     assert np.isfinite(s.rel_mean) and s.linf >= 0.0
 
 
-def test_is_mpfr():
-    assert registry.is_mpfr("mpfr128")
-    assert not registry.is_mpfr("fp32")
+def test_needs_mpfr_link():
+    assert registry.needs_mpfr_link("mpfr128")
+    assert registry.needs_mpfr_link("fp23_46")  # elemental functions use MPFR
+    assert not registry.needs_mpfr_link("fp32")
 
 
 def test_group_per_invocation():

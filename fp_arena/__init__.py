@@ -14,6 +14,7 @@ from fp_arena.dtypes import (
     Float64sr,
     float32sr,
     float64sr,
+    fp,
     mpfr,
     register,
     FP_ARENA_TYPECLASSES,
@@ -23,6 +24,7 @@ from fp_arena.extensions import (
     enable_auto_extensions,
     disable_auto_extensions,
     disable_fast_math,
+    ensure_mpfr_linked,
     inject_headers,
     precise_math,
     uses_fp_arena_types,
@@ -38,10 +40,15 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
 # Register the types and the SDFG convenience method on import (idempotent).
 register()
 
+# The native module with the Python-side fp<Exp, Prec> value classes.
+from fp_arena import native
+
 import dace as _dace
 
 if not hasattr(_dace.SDFG, "enable_fp_arena_extensions"):
-    _dace.SDFG.enable_fp_arena_extensions = lambda self: enable_fp_arena_extensions(self)
+    _dace.SDFG.enable_fp_arena_extensions = lambda self: enable_fp_arena_extensions(
+        self
+    )
 
 # Automatically enable FP-Arena for any SDFG that uses its types, so the
 # explicit call above becomes optional. Disable with disable_auto_extensions().
@@ -52,13 +59,16 @@ __all__ = [
     "Float64sr",
     "float32sr",
     "float64sr",
+    "fp",
     "mpfr",
+    "native",
     "register",
     "FP_ARENA_TYPECLASSES",
     "enable_fp_arena_extensions",
     "enable_auto_extensions",
     "disable_auto_extensions",
     "disable_fast_math",
+    "ensure_mpfr_linked",
     "inject_headers",
     "precise_math",
     "uses_fp_arena_types",

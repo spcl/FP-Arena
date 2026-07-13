@@ -53,7 +53,7 @@ jobs:
         # FP-Arena without deps so it uses the DaCe just installed (any main),
         # rather than re-pulling pinned main from git.
         pip install --no-deps ./fp-arena
-        pip install pytest scipy tqdm
+        pip install pytest scipy tqdm nanobind
 
     - name: Run FP-Arena tests
       run: |

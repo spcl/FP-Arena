@@ -26,3 +26,5 @@ out.sdfg
 
 #Experiment results database
 *.db
+# FP-Arena native module (built on import)
+fp_arena/runtime/lib/

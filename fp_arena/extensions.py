@@ -28,7 +28,9 @@ import dace
 from dace.config import Config
 
 #: Absolute path to the bundled C++ include root (``.../runtime/include``).
-INCLUDE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime", "include")
+INCLUDE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "runtime", "include"
+)
 
 #: Fast-math flags removed when FP-Arena is enabled (incompatible with the
 #: exact IEEE rounding that stochastic rounding depends on). ``Config.get``
@@ -44,6 +46,7 @@ _HEADERS = (
     os.path.join(INCLUDE_DIR, "fp_arena", "float32sr.h"),
     os.path.join(INCLUDE_DIR, "fp_arena", "float64sr.h"),
     os.path.join(INCLUDE_DIR, "fp_arena", "mpfr.h"),
+    os.path.join(INCLUDE_DIR, "fp_arena", "fp.h"),
 )
 
 #: Backends whose global-code section receives the includes (CPU frame + CUDA).
@@ -52,8 +55,12 @@ _BACKENDS = ("frame", "cuda")
 #: Marker so the includes are only injected once per SDFG.
 _GUARD = "// fp_arena extensions enabled"
 
-#: Substrings identifying an FP-Arena C type (fp_arena:: for SR types, dace::mpfr for mpfr).
+#: Substrings identifying an FP-Arena C type (fp_arena:: for SR and fp types, dace::mpfr for mpfr).
 _CTYPE_MARKERS = ("fp_arena::", "dace::mpfr")
+
+#: Substrings identifying the types whose operations may call into libmpfr
+#: (the mpfr value type always, the emulated fp type for its elementals).
+_MPFR_CTYPE_MARKERS = ("dace::mpfr", "fp_arena::fp<")
 
 
 def fp_arena_global_code() -> str:
@@ -126,11 +133,19 @@ def precise_math():
             Config.set(*path, value=args)
 
 
+def ensure_mpfr_linked() -> None:
+    """Add the MPFR library to DaCe's CPU link line (idempotent)."""
+    libs = Config.get("compiler", "cpu", "libs") or ""
+    if "mpfr" not in libs.split():
+        Config.append("compiler", "cpu", "libs", value=" mpfr")
+
+
 def enable_fp_arena_extensions(sdfg: dace.SDFG) -> dace.SDFG:
     """
     Make ``sdfg`` compile with the FP-Arena types by injecting the SR header
-    includes into its generated global code, and remove ``-ffast-math`` from
-    DaCe's compiler flags (persistently; see :func:`disable_fast_math`).
+    includes into its generated global code, remove ``-ffast-math`` from
+    DaCe's compiler flags (persistently; see :func:`disable_fast_math`), and
+    link MPFR if the SDFG uses an mpfr-backed type.
 
     Idempotent. Applies to the CPU and CUDA backends. With automatic enablement
     active (the default), calling this explicitly is optional.
@@ -140,19 +155,18 @@ def enable_fp_arena_extensions(sdfg: dace.SDFG) -> dace.SDFG:
     """
     disable_fast_math()
     inject_headers(sdfg)
+    if _scan_ctypes(sdfg, _MPFR_CTYPE_MARKERS):
+        ensure_mpfr_linked()
     return sdfg
 
 
-def uses_fp_arena_types(sdfg: dace.SDFG) -> bool:
-    """
-    :param sdfg: the SDFG to inspect.
-    :returns: ``True`` if any data descriptor or tasklet body in ``sdfg`` or its
-        nested SDFGs references an FP-Arena C type, ``False`` otherwise.
-    """
+def _scan_ctypes(sdfg: dace.SDFG, markers) -> bool:
+    """Whether any data descriptor or tasklet body in ``sdfg`` (recursively) references one of ``markers``."""
     from dace.sdfg import nodes as _dnodes
+
     for nested in sdfg.all_sdfgs_recursive():
         for desc in nested.arrays.values():
-            if any(m in (getattr(desc.dtype, "ctype", "") or "") for m in _CTYPE_MARKERS):
+            if any(m in (getattr(desc.dtype, "ctype", "") or "") for m in markers):
                 return True
         for state in nested.states():
             for node in state.nodes():
@@ -161,9 +175,18 @@ def uses_fp_arena_types(sdfg: dace.SDFG) -> bool:
                         code_str = node.code.as_string
                     except AttributeError:
                         code_str = str(node.code)
-                    if any(m in code_str for m in _CTYPE_MARKERS):
+                    if any(m in code_str for m in markers):
                         return True
     return False
+
+
+def uses_fp_arena_types(sdfg: dace.SDFG) -> bool:
+    """
+    :param sdfg: the SDFG to inspect.
+    :returns: ``True`` if any data descriptor or tasklet body in ``sdfg`` or its
+        nested SDFGs references an FP-Arena C type, ``False`` otherwise.
+    """
+    return _scan_ctypes(sdfg, _CTYPE_MARKERS)
 
 
 #: Whether the automatic wrappers are currently installed.
@@ -209,6 +232,8 @@ def enable_auto_extensions():
 
     def _compile(self, *args, **kwargs):
         if uses_fp_arena_types(self):
+            if _scan_ctypes(self, _MPFR_CTYPE_MARKERS):
+                ensure_mpfr_linked()
             with precise_math():
                 return _original_compile(self, *args, **kwargs)
         return _original_compile(self, *args, **kwargs)
@@ -223,6 +248,7 @@ def disable_auto_extensions():
     if not _auto_installed:
         return
     from dace.codegen import codegen
+
     codegen.generate_code = _original_generate_code
     dace.SDFG.compile = _original_compile
     _original_generate_code = None

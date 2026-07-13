@@ -177,6 +177,16 @@ def make_call_args(
             continue
         shape = materialize_shape(desc.shape, experiment.symbols)
         np_dtype = desc.dtype.as_numpy_dtype()
+        if np_dtype.kind in ("V", "O"):
+            # Emulated value types (dace.fp / dace.mpfr) have no numpy
+            # representation to sample into; .astype would silently
+            # reinterpret float64 bytes as packed values.
+            raise ValueError(
+                f"Boundary array {name!r} has emulated dtype "
+                f"{desc.dtype.to_string()}; declare boundary arrays in a "
+                f"native float type and pin the precision via the experiment "
+                f"config instead (the lowering keeps the interface native)."
+            )
         if name in reads:
             dist = as_distribution(experiment.inputs.get(name, _DEFAULT_INPUT))
             arr = dist.sample(shape, np_dtype, rng)

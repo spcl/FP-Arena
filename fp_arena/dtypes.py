@@ -135,6 +135,88 @@ class mpfr(typeclass):
         return self
 
 
+class fp(typeclass):
+    """
+    An emulated floating-point type with a custom exponent width and precision
+    (significand bits including the hidden bit, as in MPFR) ``fp_arena::fp<Exp, Prec>``.
+
+    Example use: ``dace.fp(23, 46)`` for 23 exponent bits and 46 bits of
+    precision (typename ``fp23_46``, 9 bytes per element).
+    """
+
+    _interned: dict = {}
+
+    def __new__(cls, exp_bits: int, precision: int):
+        inst = cls._interned.get((exp_bits, precision))
+        if inst is None:
+            inst = super().__new__(cls)
+        return inst
+
+    # Immutable and interned: copies are the instance itself, pickling goes
+    # through the constructor.
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return (fp, (self.exp_bits, self.precision))
+
+    def __init__(self, exp_bits: int, precision: int):
+        if self._interned.get((exp_bits, precision)) is self:
+            return  # already initialized (interned instance)
+        if not 2 <= exp_bits <= 30:
+            raise ValueError(f"exp_bits must be in [2, 30], got {exp_bits}")
+        if not 2 <= precision <= 64:
+            raise ValueError(
+                f"precision must be in [2, 64], got {precision}; use dace.mpfr for more"
+            )
+        self._interned[(exp_bits, precision)] = self
+        self.exp_bits = exp_bits
+        self.precision = precision
+        self.type = numpy.void
+        self.bytes = (exp_bits + precision + 7) // 8
+        self.dtype = self
+        self.typename = f"fp{exp_bits}_{precision}"
+        # Expose this concrete format as ``dace.<typename>``
+        setattr(_ddtypes, self.typename, self)
+        setattr(dace, self.typename, self)
+
+    def to_string(self):
+        return self.typename
+
+    def to_json(self):
+        return {"type": "fp", "exp_bits": self.exp_bits, "precision": self.precision}
+
+    @staticmethod
+    def from_json(json_obj, context=None):
+        if json_obj["type"] != "fp":
+            raise TypeError("Invalid type for fp")
+        return fp(json_obj["exp_bits"], json_obj["precision"])
+
+    @property
+    def ctype(self):
+        return f"fp_arena::fp<{self.exp_bits}, {self.precision}>"
+
+    @property
+    def ctype_unaligned(self):
+        return self.ctype
+
+    def as_ctypes(self):
+        return ctypes.c_byte * self.bytes
+
+    def as_numpy_dtype(self):
+        return numpy.dtype((numpy.void, self.bytes))
+
+    @property
+    def base_type(self):
+        return self
+
+    def __repr__(self) -> str:
+        return f"fp_arena.fp({self.exp_bits}, {self.precision})"
+
+
 def register():
     """
     Register the FP-Arena types into DaCe's global registries.
@@ -158,8 +240,13 @@ def register():
             _ddtypes.TYPECLASS_STRINGS.append(name)
         _ddtypes.TYPECLASS_TO_STRING.setdefault(tc, tc.ctype)
 
-    # Also expose the parametric mpfr class so `dace.mpfr(128)` works.
+    # Expose the parametric classes as dace.mpfr / dace.fp and register their
+    # serializers so `{"type": "mpfr"/"fp", ...}` json deserializes.
     setattr(_ddtypes, "mpfr", mpfr)
     setattr(dace, "mpfr", mpfr)
+    setattr(_ddtypes, "fp", fp)
+    setattr(dace, "fp", fp)
+    _serialize._DACE_SERIALIZE_TYPES.setdefault("mpfr", mpfr)
+    _serialize._DACE_SERIALIZE_TYPES.setdefault("fp", fp)
 
     return FP_ARENA_TYPECLASSES

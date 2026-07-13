@@ -28,6 +28,7 @@ dependencies = [
     "dace @ git+https://github.com/spcl/dace.git@extended",
     "scipy",
     "tqdm",
+    "nanobind",
 ]
 
 [project.optional-dependencies]
@@ -49,7 +50,7 @@ where = ["."]
 include = ["fp_arena*", "corpus*"]
 
 [tool.setuptools.package-data]
-fp_arena = ["runtime/include/**/*.h"]
+fp_arena = ["runtime/include/**/*.h", "runtime/bindings/*.cpp", "runtime/bindings/*.h"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

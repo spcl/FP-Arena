@@ -6,24 +6,20 @@
 
 namespace dace {
 
-// Process-global exponent width (0 = unlimited).
-// Set once before any computation via set_mpfr_exponent_bits(). Not
-// thread-safe.
+// Process-global exponent width (0 = unlimited). Set once before any
+// computation. Not thread-safe; the per-operation clamp also mutates MPFR's
+// exponent range, which is per-thread only on --enable-thread-safe builds
+// (mpfr_buildopt_tls_p()).
 inline unsigned int mpfr_exponent_bits = 0;
 
-// Configure the exponent range for all dace::mpfr values.
-// Uses IEEE-style bias: emax = 2^(bits-1)-1, emin = 1-emax.
-
+// Configure the exponent width for all dace::mpfr values. Each operation is
+// clamped to the IEEE-754 range of a format with that many exponent bits and
+// the value's own precision. IEEE limits in MPFR's exponent convention
+// (x = m*2^e, 0.5 <= |m| < 1): emax = bias+1 = 2^(bits-1),
+// emin = 4 - emax - precision (the MPFR manual's IEEE-double values
+// 1024 / -1073, generalized).
 inline void set_mpfr_exponent_bits(unsigned int bits) {
   mpfr_exponent_bits = bits;
-  if (bits > 0) {
-    mpfr_exp_t emax = (mpfr_exp_t(1) << (bits - 1)) - 1;
-    mpfr_set_emin(1 - emax);
-    mpfr_set_emax(emax);
-  } else {
-    mpfr_set_emin(MPFR_EMIN_DEFAULT);
-    mpfr_set_emax(MPFR_EMAX_DEFAULT);
-  }
 }
 
 template <unsigned int Precision> class mpfr {
@@ -32,8 +28,14 @@ private:
 
   void clamp_exp(int t) {
     if (mpfr_exponent_bits > 0) {
-      int temp = mpfr_check_range(val, t, MPFR_RNDN);
-      mpfr_subnormalize(val, temp, MPFR_RNDN);
+      const mpfr_exp_t semin = mpfr_get_emin(), semax = mpfr_get_emax();
+      const mpfr_exp_t emax = mpfr_exp_t(1) << (mpfr_exponent_bits - 1);
+      mpfr_set_emax(emax);
+      mpfr_set_emin(4 - emax - static_cast<mpfr_exp_t>(Precision));
+      t = mpfr_check_range(val, t, MPFR_RNDN);
+      mpfr_subnormalize(val, t, MPFR_RNDN);
+      mpfr_set_emin(semin);
+      mpfr_set_emax(semax);
     }
   }
 

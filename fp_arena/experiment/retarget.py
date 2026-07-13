@@ -8,6 +8,7 @@ from typing import List, Optional
 
 import dace
 
+from fp_arena.extensions import ensure_mpfr_linked
 from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
 )
@@ -54,13 +55,6 @@ def _validate_pins(sdfg: dace.SDFG, pin_map: PrecisionMap) -> None:
             raise ValueError(f"Pinned array {name!r} is not a floating-point array")
 
 
-def _ensure_mpfr_linked() -> None:
-    """Add the MPFR library to DaCe's CPU link line."""
-    libs = dace.Config.get("compiler", "cpu", "libs") or ""
-    if "mpfr" not in libs.split():
-        dace.Config.append("compiler", "cpu", "libs", value=" mpfr")
-
-
 def apply_precision(
     sdfg: dace.SDFG,
     pin_map: PrecisionMap,
@@ -72,8 +66,8 @@ def apply_precision(
     if not pin_map:
         return
     _validate_pins(sdfg, pin_map)
-    if any(registry.is_mpfr(key) for key in pin_map.values()):
-        _ensure_mpfr_linked()
+    if any(registry.needs_mpfr_link(key) for key in pin_map.values()):
+        ensure_mpfr_linked()
     typed = {name: registry.to_typeclass(key) for name, key in pin_map.items()}
     change_and_propagate_fp_types(sdfg, typed, promotion_rules)
 

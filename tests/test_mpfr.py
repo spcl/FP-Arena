@@ -5,8 +5,6 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
 )
 
-dace.Config.append("compiler", "cpu", "libs", value="mpfr")
-
 
 def test_sdfg_scalar_compute():
     """Compute 1/3 at 128-bit precision and return as double."""
@@ -225,17 +223,13 @@ def test_cap_chain_transient():
 
 # ── exponent-bits tests ──────────────────────────────────────────────────────
 #
-# All tests use 5 exponent bits, giving:
-#   emax = 2^(5-1) - 1 = 15
-#   emin = 1 - 15     = -14
+# All tests use 5 exponent bits, the IEEE-754 convention (bias 2^(5-1)-1 = 15):
+#   largest finite  = (2 - 2^-(prec-1)) * 2^15  (just under 2^16 = 65536)
+#   smallest normal = 2^(1-15) = 2^-14
+#   smallest subnormal (prec = 128) = 2^(2 - 15 - 128) = 2^-141
 #
-# MPFR exponent convention: x = m * 2^e with 1/2 <= |m| < 1.
-#   16384 = 2^14 = 0.5 * 2^15  →  MPFR exponent 15  (= emax, largest normal)
-#   32768 = 2^15 = 0.5 * 2^16  →  MPFR exponent 16  (> emax → overflow → +inf)
-#
-# Minimum subnormal exponent: emin - (precision - 1) = -14 - 127 = -141.
-# Starting from 1.0 and dividing by 2 n times gives MPFR exponent -(n-1);
-# at n=143 the exponent reaches -142 < -141 and the value flushes to 0.
+# So 32768 = 2^15 is representable, 65536 = 2^16 overflows to +inf, and
+# values below half the smallest subnormal round to 0.
 
 
 def _make_exp_bits_sdfg(name: str, body: str) -> dace.SDFG:
@@ -263,12 +257,24 @@ def test_exponent_bits_value_in_range():
     assert abs(out[0] - 2.0) < 1e-15, f"Expected 2.0, got {out[0]}"
 
 
+def test_exponent_bits_largest_binade_representable():
+    """With 5 exponent bits, 32768 = 2^15 is a valid normal (IEEE emax=15)."""
+    sdfg = _make_exp_bits_sdfg(
+        "mpfr_exp_top_binade",
+        "dace::set_mpfr_exponent_bits(5);\ndace::mpfr<128> a(32768.0);\no = (double)a;",
+    )
+    csdfg = sdfg.compile()
+    out = np.zeros(1, dtype=np.float64)
+    csdfg(out=out)
+    assert out[0] == 32768.0, f"Expected 32768.0, got {out[0]}"
+
+
 def test_exponent_bits_overflow_construction():
-    """With emax=15, constructing 32768.0 (MPFR exponent 16) gives +inf."""
+    """With 5 exponent bits, constructing 65536 = 2^16 overflows to +inf."""
     sdfg = _make_exp_bits_sdfg(
         "mpfr_exp_overflow_ctor",
         "dace::set_mpfr_exponent_bits(5);\n"
-        "dace::mpfr<128> a(32768.0);\n"  # 2^15, MPFR exp 16 > emax=15
+        "dace::mpfr<128> a(65536.0);\n"  # 2^16 > largest finite
         "o = (double)a;",
     )
     csdfg = sdfg.compile()
@@ -278,17 +284,43 @@ def test_exponent_bits_overflow_construction():
 
 
 def test_exponent_bits_overflow_arithmetic():
-    """With emax=15, 16384.0 * 2.0 = 32768.0 (MPFR exponent 16) gives +inf."""
+    """With 5 exponent bits, 32768.0 * 2.0 = 65536.0 overflows to +inf."""
     sdfg = _make_exp_bits_sdfg(
         "mpfr_exp_overflow_arith",
         "dace::set_mpfr_exponent_bits(5);\n"
-        "dace::mpfr<128> a(16384.0), b(2.0);\n"  # result exp 16 > emax=15
+        "dace::mpfr<128> a(32768.0), b(2.0);\n"
         "o = (double)(a * b);",
     )
     csdfg = sdfg.compile()
     out = np.zeros(1, dtype=np.float64)
     csdfg(out=out)
     assert np.isposinf(out[0]), f"Expected +inf, got {out[0]}"
+
+
+def test_exponent_bits_matches_float16():
+    """With 5 exponent bits, mpfr<11> is bit-compatible with numpy float16."""
+    cases = [
+        ("mul_ovf", "a * b", 1000.0, 70.0),  # overflows half
+        ("mul", "a * b", 3.1415, 0.1),
+        ("add", "a + b", 0.1, 1000.0),  # alignment + rounding
+        ("div", "a / b", 1.0, 3.0),
+        ("tiny", "a * b", 6.0e-8, 1.0),  # smallest subnormal 2^-24
+        ("half_tiny", "a * b", 2.9802322387695312e-08, 1.0),  # 2^-25 ties to 0
+    ]
+    for name, expr, av, bv in cases:
+        sdfg = _make_exp_bits_sdfg(
+            f"mpfr_f16_{name}",
+            "dace::set_mpfr_exponent_bits(5);\n"
+            f"dace::mpfr<11> a({av!r}), b({bv!r});\n"
+            f"o = (double)({expr});",
+        )
+        csdfg = sdfg.compile()
+        out = np.zeros(1, dtype=np.float64)
+        csdfg(out=out)
+        fa, fb = np.float16(av), np.float16(bv)
+        with np.errstate(over="ignore"):
+            ref = float(eval(expr, {}, {"a": fa, "b": fb}))
+        assert out[0] == ref, f"{name}: expected {ref}, got {out[0]}"
 
 
 def test_exponent_bits_underflow_to_zero():
@@ -319,7 +351,9 @@ if __name__ == "__main__":
     test_cap_array_map()
     test_cap_chain_transient()
     test_exponent_bits_value_in_range()
+    test_exponent_bits_largest_binade_representable()
     test_exponent_bits_overflow_construction()
     test_exponent_bits_overflow_arithmetic()
+    test_exponent_bits_matches_float16()
     test_exponent_bits_underflow_to_zero()
     print("All SDFG tests passed.")
