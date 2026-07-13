@@ -13,6 +13,9 @@ from fp_arena.experiment.inputs import DistributionLike, Noise
 #: ``{array_name: precision_key}`` -- pins a subset of arrays to a target format.
 PrecisionMap = Dict[str, str]
 
+#: Reserved :data:`PrecisionMap` key that targets float literals; absent means literals stay fp64.
+CONSTANTS_KEY = "__constants__"
+
 
 @dataclass
 class ExperimentConfig:

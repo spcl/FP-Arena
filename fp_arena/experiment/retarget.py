@@ -14,7 +14,7 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
 )
 from fp_arena.experiment import registry
-from fp_arena.experiment.config import ExperimentConfig, PrecisionMap
+from fp_arena.experiment.config import CONSTANTS_KEY, ExperimentConfig, PrecisionMap
 
 
 def _is_fp(tc: dace.dtypes.typeclass) -> bool:
@@ -73,11 +73,20 @@ def apply_precision(
     """
     if not pin_map:
         return
-    _validate_pins(sdfg, pin_map)
     if any(registry.is_mpfr(key) for key in pin_map.values()):
         _ensure_mpfr_linked()
-    typed = {name: registry.to_typeclass(key) for name, key in pin_map.items()}
-    change_and_propagate_fp_types(sdfg, typed, promotion_rules)
+    pins = dict(pin_map)
+    constants_key = pins.pop(CONSTANTS_KEY, None)
+    _validate_pins(sdfg, pins)
+    typed = {name: registry.to_typeclass(key) for name, key in pins.items()}
+    change_and_propagate_fp_types(
+        sdfg,
+        typed,
+        promotion_rules,
+        constant_type=(
+            None if constants_key is None else registry.to_typeclass(constants_key)
+        ),
+    )
 
 
 def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:

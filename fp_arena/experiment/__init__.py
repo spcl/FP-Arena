@@ -4,6 +4,7 @@ FP-Arena experiment framework: precision performance and error analysis.
 """
 
 from fp_arena.experiment.config import (
+    CONSTANTS_KEY,
     ErrorAnalysisConfig,
     ExperimentConfig,
     PerformanceAnalysisConfig,
@@ -22,6 +23,7 @@ from fp_arena.experiment.runner import run_error, run_performance, run_perturbat
 from fp_arena.experiment.store import ResultStore, StoredResult
 
 __all__ = [
+    "CONSTANTS_KEY",
     "ExperimentConfig",
     "PerformanceAnalysisConfig",
     "ErrorAnalysisConfig",
