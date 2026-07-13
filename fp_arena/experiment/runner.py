@@ -29,6 +29,7 @@ from fp_arena.experiment.results import (
 )
 from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.retarget import (
+    _transfer_direction,
     apply_precision,
     apply_reference,
     apply_target,
@@ -136,27 +137,6 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
         linf_norm=_ratio(linf, acc["ref_abs_max"]),
         snr=snr,
     )
-
-
-#: Device storage types; an edge crossing this boundary is a host<->device copy.
-_GPU_STORAGE = (
-    dace.dtypes.StorageType.GPU_Global,
-    dace.dtypes.StorageType.GPU_Shared,
-)
-
-
-def _transfer_direction(sdfg: dace.SDFG, state) -> Optional[str]:
-    """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
-    for e in state.edges():
-        src, dst = e.src, e.dst
-        if isinstance(src, dace.nodes.AccessNode) and isinstance(
-            dst, dace.nodes.AccessNode
-        ):
-            src_dev = sdfg.arrays[src.data].storage in _GPU_STORAGE
-            dst_dev = sdfg.arrays[dst.data].storage in _GPU_STORAGE
-            if src_dev != dst_dev:
-                return "h2d" if dst_dev else "d2h"
-    return None
 
 
 def _has_cast_map(state) -> bool:
@@ -277,7 +257,12 @@ def compile_reference(experiment, reference):
     """Build and compile the high-precision reference SDFG once."""
     sdfg = fresh_sdfg(experiment)
     apply_reference(sdfg, reference, experiment.promotion_rules)
-    apply_target(sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
+    apply_target(
+        sdfg,
+        experiment.target,
+        gpu_block_size=experiment.gpu_block_size,
+        gpu_vectorize=experiment.gpu_vectorize,
+    )
     _distinguish(sdfg, "reference")
     return sdfg.compile()
 
@@ -314,7 +299,12 @@ def measure_error(
     """
     cand_sdfg = fresh_sdfg(experiment)
     apply_precision(cand_sdfg, pin_map, experiment.promotion_rules)
-    apply_target(cand_sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
+    apply_target(
+        cand_sdfg,
+        experiment.target,
+        gpu_block_size=experiment.gpu_block_size,
+        gpu_vectorize=experiment.gpu_vectorize,
+    )
     _distinguish(cand_sdfg, _pin_tag(pin_map))
     cand_csdfg = cand_sdfg.compile()
 
@@ -357,7 +347,12 @@ def run_performance(
             points.set_postfix_str(_fmt_pin(pin_map))
             sdfg = fresh_sdfg(cfg.experiment)
             apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
-            apply_target(sdfg, target, gpu_block_size=cfg.experiment.gpu_block_size)
+            apply_target(
+                sdfg,
+                target,
+                gpu_block_size=cfg.experiment.gpu_block_size,
+                gpu_vectorize=cfg.experiment.gpu_vectorize,
+            )
             _distinguish(sdfg, _pin_tag(pin_map))
             # Time every state; classified into a phase at readout.
             for state in sdfg.all_states():
@@ -428,7 +423,12 @@ def run_perturbation(
         points.set_postfix_str(_fmt_pin(pin_map))
         sdfg = fresh_sdfg(exp)
         apply_precision(sdfg, pin_map, exp.promotion_rules)
-        apply_target(sdfg, exp.target, gpu_block_size=exp.gpu_block_size)
+        apply_target(
+            sdfg,
+            exp.target,
+            gpu_block_size=exp.gpu_block_size,
+            gpu_vectorize=exp.gpu_vectorize,
+        )
         _distinguish(sdfg, _pin_tag(pin_map))
         csdfg = sdfg.compile()
 

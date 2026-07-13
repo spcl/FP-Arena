@@ -28,6 +28,7 @@ class ExperimentConfig:
     :param target: ``"cpu"`` (default) or ``"gpu"``;
     :param seed: base RNG seed for inputs and noise, shared across analyses.
     :param gpu_block_size: GPU thread-block size ``[x, y, z]`` (x = contiguous dim) set on every GPU_Device map; ``None`` uses DaCe's default.
+    :param gpu_vectorize: if True, runs VectorizeGPU()
     """
 
     name: str
@@ -41,6 +42,7 @@ class ExperimentConfig:
     target: str = "cpu"
     seed: int = 0
     gpu_block_size: Optional[List[int]] = None
+    gpu_vectorize: bool = False
 
 
 @dataclass

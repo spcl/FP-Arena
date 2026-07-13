@@ -7,8 +7,10 @@ import copy
 from typing import List, Optional
 
 import dace
+from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
 from fp_arena.transformations.change_and_propagate_fp_types import (
+    _add_fusion_barrier,
     change_and_propagate_fp_types,
 )
 from fp_arena.experiment import registry
@@ -89,10 +91,32 @@ def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
     apply_precision(sdfg, ref_map, promotion_rules)
 
 
+#: Device storage types; an edge crossing this boundary is a host<->device copy.
+_GPU_STORAGE = (
+    dace.dtypes.StorageType.GPU_Global,
+    dace.dtypes.StorageType.GPU_Shared,
+)
+
+
+def _transfer_direction(sdfg: dace.SDFG, state) -> Optional[str]:
+    """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
+    for e in state.edges():
+        src, dst = e.src, e.dst
+        if isinstance(src, dace.nodes.AccessNode) and isinstance(
+            dst, dace.nodes.AccessNode
+        ):
+            src_dev = sdfg.arrays[src.data].storage in _GPU_STORAGE
+            dst_dev = sdfg.arrays[dst.data].storage in _GPU_STORAGE
+            if src_dev != dst_dev:
+                return "h2d" if dst_dev else "d2h"
+    return None
+
+
 def apply_target(
     sdfg: dace.SDFG,
     target: str,
     gpu_block_size: Optional[List[int]] = None,
+    gpu_vectorize: bool = False,
 ) -> None:
     """
     Retarget ``sdfg`` in place for the execution target.
@@ -100,8 +124,13 @@ def apply_target(
     if target == "cpu":
         return
     if target == "gpu":
-        # simplify=False keeps host<->device copies and the kernel in separate states so each timing phase is attributable
         sdfg.apply_gpu_transformations(simplify=False)
+        for state in sdfg.all_states():
+            if _transfer_direction(sdfg, state) is not None:
+                _add_fusion_barrier(state)
+        sdfg.simplify()
+        if gpu_vectorize:
+            VectorizeGPU().apply_pass(sdfg, {})
         if gpu_block_size is not None:
             for state in sdfg.all_states():
                 for node in state.nodes():
