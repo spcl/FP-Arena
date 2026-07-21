@@ -264,15 +264,19 @@ def test_unconnected_array_unchanged():
     sdfg.compile()
 
 
-def test_interface_copy_in_only_for_inputs():
-    """Arrays that are only written (output-only) do not get a copy-in state."""
+def test_interface_copy_in_also_for_outputs():
+    """Output-only arrays get a copy-in too: the kernel may overwrite them
+    only partially, and untouched regions must round-trip the caller's
+    pre-call contents (the pass cannot prove a full overwrite)."""
+    import numpy as np
+
     sdfg = dace.SDFG("output_only")
     sdfg.add_array("A", [1], dace.float32, transient=False)
-    sdfg.add_array("B", [1], dace.float32, transient=False)
+    sdfg.add_array("B", [2], dace.float32, transient=False)
 
     s = sdfg.add_state("s")
     t = s.add_tasklet("t", {}, {"b"}, "b = 1.0;", language=dace.Language.CPP)
-    # B is purely written (no read from outside), A is not used.
+    # B[0] is written; B[1] is never touched. A is not used.
     s.add_edge(t, "b", s.add_write("B"), None, dace.Memlet("B[0]"))
 
     change_and_propagate_fp_types(sdfg, {"B": dace.float16})
@@ -282,13 +286,15 @@ def test_interface_copy_in_only_for_inputs():
     casted_name = "fp_casted_B_float16"
     assert casted_name in sdfg.arrays
 
-    # B is output-only and A is unused, so nothing needs casting on the way in:
-    # the copy_in state is created lazily and should not exist at all here.
     copy_in = next((st for st in sdfg.states() if st.label == "copy_in"), None)
-    assert copy_in is None, "Output-only arrays should not produce a copy_in state"
+    assert copy_in is not None, "changed interface arrays must be copied in"
 
     sdfg.validate()
-    sdfg.compile()
+
+    # The unwritten element survives (round-tripped through f16).
+    B = np.array([-3.0, 0.5], dtype=np.float32)
+    sdfg(A=np.zeros(1, dtype=np.float32), B=B)
+    np.testing.assert_allclose(B, [1.0, 0.5])
 
 
 def test_requires_two_fixpoint_passes():
@@ -870,7 +876,7 @@ if __name__ == "__main__":
     test_initial_type_pinned()
     test_long_chain_convergence()
     test_unconnected_array_unchanged()
-    test_interface_copy_in_only_for_inputs()
+    test_interface_copy_in_also_for_outputs()
     test_requires_two_fixpoint_passes()
     test_three_level_lattice()
     test_cyclic_dependency_terminates()

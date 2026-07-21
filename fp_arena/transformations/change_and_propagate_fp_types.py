@@ -647,18 +647,18 @@ def change_and_propagate_fp_types(
                     orig_descs[orig_name],
                 )
 
+    # Copy in every renamed array -- even pure outputs may be overwritten only partially.
     copy_in_state = None
     for orig_name, casted_name in repl_dict.items():
-        if orig_name in sdfg_inputs:
-            if copy_in_state is None:
-                copy_in_state = sdfg.add_state_before(
-                    state=sdfg.start_block, label="copy_in"
-                )
-                _add_fusion_barrier(copy_in_state)
-            _add_copy_map(
-                copy_in_state,
-                orig_name,
-                orig_descs[orig_name],
-                casted_name,
-                sdfg.arrays[casted_name],
+        if copy_in_state is None:
+            copy_in_state = sdfg.add_state_before(
+                state=sdfg.start_block, label="copy_in"
             )
+            _add_fusion_barrier(copy_in_state)
+        _add_copy_map(
+            copy_in_state,
+            orig_name,
+            orig_descs[orig_name],
+            casted_name,
+            sdfg.arrays[casted_name],
+        )
