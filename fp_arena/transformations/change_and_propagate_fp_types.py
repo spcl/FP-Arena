@@ -3,6 +3,7 @@ from collections import defaultdict, deque
 from typing import Dict, FrozenSet, Optional, Set, Tuple
 
 import dace
+from dace import subsets
 from dace.properties import CodeBlock
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
@@ -270,8 +271,12 @@ def _cast_tasklet(
     return t
 
 
-# Inserts a cast tasklet on each map-boundary copy between differently-typed containers.
-def _insert_map_boundary_casts(sdfg: dace.SDFG) -> None:
+# Inserts a cast wherever an edge connects two differently-typed containers:
+# map-boundary copies (AccessNode <-> MapExit/MapEntry) get a scalar cast
+# tasklet spliced into the enclosing map's iteration; direct
+# AccessNode -> AccessNode copies get an elementwise cast map over the
+# copied subset.
+def _insert_edge_casts(sdfg: dace.SDFG) -> None:
     for state in sdfg.all_states():
         for i, e in enumerate(list(state.edges())):
             if e.data is None or e.data.data is None:
@@ -316,6 +321,100 @@ def _insert_map_boundary_casts(sdfg: dace.SDFG) -> None:
                 state.remove_edge(e)
                 state.add_edge(e.src, e.src_conn, t, "_in", read)
                 state.add_edge(t, "_out", e.dst, None, write)
+
+            # Direct copy: AccessNode -> AccessNode.
+            elif isinstance(e.src, nodes.AccessNode) and isinstance(
+                e.dst, nodes.AccessNode
+            ):
+                src_name, dst_name = e.src.data, e.dst.data
+                src_desc, dst_desc = sdfg.arrays[src_name], sdfg.arrays[dst_name]
+                if src_desc.dtype == dst_desc.dtype:
+                    continue
+                if e.data.wcr is not None:
+                    raise NotImplementedError(
+                        f"WCR copy between differently-typed containers "
+                        f"{src_name!r} -> {dst_name!r} is not supported"
+                    )
+
+                if mem == src_name:
+                    src_subset, dst_subset = e.data.subset, e.data.other_subset
+                elif mem == dst_name:
+                    src_subset, dst_subset = e.data.other_subset, e.data.subset
+                else:
+                    continue  # not a plain copy of these two containers
+                if src_subset is None:
+                    src_subset = subsets.Range.from_array(src_desc)
+                if dst_subset is None:
+                    dst_subset = subsets.Range.from_array(dst_desc)
+
+                src_nd = [(d, sz) for d, sz in enumerate(src_subset.size()) if sz != 1]
+                dst_nd = [(d, sz) for d, sz in enumerate(dst_subset.size()) if sz != 1]
+                if len(src_nd) != len(dst_nd) or any(
+                    s1 != s2 for (_, s1), (_, s2) in zip(src_nd, dst_nd)
+                ):
+                    raise NotImplementedError(
+                        f"Reshaping copy between differently-typed containers "
+                        f"{src_name}[{src_subset}] -> {dst_name}[{dst_subset}] is "
+                        "not supported"
+                    )
+
+                t = _cast_tasklet(
+                    state,
+                    f"cast_copy_{src_name}_to_{dst_name}_{i}",
+                    src_desc.dtype,
+                    dst_desc.dtype,
+                )
+                map_ranges = {f"_i{k}": f"0:{sz}" for k, (_, sz) in enumerate(src_nd)}
+                if not map_ranges:  # single-element copy
+                    map_ranges = {"_i0": "0:1"}
+                map_entry, map_exit = state.add_map(
+                    name=f"cast_copy_map_{src_name}_to_{dst_name}_{i}",
+                    ndrange=map_ranges,
+                )
+                map_entry.add_in_connector(f"IN_{src_name}")
+                map_entry.add_out_connector(f"OUT_{src_name}")
+                map_exit.add_in_connector(f"IN_{dst_name}")
+                map_exit.add_out_connector(f"OUT_{dst_name}")
+
+                def _elem_idx(subset, nondegenerate):
+                    param_of = {d: f"_i{k}" for k, (d, _) in enumerate(nondegenerate)}
+                    return ", ".join(
+                        f"({rb}) + ({rs})*{param_of[d]}" if d in param_of else f"{rb}"
+                        for d, (rb, _, rs) in enumerate(subset)
+                    )
+
+                src_idx = _elem_idx(src_subset, src_nd)
+                dst_idx = _elem_idx(dst_subset, dst_nd)
+
+                state.remove_edge(e)
+                state.add_edge(
+                    e.src,
+                    e.src_conn,
+                    map_entry,
+                    f"IN_{src_name}",
+                    dace.Memlet(data=src_name, subset=src_subset),
+                )
+                state.add_edge(
+                    map_entry,
+                    f"OUT_{src_name}",
+                    t,
+                    "_in",
+                    dace.Memlet(expr=f"{src_name}[{src_idx}]"),
+                )
+                state.add_edge(
+                    t,
+                    "_out",
+                    map_exit,
+                    f"IN_{dst_name}",
+                    dace.Memlet(expr=f"{dst_name}[{dst_idx}]"),
+                )
+                state.add_edge(
+                    map_exit,
+                    f"OUT_{dst_name}",
+                    e.dst,
+                    e.dst_conn,
+                    dace.Memlet(data=dst_name, subset=dst_subset),
+                )
 
 
 # Adds a map that copies and casts *src_name* to *dst_name*
@@ -496,8 +595,8 @@ def change_and_propagate_fp_types(
 
     _apply_connector_types(sdfg, inferred)
 
-    # Add casts where a map entry/exit copy now connects two different dtypes.
-    _insert_map_boundary_casts(sdfg)
+        # Add casts on every edge that now connects two different dtypes.
+        _insert_edge_casts(sd)
 
     # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
     changed_interface = {

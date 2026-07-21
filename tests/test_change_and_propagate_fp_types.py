@@ -763,6 +763,104 @@ def test_boundary_cast_inserted_for_fusion():
     np.testing.assert_allclose(A, 18.0)
 
 
+def test_direct_copy_cast_inserted():
+    """A direct AccessNode->AccessNode copy between differently-typed arrays
+    is replaced by an elementwise cast map (DaCe cannot lower a mixed-dtype
+    copy), including subset copies with different src/dst offsets."""
+    import numpy as np
+    from dace.sdfg import nodes
+
+    n = 6
+    sdfg = dace.SDFG("copy_cast")
+    sdfg.add_array("A", [n], dace.float64, transient=False)
+    sdfg.add_array("B", [n], dace.float64, transient=False)
+
+    s = sdfg.add_state("s")
+    # Copy A[1:4] into B[2:5] (offsets differ on the two sides).
+    mem = dace.Memlet(
+        data="A",
+        subset=dace.subsets.Range([(1, 3, 1)]),
+        other_subset=dace.subsets.Range([(2, 4, 1)]),
+    )
+    s.add_edge(s.add_read("A"), None, s.add_write("B"), None, mem)
+
+    change_and_propagate_fp_types(sdfg, {"A": dace.float64, "B": dace.float32})
+    sdfg.validate()
+
+    casts = [
+        node.label
+        for st in sdfg.all_states()
+        for node in st.nodes()
+        if isinstance(node, nodes.Tasklet) and node.label.startswith("cast_copy_")
+    ]
+    assert casts, "expected a cast map on the mixed-dtype direct copy"
+
+    A = np.arange(1, n + 1, dtype=np.float64) * 1.1
+    B = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, B=B)
+
+    ref = np.zeros(n)
+    ref[2:5] = A[1:4].astype(np.float32)
+    np.testing.assert_allclose(B, ref, rtol=1e-7)
+
+
+def test_direct_copy_cast_degenerate_dims():
+    """Copies whose degenerate (size-1) dimensions do not line up positionally
+    -- a row copied into a column, and a rank-changing single element -- pair
+    the non-degenerate dimensions instead of zipping dims positionally."""
+    import numpy as np
+
+    n = 4
+    sdfg = dace.SDFG("copy_cast_degenerate")
+    sdfg.add_array("A", [n, n], dace.float64, transient=False)
+    sdfg.add_array("B", [n, n], dace.float64, transient=False)
+    sdfg.add_array("C", [n], dace.float64, transient=False)
+
+    s = sdfg.add_state("s")
+    # Row A[1, 0:n] into column B[0:n, 2]: degenerate dims transposed.
+    s.add_edge(
+        s.add_read("A"),
+        None,
+        s.add_write("B"),
+        None,
+        dace.Memlet(
+            data="A",
+            subset=dace.subsets.Range([(1, 1, 1), (0, n - 1, 1)]),
+            other_subset=dace.subsets.Range([(0, n - 1, 1), (2, 2, 1)]),
+        ),
+    )
+    # Rank-changing single element A[3, 3] -> C[1].
+    s2 = sdfg.add_state_after(s, "s2")
+    s2.add_edge(
+        s2.add_read("A"),
+        None,
+        s2.add_write("C"),
+        None,
+        dace.Memlet(
+            data="A",
+            subset=dace.subsets.Range([(3, 3, 1), (3, 3, 1)]),
+            other_subset=dace.subsets.Range([(1, 1, 1)]),
+        ),
+    )
+
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float64, "B": dace.float32, "C": dace.float32}
+    )
+    sdfg.validate()
+
+    A = (np.arange(n * n, dtype=np.float64) * 1.1).reshape(n, n).copy()
+    B = np.zeros((n, n), dtype=np.float64)
+    C = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, B=B, C=C)
+
+    ref_b = np.zeros((n, n))
+    ref_b[0:n, 2] = A[1, 0:n].astype(np.float32)
+    np.testing.assert_allclose(B, ref_b, rtol=1e-7)
+    ref_c = np.zeros(n)
+    ref_c[1] = np.float32(A[3, 3])
+    np.testing.assert_allclose(C, ref_c, rtol=1e-7)
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -788,4 +886,6 @@ if __name__ == "__main__":
     test_heat3d_no_fp64_in_generated_code()
     test_end_to_end_demoted_written_array_runs()
     test_boundary_cast_inserted_for_fusion()
+    test_direct_copy_cast_inserted()
+    test_direct_copy_cast_degenerate_dims()
     print("All tests passed.")
