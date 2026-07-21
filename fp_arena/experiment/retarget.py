@@ -15,6 +15,7 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
 )
 from fp_arena.experiment import registry
 from fp_arena.experiment.config import CONSTANTS_KEY, ExperimentConfig, PrecisionMap
+from dace.transformation.passes.vectorization.config import VectorizeConfig
 
 
 def _is_fp(tc: dace.dtypes.typeclass) -> bool:
@@ -139,7 +140,9 @@ def apply_target(
                 _add_fusion_barrier(state)
         sdfg.simplify()
         if gpu_vectorize:
-            VectorizeGPU().apply_pass(sdfg, {})
+            VectorizeGPU(
+                VectorizeConfig(widths=(8,), remainder_strategy="branched_tail")
+            ).apply_pass(sdfg, {})
         if gpu_block_size is not None:
             for state in sdfg.all_states():
                 for node in state.nodes():
