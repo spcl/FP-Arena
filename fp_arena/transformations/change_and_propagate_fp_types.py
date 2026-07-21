@@ -705,6 +705,28 @@ def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None
                 node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
 
 
+# Retypes every floating-point SDFG symbol and compile-time constant to *dtype*.
+def _lower_symbols_and_constants(
+    sdfgs: List[dace.SDFG], dtype: dace.dtypes.typeclass
+) -> None:
+    root = sdfgs[0]
+    abi_symbols = set(map(str, root.free_symbols))
+    for sd in sdfgs:
+        for name, stype in list(sd.symbols.items()):
+            if _is_fp(stype) and not (sd is root and name in abi_symbols):
+                sd.symbols[name] = dtype
+        for desc, _value in sd.constants_prop.values():
+            if _is_fp(getattr(desc, "dtype", None)):
+                desc.dtype = dtype
+        # Symbols only assigned on interstate edges (never declared) get their C
+        # type inferred from the assignment expression, whose float literals are
+        # doubles; declare them explicitly at the constant precision.
+        for e in sd.all_interstate_edges():
+            for name, stype in e.data.new_symbols(sd, sd.symbols).items():
+                if name not in sd.symbols and name not in sd.arrays and _is_fp(stype):
+                    sd.add_symbol(name, dtype)
+
+
 # Main entry point to change and propagate fp types through an SDFG.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
@@ -718,11 +740,12 @@ def change_and_propagate_fp_types(
     # Use default promotion rules if none are provided.
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
 
+    sdfgs = _collect_sdfgs(sdfg)
+
     # Optionally cast every float literal in the computation to a fixed precision.
     if constant_type is not None:
         _cast_float_constants(sdfg, constant_type)
-
-    sdfgs = _collect_sdfgs(sdfg)
+        _lower_symbols_and_constants(sdfgs, constant_type)
     _warn_unlowerable(sdfgs)
 
     # Unify the two sides of every NestedSDFG boundary, then resolve classes.
@@ -757,6 +780,17 @@ def change_and_propagate_fp_types(
 
     # Build the array-level dataflow graph and solve the precision fixed point.
     producers, consumers = _build_dataflow(sdfgs, uf)
+
+    # Treat every unpinned floating-point *source* as a constant at that precision.
+    if constant_type is not None:
+        for rep in members:
+            if (
+                rep not in pins
+                and not producers.get(rep)
+                and _is_fp(original_types[rep])
+            ):
+                pins[rep] = constant_type
+
     inferred = _infer_types(
         members,
         producers,
