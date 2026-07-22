@@ -122,11 +122,18 @@ def _transfer_direction(sdfg: dace.SDFG, state) -> Optional[str]:
     return None
 
 
+#: The vectorization config used when ``gpu_vectorize`` is on but no config is given.
+DEFAULT_GPU_VECTORIZE_CONFIG = VectorizeConfig(
+    widths=(2,), remainder_strategy="branched_tail"
+)
+
+
 def apply_target(
     sdfg: dace.SDFG,
     target: str,
     gpu_block_size: Optional[List[int]] = None,
     gpu_vectorize: bool = False,
+    gpu_vectorize_config: Optional[VectorizeConfig] = None,
 ) -> None:
     """
     Retarget ``sdfg`` in place for the execution target.
@@ -140,9 +147,8 @@ def apply_target(
                 _add_fusion_barrier(state)
         sdfg.simplify()
         if gpu_vectorize:
-            VectorizeGPU(
-                VectorizeConfig(widths=(8,), remainder_strategy="branched_tail")
-            ).apply_pass(sdfg, {})
+            config = gpu_vectorize_config or DEFAULT_GPU_VECTORIZE_CONFIG
+            VectorizeGPU(config).apply_pass(sdfg, {})
         if gpu_block_size is not None:
             for state in sdfg.all_states():
                 for node in state.nodes():

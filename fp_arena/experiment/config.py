@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Union
 
 import dace
+from dace.transformation.passes.vectorization.config import VectorizeConfig
 
 from fp_arena.experiment.inputs import DistributionLike, Noise
 
@@ -32,6 +33,7 @@ class ExperimentConfig:
     :param seed: base RNG seed for inputs and noise, shared across analyses.
     :param gpu_block_size: GPU thread-block size ``[x, y, z]`` (x = contiguous dim) set on every GPU_Device map; ``None`` uses DaCe's default.
     :param gpu_vectorize: if True, runs VectorizeGPU()
+    :param gpu_vectorize_config: the ``VectorizeConfig`` used when ``gpu_vectorize`` is set; ``None`` uses ``DEFAULT_GPU_VECTORIZE_CONFIG``.
     """
 
     name: str
@@ -46,6 +48,7 @@ class ExperimentConfig:
     seed: int = 0
     gpu_block_size: Optional[List[int]] = None
     gpu_vectorize: bool = False
+    gpu_vectorize_config: Optional[VectorizeConfig] = None
 
 
 @dataclass

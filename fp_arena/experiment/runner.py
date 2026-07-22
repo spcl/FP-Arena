@@ -262,6 +262,7 @@ def compile_reference(experiment, reference):
         experiment.target,
         gpu_block_size=experiment.gpu_block_size,
         gpu_vectorize=experiment.gpu_vectorize,
+        gpu_vectorize_config=experiment.gpu_vectorize_config,
     )
     _distinguish(sdfg, "reference")
     return sdfg.compile()
@@ -304,6 +305,7 @@ def measure_error(
         experiment.target,
         gpu_block_size=experiment.gpu_block_size,
         gpu_vectorize=experiment.gpu_vectorize,
+        gpu_vectorize_config=experiment.gpu_vectorize_config,
     )
     _distinguish(cand_sdfg, _pin_tag(pin_map))
     cand_csdfg = cand_sdfg.compile()
@@ -352,6 +354,7 @@ def run_performance(
                 target,
                 gpu_block_size=cfg.experiment.gpu_block_size,
                 gpu_vectorize=cfg.experiment.gpu_vectorize,
+                gpu_vectorize_config=cfg.experiment.gpu_vectorize_config,
             )
             _distinguish(sdfg, _pin_tag(pin_map))
             # Time every state; classified into a phase at readout.
@@ -428,6 +431,7 @@ def run_perturbation(
             exp.target,
             gpu_block_size=exp.gpu_block_size,
             gpu_vectorize=exp.gpu_vectorize,
+            gpu_vectorize_config=exp.gpu_vectorize_config,
         )
         _distinguish(sdfg, _pin_tag(pin_map))
         csdfg = sdfg.compile()
