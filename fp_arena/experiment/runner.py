@@ -8,6 +8,7 @@ Drivers that execute the experiment kinds.
 """
 
 import math
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -248,9 +249,12 @@ def _pin_tag(pin_map: PrecisionMap) -> str:
 
 
 def _distinguish(sdfg: dace.SDFG, tag: str) -> None:
-    """Unique build folder per point."""
+    """
+    Give the SDFG its own build folder for this build.
+    """
     safe = "".join(ch if ch.isalnum() else "_" for ch in tag)
-    sdfg.name = f"{sdfg.name}_{safe}"
+    unique = uuid.uuid4().hex[:8]
+    sdfg.name = f"{sdfg.name}_{safe}_{unique}"
 
 
 def compile_reference(experiment, reference):
