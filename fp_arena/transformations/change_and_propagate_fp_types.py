@@ -685,8 +685,7 @@ class FusionBarrier(nodes.LibraryNode):
     def __init__(self, name="fusion_barrier", *args, **kwargs):
         super().__init__(name, *args, inputs=set(), outputs=set(), **kwargs)
 
-    @property
-    def has_side_effects(self) -> bool:
+    def has_side_effects(self, sdfg) -> bool:
         return True
 
 
