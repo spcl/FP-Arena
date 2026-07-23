@@ -4,10 +4,12 @@ from collections import defaultdict, deque
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 import dace
+import dace.library
 from dace import subsets
 from dace.properties import CodeBlock
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
+from dace.transformation.transformation import ExpandTransformation
 from tqdm.auto import tqdm
 
 from fp_arena.dtypes import float32sr, float64sr
@@ -657,16 +659,40 @@ def _add_copy_map(
         state.add_edge(tasklet, "_out", dst_an, None, dace.Memlet(expr=dst_name))
 
 
-# Adds a empty tasklet with side effects to prevent state fusion.
+@dace.library.expansion
+class _ExpandFusionBarrier(ExpandTransformation):
+    environments = []
+
+    @staticmethod
+    def expansion(node, parent_state, parent_sdfg, **kwargs):
+        return nodes.Tasklet(
+            node.name,
+            set(),
+            set(),
+            "// Fusion barrier",
+            language=dace.Language.CPP,
+            side_effects=True,
+        )
+
+
+@dace.library.node
+class FusionBarrier(nodes.LibraryNode):
+    """Empty, side-effecting library node used to prevent state fusion."""
+
+    implementations = {"pure": _ExpandFusionBarrier}
+    default_implementation = "pure"
+
+    def __init__(self, name="fusion_barrier", *args, **kwargs):
+        super().__init__(name, *args, inputs=set(), outputs=set(), **kwargs)
+
+    @property
+    def has_side_effects(self) -> bool:
+        return True
+
+
+# Adds an empty side-effecting library node to prevent state fusion.
 def _add_fusion_barrier(state: dace.SDFGState) -> None:
-    state.add_tasklet(
-        name="fusion_barrier",
-        inputs=set(),
-        outputs=set(),
-        code="// Fusion barrier",
-        language=dace.Language.CPP,
-        side_effects=True,
-    )
+    state.add_node(FusionBarrier("fusion_barrier"))
 
 
 # Wraps every float literal in ``expr = dace.<typename>(literal)``.
