@@ -1,11 +1,15 @@
 import ast
+import warnings
 from collections import defaultdict, deque
-from typing import Dict, FrozenSet, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 import dace
+import dace.library
+from dace import subsets
 from dace.properties import CodeBlock
 from dace.sdfg import nodes, utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
+from dace.transformation.transformation import ExpandTransformation
 from tqdm.auto import tqdm
 
 from fp_arena.dtypes import float32sr, float64sr
@@ -27,6 +31,19 @@ DEFAULT_PROMOTION_RULES: Dict[FrozenSet, dace.dtypes.typeclass] = {
     # Two SR floats: widen.
     frozenset({float32sr, float64sr}): float64sr,
 }
+
+
+#: Qualified array identity: ``(id(sdfg), array_name)``.
+QKey = Tuple[int, str]
+
+
+# Whether *tc* is a floating-point typeclass this pass may retarget.
+def _is_fp(tc: Optional[dace.dtypes.typeclass]) -> bool:
+    if tc is None:
+        return False
+    if isinstance(tc, dace.mpfr):
+        return True
+    return tc in (dace.float16, dace.float32, dace.float64, float32sr, float64sr)
 
 
 # Returns the promoted type of *t1* and *t2* according to *rules*.
@@ -66,59 +83,185 @@ def _states_in_order(cfg: AbstractControlFlowRegion):
             yield from _states_in_order(block)
 
 
+# Union-find over qualified array keys. Merging the two sides of every
+# NestedSDFG boundary edge makes "outer array" and "inner connector array"
+# a single node in the dataflow graph, so both sides always infer the same
+# type.
+class _UnionFind:
+    def __init__(self) -> None:
+        self._parent: Dict[QKey, QKey] = {}
+
+    def find(self, x: QKey) -> QKey:
+        parent = self._parent
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        while parent.get(x, x) != x:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(self, a: QKey, b: QKey) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self._parent[rb] = ra
+
+
+# All SDFGs in the hierarchy, root first. Rejects the two structures the
+# pass cannot handle safely: a nested SDFG object shared by several
+# NestedSDFG nodes (one descriptor mutation would silently retype every
+# call site) and View descriptors (their dtype must track the viewed array,
+# which this pass does not model).
+def _collect_sdfgs(sdfg: dace.SDFG) -> List[dace.SDFG]:
+    sdfgs = list(sdfg.all_sdfgs_recursive())
+    seen: Set[int] = set()
+    for sd in sdfgs:
+        if id(sd) in seen:
+            raise NotImplementedError(
+                f"Nested SDFG object {sd.name!r} is referenced by more than one "
+                "NestedSDFG node; retyping it once would affect every call site."
+            )
+        seen.add(id(sd))
+        for name, desc in sd.arrays.items():
+            if isinstance(desc, dace.data.View):
+                raise NotImplementedError(
+                    f"View descriptor {name!r} in SDFG {sd.name!r} is not supported."
+                )
+    return sdfgs
+
+
+# Warns about float data this pass cannot retarget: float-typed nested-SDFG
+# symbols (symbols are not data descriptors) and float arrays read on
+# interstate edges (those reads follow the array's final precision but are
+# implicitly widened to the symbol's fixed dtype; no casts are inserted).
+def _warn_unlowerable(sdfgs: List[dace.SDFG]) -> None:
+    fp_symbols: Set[str] = set()
+    for sd in sdfgs:
+        for state in sd.all_states():
+            for node in state.nodes():
+                if not isinstance(node, nodes.NestedSDFG):
+                    continue
+                for sym in node.symbol_mapping:
+                    if _is_fp(node.sdfg.symbols.get(sym)):
+                        fp_symbols.add(sym)
+    if fp_symbols:
+        warnings.warn(
+            "change_and_propagate_fp_types: float-typed nested-SDFG symbols are "
+            f"not retargetable (symbols are not data): {sorted(fp_symbols)}"
+        )
+
+    interstate_reads: Set[str] = set()
+    for sd in sdfgs:
+        fp_names = {n for n, d in sd.arrays.items() if _is_fp(d.dtype)}
+        for e in sd.all_interstate_edges():
+            interstate_reads |= e.data.free_symbols & fp_names
+    if interstate_reads:
+        warnings.warn(
+            "change_and_propagate_fp_types: float arrays read on interstate edges "
+            "follow their final precision but are widened to the target symbol's "
+            f"dtype without explicit casts: {sorted(interstate_reads)}"
+        )
+
+
+# Merges the two sides of every NestedSDFG boundary edge into one class.
+def _unify_nested_boundaries(sdfgs: List[dace.SDFG]) -> _UnionFind:
+    uf = _UnionFind()
+    for sd in sdfgs:
+        sid = id(sd)
+        for state in sd.all_states():
+            for node in state.nodes():
+                if not isinstance(node, nodes.NestedSDFG):
+                    continue
+                iid = id(node.sdfg)
+                for e in state.in_edges(node):
+                    if e.dst_conn and e.data is not None and e.data.data is not None:
+                        uf.union((sid, e.data.data), (iid, e.dst_conn))
+                for e in state.out_edges(node):
+                    if e.src_conn and e.data is not None and e.data.data is not None:
+                        uf.union((sid, e.data.data), (iid, e.src_conn))
+    return uf
+
+
+# Class membership and per-class original dtype.
+#
+# Returns:
+#   members: class representative -> [(sdfg, name), ...]
+#   original: class representative -> the (single) original dtype
+# Raises if the members of one class disagree on their original dtype -- the
+# input SDFG would already be reinterpreting memory across that boundary.
+def _class_types(
+    sdfgs: List[dace.SDFG],
+    uf: _UnionFind,
+) -> Tuple[Dict[QKey, List[Tuple[dace.SDFG, str]]], Dict[QKey, dace.dtypes.typeclass]]:
+    members: Dict[QKey, List[Tuple[dace.SDFG, str]]] = defaultdict(list)
+    for sd in sdfgs:
+        for name in sd.arrays:
+            members[uf.find((id(sd), name))].append((sd, name))
+
+    original: Dict[QKey, dace.dtypes.typeclass] = {}
+    for rep, mem in members.items():
+        dtypes = {sd.arrays[name].dtype for sd, name in mem}
+        if len(dtypes) > 1:
+            names = ", ".join(f"{sd.name}.{name}" for sd, name in mem)
+            raise ValueError(
+                f"Arrays sharing a NestedSDFG boundary disagree on dtype: {names} "
+                f"({sorted(t.to_string() for t in dtypes)})"
+            )
+        original[rep] = next(iter(dtypes))
+    return members, original
+
+
 # Builds the array-level dataflow graph of the SDFG.
 #
 # Returns:
 #   producers: array -> set of arrays that feed any computation writing it
 #   consumers: the reverse map (array -> arrays it feeds into)
 def _build_dataflow(
-    sdfg: dace.SDFG,
-) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
-    producers: Dict[str, Set[str]] = defaultdict(set)
-    consumers: Dict[str, Set[str]] = defaultdict(set)
+    sdfgs: List[dace.SDFG],
+    uf: _UnionFind,
+) -> Tuple[Dict[QKey, Set[QKey]], Dict[QKey, Set[QKey]]]:
+    producers: Dict[QKey, Set[QKey]] = defaultdict(set)
+    consumers: Dict[QKey, Set[QKey]] = defaultdict(set)
 
-    for state in _states_in_order(sdfg):
-        for node in state.nodes():
-            if isinstance(node, nodes.NestedSDFG):
-                raise NotImplementedError(
-                    "Type propagation does not currently support NestedSDFG nodes. "
-                    f"Found '{node.label}' in state '{state.label}'."
-                )
+    for sd in sdfgs:
+        sid = id(sd)
+        for state in _states_in_order(sd):
+            for node in state.nodes():
+                if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
+                    ins = {
+                        uf.find((sid, e.data.data))
+                        for e in state.in_edges(node)
+                        if e.data is not None and e.data.data is not None
+                    }
+                    outs = {
+                        uf.find((sid, e.data.data))
+                        for e in state.out_edges(node)
+                        if e.data is not None and e.data.data is not None
+                    }
+                    for out in outs:
+                        producers[out].update(ins)
+                        for inp in ins:
+                            consumers[inp].add(out)
 
-            if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-                ins = {
-                    e.data.data
-                    for e in state.in_edges(node)
-                    if e.data is not None and e.data.data is not None
-                }
-                outs = {
-                    e.data.data
-                    for e in state.out_edges(node)
-                    if e.data is not None and e.data.data is not None
-                }
-                for out in outs:
-                    producers[out].update(ins)
-                    for inp in ins:
-                        consumers[inp].add(out)
-
-        # Direct AccessNode -> AccessNode copies.
-        for e in state.edges():
-            if e.data is None or e.data.data is None:
-                continue
-            if isinstance(e.src, nodes.AccessNode) and isinstance(
-                e.dst, nodes.AccessNode
-            ):
-                producers[e.dst.data].add(e.src.data)
-                consumers[e.src.data].add(e.dst.data)
+            # Direct AccessNode -> AccessNode copies.
+            for e in state.edges():
+                if e.data is None or e.data.data is None:
+                    continue
+                if isinstance(e.src, nodes.AccessNode) and isinstance(
+                    e.dst, nodes.AccessNode
+                ):
+                    src = uf.find((sid, e.src.data))
+                    dst = uf.find((sid, e.dst.data))
+                    producers[dst].add(src)
+                    consumers[src].add(dst)
 
     return producers, consumers
 
 
 # Arrays reachable in the producer graph from any *seed*, following the producer -> consumer direction.
 def _reachable_from(
-    seeds: Set[str],
-    consumers: Dict[str, Set[str]],
-) -> Set[str]:
+    seeds: Set[QKey],
+    consumers: Dict[QKey, Set[QKey]],
+) -> Set[QKey]:
     reached = set(seeds)
     stack = list(seeds)
     while stack:
@@ -130,38 +273,48 @@ def _reachable_from(
     return reached
 
 
-# Computes a fixed-point precision for every array.
+# Computes a fixed-point precision for every class of arrays.
 #
-# Each array's type is the join (widest, via *rules*) of its producers' types.
-# Arrays are classified once up front:
-#   - pinned arrays (in *initial_types*) are constants;
-#   - source arrays (no producers) are constants at their original dtype;
-#   - arrays not reachable from any pinned/source seed can never receive a type
+# Each class's type is the join (widest, via *rules*) of its producers' types.
+# Classes are classified once up front:
+#   - pinned classes (in *initial_types*) are constants;
+#   - non-floating-point classes are constants at their original dtype and
+#     never contribute to a join (an int/bool input must not widen an fp output);
+#   - source classes (no producers) are constants at their original dtype;
+#   - classes not reachable from any pinned/source seed can never receive a type
 #     from the fixpoint (uninitialized-transient cycles); they keep their
 #     original dtype as constants;
-#   - all remaining (reachable, derived) arrays start at None (bottom) and only
+#   - all remaining (reachable, derived) classes start at None (bottom) and only
 #     ever widen, so demotion propagates correctly and the monotone worklist
-#     terminates. Every such array is reachable from a seed, so none stays None.
-# Returns name -> dtype for every array.
+#     terminates. A class still None afterwards (fed exclusively by non-fp
+#     producers) falls back to its original dtype.
+# Returns class representative -> dtype for every class.
 def _infer_types(
-    sdfg: dace.SDFG,
-    producers: Dict[str, Set[str]],
-    consumers: Dict[str, Set[str]],
-    initial_types: Dict[str, dace.dtypes.typeclass],
-    original_types: Dict[str, dace.dtypes.typeclass],
+    members: Dict[QKey, List[Tuple[dace.SDFG, str]]],
+    producers: Dict[QKey, Set[QKey]],
+    consumers: Dict[QKey, Set[QKey]],
+    initial_types: Dict[QKey, dace.dtypes.typeclass],
+    original_types: Dict[QKey, dace.dtypes.typeclass],
     rules: Dict[FrozenSet, dace.dtypes.typeclass],
-) -> Dict[str, dace.dtypes.typeclass]:
+) -> Dict[QKey, dace.dtypes.typeclass]:
 
     seeds = {
-        name for name in sdfg.arrays if name in initial_types or not producers.get(name)
+        name
+        for name in members
+        if name in initial_types
+        or not _is_fp(original_types[name])
+        or not producers.get(name)
     }
     reachable = _reachable_from(seeds, consumers)
 
-    inferred: Dict[str, Optional[dace.dtypes.typeclass]] = {}
-    pinned: Set[str] = set()
-    for name in sdfg.arrays:
+    inferred: Dict[QKey, Optional[dace.dtypes.typeclass]] = {}
+    pinned: Set[QKey] = set()
+    for name in members:
         if name in initial_types:
             inferred[name] = initial_types[name]  # pin: constant
+            pinned.add(name)
+        elif not _is_fp(original_types[name]):
+            inferred[name] = original_types[name]  # non-fp: constant
             pinned.add(name)
         elif not producers.get(name):
             inferred[name] = original_types[name]  # source: constant at original
@@ -172,7 +325,7 @@ def _infer_types(
         else:
             inferred[name] = None  # reachable derived: bottom, widened below
 
-    worklist = deque(name for name in sdfg.arrays if name not in pinned)
+    worklist = deque(name for name in members if name not in pinned)
     queued = set(worklist)
     while worklist:
         name = worklist.popleft()
@@ -181,7 +334,7 @@ def _infer_types(
         new: Optional[dace.dtypes.typeclass] = None
         for prod in producers[name]:
             t = inferred[prod]
-            if t is None:
+            if t is None or not _is_fp(t):
                 continue
             new = _promote(new, t, rules)
 
@@ -192,6 +345,11 @@ def _infer_types(
                     continue
                 worklist.append(cons)
                 queued.add(cons)
+
+    # Fed exclusively by non-fp producers: keep the original dtype.
+    for name in members:
+        if inferred[name] is None:
+            inferred[name] = original_types[name]
 
     return inferred
 
@@ -270,8 +428,12 @@ def _cast_tasklet(
     return t
 
 
-# Inserts a cast tasklet on each map-boundary copy between differently-typed containers.
-def _insert_map_boundary_casts(sdfg: dace.SDFG) -> None:
+# Inserts a cast wherever an edge connects two differently-typed containers:
+# map-boundary copies (AccessNode <-> MapExit/MapEntry) get a scalar cast
+# tasklet spliced into the enclosing map's iteration; direct
+# AccessNode -> AccessNode copies get an elementwise cast map over the
+# copied subset.
+def _insert_edge_casts(sdfg: dace.SDFG) -> None:
     for state in sdfg.all_states():
         for i, e in enumerate(list(state.edges())):
             if e.data is None or e.data.data is None:
@@ -316,6 +478,100 @@ def _insert_map_boundary_casts(sdfg: dace.SDFG) -> None:
                 state.remove_edge(e)
                 state.add_edge(e.src, e.src_conn, t, "_in", read)
                 state.add_edge(t, "_out", e.dst, None, write)
+
+            # Direct copy: AccessNode -> AccessNode.
+            elif isinstance(e.src, nodes.AccessNode) and isinstance(
+                e.dst, nodes.AccessNode
+            ):
+                src_name, dst_name = e.src.data, e.dst.data
+                src_desc, dst_desc = sdfg.arrays[src_name], sdfg.arrays[dst_name]
+                if src_desc.dtype == dst_desc.dtype:
+                    continue
+                if e.data.wcr is not None:
+                    raise NotImplementedError(
+                        f"WCR copy between differently-typed containers "
+                        f"{src_name!r} -> {dst_name!r} is not supported"
+                    )
+
+                if mem == src_name:
+                    src_subset, dst_subset = e.data.subset, e.data.other_subset
+                elif mem == dst_name:
+                    src_subset, dst_subset = e.data.other_subset, e.data.subset
+                else:
+                    continue  # not a plain copy of these two containers
+                if src_subset is None:
+                    src_subset = subsets.Range.from_array(src_desc)
+                if dst_subset is None:
+                    dst_subset = subsets.Range.from_array(dst_desc)
+
+                src_nd = [(d, sz) for d, sz in enumerate(src_subset.size()) if sz != 1]
+                dst_nd = [(d, sz) for d, sz in enumerate(dst_subset.size()) if sz != 1]
+                if len(src_nd) != len(dst_nd) or any(
+                    s1 != s2 for (_, s1), (_, s2) in zip(src_nd, dst_nd)
+                ):
+                    raise NotImplementedError(
+                        f"Reshaping copy between differently-typed containers "
+                        f"{src_name}[{src_subset}] -> {dst_name}[{dst_subset}] is "
+                        "not supported"
+                    )
+
+                t = _cast_tasklet(
+                    state,
+                    f"cast_copy_{src_name}_to_{dst_name}_{i}",
+                    src_desc.dtype,
+                    dst_desc.dtype,
+                )
+                map_ranges = {f"_i{k}": f"0:{sz}" for k, (_, sz) in enumerate(src_nd)}
+                if not map_ranges:  # single-element copy
+                    map_ranges = {"_i0": "0:1"}
+                map_entry, map_exit = state.add_map(
+                    name=f"cast_copy_map_{src_name}_to_{dst_name}_{i}",
+                    ndrange=map_ranges,
+                )
+                map_entry.add_in_connector(f"IN_{src_name}")
+                map_entry.add_out_connector(f"OUT_{src_name}")
+                map_exit.add_in_connector(f"IN_{dst_name}")
+                map_exit.add_out_connector(f"OUT_{dst_name}")
+
+                def _elem_idx(subset, nondegenerate):
+                    param_of = {d: f"_i{k}" for k, (d, _) in enumerate(nondegenerate)}
+                    return ", ".join(
+                        f"({rb}) + ({rs})*{param_of[d]}" if d in param_of else f"{rb}"
+                        for d, (rb, _, rs) in enumerate(subset)
+                    )
+
+                src_idx = _elem_idx(src_subset, src_nd)
+                dst_idx = _elem_idx(dst_subset, dst_nd)
+
+                state.remove_edge(e)
+                state.add_edge(
+                    e.src,
+                    e.src_conn,
+                    map_entry,
+                    f"IN_{src_name}",
+                    dace.Memlet(data=src_name, subset=src_subset),
+                )
+                state.add_edge(
+                    map_entry,
+                    f"OUT_{src_name}",
+                    t,
+                    "_in",
+                    dace.Memlet(expr=f"{src_name}[{src_idx}]"),
+                )
+                state.add_edge(
+                    t,
+                    "_out",
+                    map_exit,
+                    f"IN_{dst_name}",
+                    dace.Memlet(expr=f"{dst_name}[{dst_idx}]"),
+                )
+                state.add_edge(
+                    map_exit,
+                    f"OUT_{dst_name}",
+                    e.dst,
+                    e.dst_conn,
+                    dace.Memlet(data=dst_name, subset=dst_subset),
+                )
 
 
 # Adds a map that copies and casts *src_name* to *dst_name*
@@ -403,16 +659,40 @@ def _add_copy_map(
         state.add_edge(tasklet, "_out", dst_an, None, dace.Memlet(expr=dst_name))
 
 
-# Adds a empty tasklet with side effects to prevent state fusion.
+@dace.library.expansion
+class _ExpandFusionBarrier(ExpandTransformation):
+    environments = []
+
+    @staticmethod
+    def expansion(node, parent_state, parent_sdfg, **kwargs):
+        return nodes.Tasklet(
+            node.name,
+            set(),
+            set(),
+            "// Fusion barrier",
+            language=dace.Language.CPP,
+            side_effects=True,
+        )
+
+
+@dace.library.node
+class FusionBarrier(nodes.LibraryNode):
+    """Empty, side-effecting library node used to prevent state fusion."""
+
+    implementations = {"pure": _ExpandFusionBarrier}
+    default_implementation = "pure"
+
+    def __init__(self, name="fusion_barrier", *args, **kwargs):
+        super().__init__(name, *args, inputs=set(), outputs=set(), **kwargs)
+
+    @property
+    def has_side_effects(self) -> bool:
+        return True
+
+
+# Adds an empty side-effecting library node to prevent state fusion.
 def _add_fusion_barrier(state: dace.SDFGState) -> None:
-    state.add_tasklet(
-        name="fusion_barrier",
-        inputs=set(),
-        outputs=set(),
-        code="// Fusion barrier",
-        language=dace.Language.CPP,
-        side_effects=True,
-    )
+    state.add_node(FusionBarrier("fusion_barrier"))
 
 
 # Wraps every float literal in ``expr = dace.<typename>(literal)``.
@@ -437,17 +717,40 @@ class _FloatConstantCaster(ast.NodeTransformer):
 # Casts all float literals in Python tasklet bodies to *dtype*.
 def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None:
     caster = _FloatConstantCaster(dtype.to_string())
-    for state in sdfg.all_states():
-        for node in state.nodes():
-            if not (
-                isinstance(node, nodes.Tasklet)
-                and node.language == dace.Language.Python
-            ):
-                continue
-            tree = ast.fix_missing_locations(
-                caster.visit(ast.parse(node.code.as_string))
-            )
-            node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+    for sd in sdfg.all_sdfgs_recursive():
+        for state in sd.all_states():
+            for node in state.nodes():
+                if not (
+                    isinstance(node, nodes.Tasklet)
+                    and node.language == dace.Language.Python
+                ):
+                    continue
+                tree = ast.fix_missing_locations(
+                    caster.visit(ast.parse(node.code.as_string))
+                )
+                node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+
+
+# Retypes every floating-point SDFG symbol and compile-time constant to *dtype*.
+def _lower_symbols_and_constants(
+    sdfgs: List[dace.SDFG], dtype: dace.dtypes.typeclass
+) -> None:
+    root = sdfgs[0]
+    abi_symbols = set(map(str, root.free_symbols))
+    for sd in sdfgs:
+        for name, stype in list(sd.symbols.items()):
+            if _is_fp(stype) and not (sd is root and name in abi_symbols):
+                sd.symbols[name] = dtype
+        for desc, _value in sd.constants_prop.values():
+            if _is_fp(getattr(desc, "dtype", None)):
+                desc.dtype = dtype
+        # Symbols only assigned on interstate edges (never declared) get their C
+        # type inferred from the assignment expression, whose float literals are
+        # doubles; declare them explicitly at the constant precision.
+        for e in sd.all_interstate_edges():
+            for name, stype in e.data.new_symbols(sd, sd.symbols).items():
+                if name not in sd.symbols and name not in sd.arrays and _is_fp(stype):
+                    sd.add_symbol(name, dtype)
 
 
 # Main entry point to change and propagate fp types through an SDFG.
@@ -463,43 +766,92 @@ def change_and_propagate_fp_types(
     # Use default promotion rules if none are provided.
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
 
+    sdfgs = _collect_sdfgs(sdfg)
+
     # Optionally cast every float literal in the computation to a fixed precision.
     if constant_type is not None:
         _cast_float_constants(sdfg, constant_type)
+        _lower_symbols_and_constants(sdfgs, constant_type)
+    _warn_unlowerable(sdfgs)
 
-    original_types: Dict[str, dace.dtypes.typeclass] = {
-        name: desc.dtype for name, desc in sdfg.arrays.items()
-    }
+    # Unify the two sides of every NestedSDFG boundary, then resolve classes.
+    uf = _unify_nested_boundaries(sdfgs)
+    members, original_types = _class_types(sdfgs, uf)
+
+    # Resolve pins (top-level array names) to classes.
+    pins: Dict[QKey, dace.dtypes.typeclass] = {}
+    for name, dtype in initial_types.items():
+        if name not in sdfg.arrays:
+            raise ValueError(
+                f"Pinned array {name!r} not found in the top-level SDFG "
+                f"{sdfg.name!r} (nested-only arrays cannot be pinned directly)"
+            )
+        if not _is_fp(sdfg.arrays[name].dtype):
+            raise ValueError(f"Pinned array {name!r} is not a floating-point array")
+        if not _is_fp(dtype):
+            raise ValueError(
+                f"Pinned type {dtype} for array {name!r} is not a floating-point type"
+            )
+        rep = uf.find((id(sdfg), name))
+        if rep in pins and not _types_equal(pins[rep], dtype):
+            raise ValueError(
+                f"Conflicting pins for arrays sharing a NestedSDFG boundary "
+                f"(class of {name!r}): {pins[rep]} vs {dtype}"
+            )
+        pins[rep] = dtype
+
     original_nontransients: Dict[str, dace.dtypes.typeclass] = {
-        name: dtype
-        for name, dtype in original_types.items()
-        if not sdfg.arrays[name].transient
+        name: desc.dtype for name, desc in sdfg.arrays.items() if not desc.transient
     }
 
     # Build the array-level dataflow graph and solve the precision fixed point.
-    producers, consumers = _build_dataflow(sdfg)
+    producers, consumers = _build_dataflow(sdfgs, uf)
+
+    # Treat every unpinned floating-point *source* as a constant at that precision.
+    if constant_type is not None:
+        for rep in members:
+            if (
+                rep not in pins
+                and not producers.get(rep)
+                and _is_fp(original_types[rep])
+            ):
+                pins[rep] = constant_type
+
     inferred = _infer_types(
-        sdfg,
+        members,
         producers,
         consumers,
-        initial_types,
+        pins,
         original_types,
         rules,
     )
 
-    _print_type_report(original_types, inferred)
+    # Report with level-qualified names (the root level stays unqualified).
+    report_orig: Dict[str, dace.dtypes.typeclass] = {}
+    report_final: Dict[str, dace.dtypes.typeclass] = {}
+    for i, sd in enumerate(sdfgs):
+        prefix = "" if i == 0 else f"{sd.name}@{i}/"
+        for name, desc in sd.arrays.items():
+            report_orig[prefix + name] = desc.dtype
+            report_final[prefix + name] = inferred[uf.find((id(sd), name))]
+    _print_type_report(report_orig, report_final)
 
-    # Apply inferred dtypes to SDFG arrays.
-    for name, dtype in inferred.items():
-        if sdfg.arrays[name].dtype != dtype:
-            sdfg.arrays[name].dtype = dtype
+    # Apply inferred dtypes to the arrays and connectors of every level.
+    for sd in sdfgs:
+        level_inferred = {name: inferred[uf.find((id(sd), name))] for name in sd.arrays}
+        for name, dtype in level_inferred.items():
+            if sd.arrays[name].dtype != dtype:
+                sd.arrays[name].dtype = dtype
 
-    _apply_connector_types(sdfg, inferred)
+        _apply_connector_types(sd, level_inferred)
 
-    # Add casts where a map entry/exit copy now connects two different dtypes.
-    _insert_map_boundary_casts(sdfg)
+        # Add casts on every edge that now connects two different dtypes.
+        _insert_edge_casts(sd)
 
-    # Preserve the external interface: non-transient arrays that changed type are renamed to an internal transient.
+    # Preserve the external interface: non-transient arrays of the *root* SDFG
+    # that changed type are renamed to an internal transient. Nested levels
+    # need no interface preservation: Inner names and connectors are untouched
+    # by the root-level rename.
     changed_interface = {
         name
         for name, orig_dtype in original_nontransients.items()
@@ -548,18 +900,18 @@ def change_and_propagate_fp_types(
                     orig_descs[orig_name],
                 )
 
+    # Copy in every renamed array -- even pure outputs may be overwritten only partially.
     copy_in_state = None
     for orig_name, casted_name in repl_dict.items():
-        if orig_name in sdfg_inputs:
-            if copy_in_state is None:
-                copy_in_state = sdfg.add_state_before(
-                    state=sdfg.start_block, label="copy_in"
-                )
-                _add_fusion_barrier(copy_in_state)
-            _add_copy_map(
-                copy_in_state,
-                orig_name,
-                orig_descs[orig_name],
-                casted_name,
-                sdfg.arrays[casted_name],
+        if copy_in_state is None:
+            copy_in_state = sdfg.add_state_before(
+                state=sdfg.start_block, label="copy_in"
             )
+            _add_fusion_barrier(copy_in_state)
+        _add_copy_map(
+            copy_in_state,
+            orig_name,
+            orig_descs[orig_name],
+            casted_name,
+            sdfg.arrays[casted_name],
+        )
