@@ -28,6 +28,7 @@ dependencies = [
     "dace @ git+https://github.com/spcl/dace.git@extended",
     "scipy",
     "tqdm",
+    "ordered_set"
 ]
 
 [project.optional-dependencies]
