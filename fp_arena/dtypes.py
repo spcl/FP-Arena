@@ -142,6 +142,13 @@ class fp(typeclass):
 
     Example use: ``dace.fp(23, 46)`` for 23 exponent bits and 46 bits of
     precision (typename ``fp23_46``, 9 bytes per element).
+
+    ``exp_bits`` 0 and 1 are the degenerate fixed-point widths: both put every
+    finite value on the single grid ``m * 2**(2 - precision)``, and both keep
+    ``+-inf`` and NaN so overflow stays observable. ``exp_bits=1`` spends its
+    one exponent field value on the specials; ``exp_bits=0`` has no exponent
+    field and reserves its two largest magnitude codes instead, which is why
+    it needs ``precision >= 3``.
     """
 
     _interned: dict = {}
@@ -166,11 +173,16 @@ class fp(typeclass):
     def __init__(self, exp_bits: int, precision: int):
         if self._interned.get((exp_bits, precision)) is self:
             return  # already initialized (interned instance)
-        if not 2 <= exp_bits <= 30:
-            raise ValueError(f"exp_bits must be in [2, 30], got {exp_bits}")
+        if not 0 <= exp_bits <= 30:
+            raise ValueError(f"exp_bits must be in [0, 30], got {exp_bits}")
         if not 2 <= precision <= 64:
             raise ValueError(
                 f"precision must be in [2, 64], got {precision}; use dace.mpfr for more"
+            )
+        if exp_bits == 0 and precision < 3:
+            raise ValueError(
+                f"precision must be >= 3 when exp_bits=0, got {precision}; with no "
+                f"exponent field the two largest magnitude codes encode inf and NaN"
             )
         self._interned[(exp_bits, precision)] = self
         self.exp_bits = exp_bits

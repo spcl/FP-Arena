@@ -1,6 +1,8 @@
 """SDFG-level tests for the emulated fp<Exp, Prec> type (dace.fp)."""
 
 import numpy as np
+import pytest
+
 import dace
 import fp_arena
 from fp_arena.experiment import registry
@@ -221,6 +223,79 @@ def test_cap_float64_bit_exact():
     assert np.array_equal(C, ref), (C, ref)
 
 
+# -- fixed-point widths (exp_bits 0 and 1) -----------------------------------
+
+_FP08 = dace.fp(0, 8)
+_FP18 = dace.fp(1, 8)
+
+
+def test_fixed_point_tasklet():
+    """fp<0,8> arithmetic in generated code, on and past its finite range."""
+    got = _run_scalar(
+        "fp0_tasklet",
+        "fp_arena::fp<0, 8> a(1.5), b(0.25); o = (double)(a - b);",
+    )
+    assert got == 1.25, f"Expected 1.25, got {got}"
+    over = _run_scalar(
+        "fp0_tasklet_overflow",
+        "fp_arena::fp<0, 8> a(1.5), b(0.5); o = (double)(a + b);",
+    )
+    assert np.isposinf(over), f"Expected +inf, got {over}"
+
+
+def test_fixed_point_matches_bindings():
+    """Generated code and the native bindings agree bit-for-bit at Exp <= 1."""
+    for exp_bits, cls in [(0, _native.fp0_8), (1, _native.fp1_8)]:
+        got = _run_scalar(
+            f"fp{exp_bits}_8_vs_binding",
+            f"fp_arena::fp<{exp_bits}, 8> a(1.1), b(0.3); o = (double)(a * b);",
+        )
+        assert got == float(cls(1.1) * cls(0.3)), exp_bits
+
+
+@dace.program
+def _prog_scale(x: dace.float64[8], y: dace.float64[8]):
+    for i in dace.map[0:8]:
+        y[i] = x[i] * 0.5
+
+
+def test_cap_fixed_point():
+    """change_and_propagate through fp<0,8>: in-range values land on the grid,
+    out-of-range ones overflow to inf instead of failing silently."""
+    sdfg = _prog_scale.to_sdfg()
+    change_and_propagate_fp_types(sdfg, {"x": _FP08}, _rules(_FP08))
+    assert sdfg.arrays["fp_casted_x_fp0_8"].dtype == _FP08
+    csdfg = sdfg.compile()
+    x = np.array([0.0, 0.5, 1.0, 1.5, -1.5, 0.25, 3.0, 100.0], dtype=np.float64)
+    y = np.zeros(8, dtype=np.float64)
+    csdfg(x=x, y=y)
+    assert np.array_equal(y[:6], [0.0, 0.25, 0.5, 0.75, -0.75, 0.125]), y
+    # 3.0 and 100.0 exceed the largest finite magnitude (1.953125) on the way
+    # in, so they arrive as +inf and stay there.
+    assert np.isposinf(y[6]) and np.isposinf(y[7]), y
+
+
+def test_fixed_point_dtype_plumbing():
+    assert _FP08.to_string() == "fp0_8"
+    assert _FP08.ctype == "fp_arena::fp<0, 8>"
+    assert _FP08.bytes == 1  # 0 + 8 bits
+    assert _FP18.bytes == 2  # 1 + 8 bits
+    assert dace.fp.from_json(_FP08.to_json()) == _FP08
+    assert registry.to_typeclass("fp0_8") == _FP08
+    assert registry.key_of(_FP08) == "fp0_8"
+    assert registry.needs_mpfr_link("fp0_8")
+
+
+def test_fixed_point_validation():
+    """exp_bits=0 needs precision >= 3 to fit the reserved inf/NaN codes."""
+    assert dace.fp(0, 3).bytes == 1  # smallest legal exp_bits=0 format
+    assert dace.fp(1, 2).bytes == 1  # exp_bits=1 reserves a field, not a code
+    with pytest.raises(ValueError, match="precision must be >= 3"):
+        dace.fp(0, 2)
+    with pytest.raises(ValueError, match=r"exp_bits must be in \[0, 30\]"):
+        dace.fp(-1, 8)
+
+
 # -- dtype plumbing ----------------------------------------------------------
 
 
@@ -265,6 +340,11 @@ if __name__ == "__main__":
     test_cap_elementwise()
     test_cap_float32_bit_exact()
     test_cap_float64_bit_exact()
+    test_fixed_point_tasklet()
+    test_fixed_point_matches_bindings()
+    test_cap_fixed_point()
+    test_fixed_point_dtype_plumbing()
+    test_fixed_point_validation()
     test_dtype_properties()
     test_dtype_json_roundtrip()
     test_registry_keys()

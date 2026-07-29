@@ -3,6 +3,17 @@
 // fp_arena::fp<Exp, Prec> -- emulated IEEE-754-style float with Exp exponent
 // bits and Prec significand bits.
 //
+// The two smallest exponent widths degenerate into fixed-point formats, both
+// keeping +-inf and NaN so overflow and invalid operations stay observable:
+//
+//   Exp == 1  bias 0, so no exponent field value encodes a normal: field 0
+//             holds the subnormals (the grid m * 2^(1-kMantBits), giving the
+//             finite range [0, 2)) and field 1 is the reserved inf/NaN code.
+//   Exp == 0  no exponent field at all, so the two largest magnitude codes
+//             are reserved instead -- kInfMant for +-inf and kMantMask for
+//             NaN -- leaving the same grid as Exp == 1 minus its top two
+//             magnitudes. Needs Prec >= 3 for those codes to fit.
+//
 #pragma once
 
 #include <algorithm>
@@ -103,9 +114,12 @@ struct exp_range_saver {
   X(log1p, mpfr_log1p)
 
 template <unsigned int Exp, unsigned int Prec> class fp {
-  static_assert(2 <= Exp && Exp <= 30, "exponent bits must be in [2, 30]");
+  static_assert(Exp <= 30, "exponent bits must be in [0, 30]");
   static_assert(2 <= Prec && Prec <= 64,
                 "precision must be in [2, 64]; use dace::mpfr for more");
+  static_assert(Exp > 0 || Prec >= 3,
+                "with no exponent bits the two largest magnitude codes are "
+                "reserved for inf and NaN, so precision must be >= 3");
 
   template <unsigned int, unsigned int> friend class fp;
 
@@ -121,7 +135,9 @@ public:
 
 private:
   static constexpr unsigned int kMantBits = Prec - 1;
-  static constexpr int kBias = (1 << (Exp - 1)) - 1;
+  //: Exp == 0 continues the bias sequence 2^(Exp-1) - 1, which is already 0 at
+  //: Exp == 1, so both fixed-point widths share one value grid.
+  static constexpr int kBias = Exp == 0 ? 0 : (1 << (Exp - 1)) - 1;
   static constexpr int kEmax = kBias; // exponent of the largest normal
   static constexpr int kEminNormal =
       1 - kBias; // exponent of the smallest normal
@@ -129,6 +145,12 @@ private:
   static constexpr u64 kExpFieldMax = (u64(1) << Exp) - 1;
   static constexpr u64 kMantMask = (u64(1) << kMantBits) - 1;
   static constexpr u64 kHiddenBit = u64(1) << kMantBits;
+  //: Whether there is no exponent field to reserve an all-ones value in, so
+  //: the two largest magnitude codes stand in for the specials instead:
+  //: kInfMant is +-inf and kMantMask is NaN. Keeping them at the top of the
+  //: magnitude order is what lets compare() stay encoding-agnostic.
+  static constexpr bool kNoExpField = (Exp == 0);
+  static constexpr u64 kInfMant = kMantMask - 1;
   static constexpr unsigned int kSignPos = total_bits - 1;
   static constexpr unsigned int kSignByte = kSignPos / 8;
   static constexpr unsigned char kSignBitInByte = 1u << (kSignPos % 8);
@@ -209,7 +231,13 @@ private:
       biased = (lo >> kMantBits) & kExpFieldMax;
     }
     const u64 mfield = lo & kMantMask;
-    if (biased == kExpFieldMax) {
+    if constexpr (kNoExpField) {
+      if (mfield >= kInfMant) {
+        u.cls = mfield == kInfMant ? detail::kInf : detail::kNaN;
+        return u;
+      }
+      // Everything else is on the fixed grid, i.e. the subnormal path below.
+    } else if (biased == kExpFieldMax) {
       u.cls = mfield == 0 ? detail::kInf : detail::kNaN;
       return u;
     }
@@ -274,6 +302,13 @@ private:
           return infinity(sign);
         return make(sign, static_cast<u64>(e_res + kBias),
                     static_cast<u64>(m) & kMantMask);
+      }
+      if constexpr (kNoExpField) {
+        // Landing on a reserved code means the value rounded past the largest
+        // finite magnitude, which is the same condition e_res > kEmax catches
+        // for the widths that do have an exponent field.
+        if (static_cast<u64>(m) >= kInfMant)
+          return infinity(sign);
       }
       return make(sign, 0, static_cast<u64>(m)); // subnormal (qr == kQmin)
     }
@@ -473,19 +508,36 @@ public:
   // Special values and classification.
   static fp zero(bool sign = false) noexcept { return make(sign, 0, 0); }
   static fp infinity(bool sign = false) noexcept {
-    return make(sign, kExpFieldMax, 0);
+    if constexpr (kNoExpField)
+      return make(sign, 0, kInfMant);
+    else
+      return make(sign, kExpFieldMax, 0);
   }
   static fp nan() noexcept {
-    return make(false, kExpFieldMax, u64(1) << (kMantBits - 1)); // quiet
+    if constexpr (kNoExpField)
+      return make(false, 0, kMantMask);
+    else
+      return make(false, kExpFieldMax, u64(1) << (kMantBits - 1)); // quiet
   }
 
   bool is_nan() const noexcept {
-    return biased_exp_field() == kExpFieldMax && (load_lo() & kMantMask) != 0;
+    if constexpr (kNoExpField)
+      return (load_lo() & kMantMask) == kMantMask;
+    else
+      return biased_exp_field() == kExpFieldMax && (load_lo() & kMantMask) != 0;
   }
   bool is_inf() const noexcept {
-    return biased_exp_field() == kExpFieldMax && (load_lo() & kMantMask) == 0;
+    if constexpr (kNoExpField)
+      return (load_lo() & kMantMask) == kInfMant;
+    else
+      return biased_exp_field() == kExpFieldMax && (load_lo() & kMantMask) == 0;
   }
-  bool is_finite() const noexcept { return biased_exp_field() != kExpFieldMax; }
+  bool is_finite() const noexcept {
+    if constexpr (kNoExpField)
+      return (load_lo() & kMantMask) < kInfMant;
+    else
+      return biased_exp_field() != kExpFieldMax;
+  }
   bool is_zero() const noexcept {
     return biased_exp_field() == 0 && (load_lo() & kMantMask) == 0;
   }

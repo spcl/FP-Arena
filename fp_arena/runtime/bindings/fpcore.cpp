@@ -77,6 +77,24 @@ template <unsigned int E, unsigned int P> void bind_fp(nb::module_ &m) {
                          }
                          return s;
                        })
+          .def_static(
+              "from_bits",
+              [](nb::bytes raw) {
+                if (raw.size() != sizeof(T))
+                  throw nb::value_error("raw storage must be exactly nbytes");
+                // The type assumes any storage above total_bits stays zero.
+                constexpr unsigned kStray = sizeof(T) * 8 - T::total_bits;
+                if constexpr (kStray > 0) {
+                  const auto top =
+                      static_cast<unsigned char>(raw.c_str()[sizeof(T) - 1]);
+                  if (top >> (8 - kStray))
+                    throw nb::value_error("bits above total_bits must be zero");
+                }
+                T v;
+                std::memcpy(&v, raw.c_str(), sizeof(T));
+                return v;
+              },
+              "Reinterpret raw little-endian storage bytes as a value.")
           .def("is_nan", &T::is_nan)
           .def("is_inf", &T::is_inf)
           .def("is_finite", &T::is_finite)
