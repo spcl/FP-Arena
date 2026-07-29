@@ -8,7 +8,7 @@ from typing import List, Optional
 
 import dace
 
-from fp_arena.extensions import ensure_mpfr_linked
+from fp_arena.extensions import ensure_mpfr_linked, uses_host_only_types
 from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
 )
@@ -94,6 +94,18 @@ def apply_target(
     if target == "cpu":
         return
     if target == "gpu":
+        # dace::mpfr and fp_arena::fp call into libmpfr and have no device code
+        # path, so they would only fail deep inside nvcc, long after the
+        # precision that caused it stopped being visible.
+        if uses_host_only_types(sdfg):
+            raise ValueError(
+                "Cannot target the GPU: this SDFG uses an emulated host-only "
+                "type (dace::mpfr or fp_arena::fp). Those call into libmpfr "
+                "and have no device implementation, so they cannot run in a "
+                "GPU kernel. Use target='cpu', or pick a precision the GPU "
+                "supports (fp16/fp32/fp64, or the stochastic-rounding "
+                "fp32sr/fp64sr)."
+            )
         # simplify=False keeps host<->device copies and the kernel in separate states so each timing phase is attributable
         sdfg.apply_gpu_transformations(simplify=False)
         if gpu_block_size is not None:

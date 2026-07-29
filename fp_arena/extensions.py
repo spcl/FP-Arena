@@ -60,6 +60,9 @@ _CTYPE_MARKERS = ("fp_arena::", "dace::mpfr")
 
 #: Substrings identifying the types whose operations may call into libmpfr
 #: (the mpfr value type always, the emulated fp type for its elementals).
+#: These are exactly the host-only types: calling into libmpfr means there is
+#: no device code path, unlike the SR types, which are ``FP_ARENA_HD``
+#: (``__host__ __device__``) and do run in GPU kernels.
 _MPFR_CTYPE_MARKERS = ("dace::mpfr", "fp_arena::fp<")
 
 
@@ -187,6 +190,18 @@ def uses_fp_arena_types(sdfg: dace.SDFG) -> bool:
         nested SDFGs references an FP-Arena C type, ``False`` otherwise.
     """
     return _scan_ctypes(sdfg, _CTYPE_MARKERS)
+
+
+def uses_host_only_types(sdfg: dace.SDFG) -> bool:
+    """
+    :param sdfg: the SDFG to inspect.
+    :returns: ``True`` if ``sdfg`` or its nested SDFGs use an emulated type
+        that exists only on the host (``dace::mpfr`` or ``fp_arena::fp``, both
+        of which call into libmpfr), and so cannot be compiled into a GPU
+        kernel. The stochastic-rounding types are device-capable and do not
+        count.
+    """
+    return _scan_ctypes(sdfg, _MPFR_CTYPE_MARKERS)
 
 
 #: Whether the automatic wrappers are currently installed.

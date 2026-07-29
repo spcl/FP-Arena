@@ -28,6 +28,7 @@ from fp_arena.extensions import (
     inject_headers,
     precise_math,
     uses_fp_arena_types,
+    uses_host_only_types,
     fp_arena_global_code,
     INCLUDE_DIR,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "inject_headers",
     "precise_math",
     "uses_fp_arena_types",
+    "uses_host_only_types",
     "fp_arena_global_code",
     "INCLUDE_DIR",
     "change_fptype",

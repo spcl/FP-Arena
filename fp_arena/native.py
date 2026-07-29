@@ -47,6 +47,17 @@ def lib_path() -> str:
     return os.path.join(LIB_DIR, f"_fpcore.{_source_hash()}{suffix}")
 
 
+def _is_stale_lib(name: str, current: str, suffix: str) -> bool:
+    """
+    Whether ``name`` in :data:`LIB_DIR` is a built library from older sources.
+
+    Only files carrying the extension suffix qualify. A concurrent build's
+    ``<lib>.tmp<pid>`` ends in the pid instead, so it is never swept away out
+    from under the process that is still writing it.
+    """
+    return name.startswith("_fpcore.") and name.endswith(suffix) and name != current
+
+
 def build() -> str:
     """
     Compile the native module (nanobind's non-CMake build: the module source
@@ -99,9 +110,10 @@ def build() -> str:
         if os.path.exists(tmp):
             os.remove(tmp)
     # Best-effort cleanup of libraries built from older sources.
-    prefix, current = "_fpcore.", os.path.basename(out)
+    current = os.path.basename(out)
+    suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
     for name in os.listdir(LIB_DIR):
-        if name.startswith(prefix) and name != current:
+        if _is_stale_lib(name, current, suffix):
             try:
                 os.remove(os.path.join(LIB_DIR, name))
             except OSError:

@@ -19,7 +19,7 @@ from fp_arena.experiment import (
     run_perturbation,
 )
 from fp_arena.experiment.inputs import make_call_args
-from fp_arena.experiment.retarget import apply_target, fresh_sdfg
+from fp_arena.experiment.retarget import apply_reference, apply_target, fresh_sdfg
 from fp_arena.experiment.runner import (
     _accumulate,
     _finalize,
@@ -490,6 +490,33 @@ def test_error_metrics_persist_to_store():
 def test_unknown_target_raises():
     with pytest.raises(ValueError, match="Unknown target"):
         apply_target(fresh_sdfg(_exp()), "tpu")
+
+
+@pytest.mark.parametrize("key", ["mpfr128", "fp23_46", "fp0_8"])
+def test_gpu_target_rejects_host_only_precisions(key):
+    """mpfr and fp have no device code path, so targeting the GPU with them
+    must fail here rather than deep inside nvcc."""
+    sdfg = fresh_sdfg(_exp())
+    apply_reference(sdfg, key, None)  # every fp array, so no mixed promotion
+    with pytest.raises(ValueError, match="host-only"):
+        apply_target(sdfg, "gpu")
+    # The same SDFG is fine on the CPU.
+    apply_target(sdfg, "cpu")
+
+
+@pytest.mark.parametrize("key", ["fp32", "fp64", "fp32sr", "fp64sr"])
+def test_gpu_target_accepts_device_capable_precisions(key):
+    """The native and stochastic-rounding types are FP_ARENA_HD, so the guard
+    must not reject them."""
+    sdfg = fresh_sdfg(_exp())
+    apply_reference(sdfg, key, None)
+    apply_target(sdfg, "gpu")  # graph transformation only; needs no device
+    assert any(
+        node.map.schedule == dace.dtypes.ScheduleType.GPU_Device
+        for state in sdfg.all_states()
+        for node in state.nodes()
+        if isinstance(node, dace.nodes.MapEntry)
+    )
 
 
 def test_callable_init_function_covers_constant_and_fixed_data():
