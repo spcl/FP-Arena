@@ -24,6 +24,8 @@ from fp_arena.extensions import (
     disable_auto_extensions,
     disable_fast_math,
     inject_headers,
+    patch_aligned_heap_allocation,
+    patch_memcpy_copies,
     precise_math,
     uses_fp_arena_types,
     fp_arena_global_code,
@@ -38,10 +40,15 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
 # Register the types and the SDFG convenience method on import (idempotent).
 register()
 
+patch_aligned_heap_allocation()
+patch_memcpy_copies()
+
 import dace as _dace
 
 if not hasattr(_dace.SDFG, "enable_fp_arena_extensions"):
-    _dace.SDFG.enable_fp_arena_extensions = lambda self: enable_fp_arena_extensions(self)
+    _dace.SDFG.enable_fp_arena_extensions = lambda self: enable_fp_arena_extensions(
+        self
+    )
 
 # Automatically enable FP-Arena for any SDFG that uses its types, so the
 # explicit call above becomes optional. Disable with disable_auto_extensions().
@@ -60,6 +67,8 @@ __all__ = [
     "disable_auto_extensions",
     "disable_fast_math",
     "inject_headers",
+    "patch_aligned_heap_allocation",
+    "patch_memcpy_copies",
     "precise_math",
     "uses_fp_arena_types",
     "fp_arena_global_code",
