@@ -35,6 +35,7 @@ from fp_arena.experiment.retarget import (
     apply_reference,
     apply_target,
     fresh_sdfg,
+    resolve_vectorize_config,
 )
 from fp_arena.experiment.store import ResultStore
 
@@ -333,6 +334,9 @@ def run_performance(
     """Time each precision point, optionally appending to ``store``."""
     results: List[PerfResult] = []
     target = cfg.experiment.target
+    vectorization = resolve_vectorize_config(
+        target, cfg.experiment.gpu_vectorize, cfg.experiment.gpu_vectorize_config
+    )
     # CPU: host std::chrono; GPU: CUDA events (on-device, not async-launch, time).
     provider = (
         dace.InstrumentationType.GPU_Events
@@ -401,6 +405,7 @@ def run_performance(
                     result,
                     symbols=cfg.experiment.symbols,
                     scalars=cfg.experiment.scalar_args,
+                    vectorization=vectorization,
                 )
     finally:
         dace.Config.set("instrumentation", "report_each_invocation", value=prev_each)
@@ -425,6 +430,9 @@ def run_perturbation(
         )
     exp = cfg.experiment
     results: List[PerturbationResult] = []
+    vectorization = resolve_vectorize_config(
+        exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
+    )
     points = tqdm(cfg.precisions, desc="perturbation", unit="pt")
     for pin_map in points:
         points.set_postfix_str(_fmt_pin(pin_map))
@@ -476,7 +484,11 @@ def run_perturbation(
             results.append(result)
             if store is not None:
                 store.add(
-                    exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
+                    exp.name,
+                    result,
+                    symbols=exp.symbols,
+                    scalars=exp.scalar_args,
+                    vectorization=vectorization,
                 )
     return results
 
@@ -490,11 +502,20 @@ def run_error(
         exp, cfg.reference, cfg.n_samples, exp.seed, noise=cfg.noise
     )
     results: List[ErrorResult] = []
+    vectorization = resolve_vectorize_config(
+        exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
+    )
     points = tqdm(cfg.precisions, desc="error", unit="pt")
     for pin_map in points:
         points.set_postfix_str(_fmt_pin(pin_map))
         result = measure_error(exp, pin_map, ref_samples, exp.seed)
         results.append(result)
         if store is not None:
-            store.add(exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args)
+            store.add(
+                exp.name,
+                result,
+                symbols=exp.symbols,
+                scalars=exp.scalar_args,
+                vectorization=vectorization,
+            )
     return results

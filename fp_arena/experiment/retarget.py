@@ -128,6 +128,17 @@ DEFAULT_GPU_VECTORIZE_CONFIG = VectorizeConfig(
 )
 
 
+def resolve_vectorize_config(
+    target: str,
+    gpu_vectorize: bool,
+    gpu_vectorize_config: Optional[VectorizeConfig] = None,
+) -> Optional[VectorizeConfig]:
+    """:returns: the ``VectorizeConfig`` :func:`apply_target` applies, or ``None`` if nothing is vectorized."""
+    if target != "gpu" or not gpu_vectorize:
+        return None
+    return gpu_vectorize_config or DEFAULT_GPU_VECTORIZE_CONFIG
+
+
 def apply_target(
     sdfg: dace.SDFG,
     target: str,
@@ -146,8 +157,8 @@ def apply_target(
             if _transfer_direction(sdfg, state) is not None:
                 _add_fusion_barrier(state)
         sdfg.simplify()
-        if gpu_vectorize:
-            config = gpu_vectorize_config or DEFAULT_GPU_VECTORIZE_CONFIG
+        config = resolve_vectorize_config(target, gpu_vectorize, gpu_vectorize_config)
+        if config is not None:
             VectorizeGPU(config).apply_pass(sdfg, {})
         if gpu_block_size is not None:
             for state in sdfg.all_states():
