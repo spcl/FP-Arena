@@ -77,7 +77,6 @@ class ResultStore:
         self.path = path
         self._con = sqlite3.connect(path, check_same_thread=False)
         self._con.row_factory = sqlite3.Row
-        self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA busy_timeout=30000")
         self._con.executescript(_SCHEMA)
         self._con.commit()
