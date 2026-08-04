@@ -3,19 +3,20 @@
 The bridge between an :class:`ExperimentConfig` and DaCe: build a fresh SDFG and retarget its precision using :func:`change_and_propagate_fp_types`.
 """
 
+from __future__ import annotations
+
 import copy
-from typing import List, Optional
 
 import dace
+from dace.transformation.passes.vectorization.config import VectorizeConfig
 from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
+from fp_arena.experiment import registry
+from fp_arena.experiment.config import CONSTANTS_KEY, ExperimentConfig, PrecisionMap
 from fp_arena.transformations.change_and_propagate_fp_types import (
     _add_fusion_barrier,
     change_and_propagate_fp_types,
 )
-from fp_arena.experiment import registry
-from fp_arena.experiment.config import CONSTANTS_KEY, ExperimentConfig, PrecisionMap
-from dace.transformation.passes.vectorization.config import VectorizeConfig
 
 
 def _is_fp(tc: dace.dtypes.typeclass) -> bool:
@@ -38,7 +39,7 @@ def fresh_sdfg(experiment: ExperimentConfig) -> dace.SDFG:
     return copy.deepcopy(experiment.program)
 
 
-def candidate_fp_arrays(sdfg: dace.SDFG) -> List[str]:
+def candidate_fp_arrays(sdfg: dace.SDFG) -> list[str]:
     """:returns: non-transient floating-point array names (the boundary fp arrays)."""
     return sorted(
         name
@@ -108,7 +109,7 @@ _GPU_STORAGE = (
 )
 
 
-def _transfer_direction(sdfg: dace.SDFG, state) -> Optional[str]:
+def _transfer_direction(sdfg: dace.SDFG, state) -> str | None:
     """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
     for e in state.edges():
         src, dst = e.src, e.dst
@@ -131,8 +132,8 @@ DEFAULT_GPU_VECTORIZE_CONFIG = VectorizeConfig(
 def resolve_vectorize_config(
     target: str,
     gpu_vectorize: bool,
-    gpu_vectorize_config: Optional[VectorizeConfig] = None,
-) -> Optional[VectorizeConfig]:
+    gpu_vectorize_config: VectorizeConfig | None = None,
+) -> VectorizeConfig | None:
     """:returns: the ``VectorizeConfig`` :func:`apply_target` applies, or ``None`` if nothing is vectorized."""
     if target != "gpu" or not gpu_vectorize:
         return None
@@ -142,9 +143,9 @@ def resolve_vectorize_config(
 def apply_target(
     sdfg: dace.SDFG,
     target: str,
-    gpu_block_size: Optional[List[int]] = None,
+    gpu_block_size: list[int] | None = None,
     gpu_vectorize: bool = False,
-    gpu_vectorize_config: Optional[VectorizeConfig] = None,
+    gpu_vectorize_config: VectorizeConfig | None = None,
 ) -> None:
     """
     Retarget ``sdfg`` in place for the execution target.

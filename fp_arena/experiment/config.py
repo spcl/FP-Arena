@@ -3,8 +3,10 @@
 Experiment config.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Union
+from typing import Any
 
 import dace
 from dace.transformation.passes.vectorization.config import VectorizeConfig
@@ -12,7 +14,7 @@ from dace.transformation.passes.vectorization.config import VectorizeConfig
 from fp_arena.experiment.inputs import DistributionLike, Noise
 
 #: ``{array_name: precision_key}`` -- pins a subset of arrays to a target format.
-PrecisionMap = Dict[str, str]
+PrecisionMap = dict[str, str]
 
 #: Reserved :data:`PrecisionMap` key that targets float literals; absent means literals stay fp64.
 CONSTANTS_KEY = "__constants__"
@@ -38,17 +40,17 @@ class ExperimentConfig:
 
     name: str
     program: dace.SDFG
-    inputs: Dict[str, DistributionLike] = field(default_factory=dict)
-    promotion_rules: Optional[
-        Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
-    ] = None
-    symbols: Dict[str, int] = field(default_factory=dict)
-    scalar_args: Dict[str, Any] = field(default_factory=dict)
+    inputs: dict[str, DistributionLike] = field(default_factory=dict)
+    promotion_rules: (
+        dict[frozenset[dace.dtypes.typeclass], dace.dtypes.typeclass] | None
+    ) = None
+    symbols: dict[str, int] = field(default_factory=dict)
+    scalar_args: dict[str, Any] = field(default_factory=dict)
     target: str = "cpu"
     seed: int = 0
-    gpu_block_size: Optional[List[int]] = None
+    gpu_block_size: list[int] | None = None
     gpu_vectorize: bool = False
-    gpu_vectorize_config: Optional[VectorizeConfig] = None
+    gpu_vectorize_config: VectorizeConfig | None = None
 
 
 @dataclass
@@ -58,8 +60,8 @@ class PerformanceAnalysisConfig:
     """
 
     experiment: ExperimentConfig
-    precisions: List[PrecisionMap]
-    noise: Dict[str, Noise] = field(default_factory=dict)
+    precisions: list[PrecisionMap]
+    noise: dict[str, Noise] = field(default_factory=dict)
     n_warmup: int = 1
     n_reps: int = 10
 
@@ -73,9 +75,9 @@ class ErrorAnalysisConfig:
     """
 
     experiment: ExperimentConfig
-    precisions: List[PrecisionMap]
-    noise: Dict[str, Noise] = field(default_factory=dict)
-    reference: Union[str, Dict[str, str]] = "fp64"
+    precisions: list[PrecisionMap]
+    noise: dict[str, Noise] = field(default_factory=dict)
+    reference: str | dict[str, str] = "fp64"
     n_samples: int = 1
 
 
@@ -90,6 +92,6 @@ class PerturbationAnalysisConfig:
     """
 
     experiment: ExperimentConfig
-    noise: Dict[str, Noise]
-    precisions: List[PrecisionMap] = field(default_factory=lambda: [{}])
+    noise: dict[str, Noise]
+    precisions: list[PrecisionMap] = field(default_factory=lambda: [{}])
     n_samples: int = 1

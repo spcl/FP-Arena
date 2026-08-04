@@ -14,24 +14,20 @@ As a default, any read array is sampled from a uniform distribution on [0, 1] wi
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import (
-    AbstractSet,
+    TYPE_CHECKING,
     Any,
     Callable,
-    Dict,
-    Optional,
     Protocol,
-    Sequence,
-    TYPE_CHECKING,
     Union,
     runtime_checkable,
 )
 
+import dace
 import numpy as np
 from scipy import stats as _stats
-
-import dace
 
 if TYPE_CHECKING:
     from fp_arena.experiment.config import ExperimentConfig
@@ -111,8 +107,8 @@ class Noise:
 
     relative: float = 0.0
     absolute: float = 0.0
-    relative_dist: Optional[DistributionLike] = None
-    absolute_dist: Optional[DistributionLike] = None
+    relative_dist: DistributionLike | None = None
+    absolute_dist: DistributionLike | None = None
 
     def __post_init__(self) -> None:
         for term, mag, dist in (
@@ -140,7 +136,7 @@ class Noise:
         return out
 
 
-def materialize_shape(shape, symbols: Dict[str, int]) -> tuple:
+def materialize_shape(shape, symbols: dict[str, int]) -> tuple:
     """Resolve a (possibly symbolic) shape to a tuple of ints using ``symbols``."""
     out = []
     for dim in shape:
@@ -159,11 +155,11 @@ def materialize_shape(shape, symbols: Dict[str, int]) -> tuple:
 
 def make_call_args(
     sdfg: dace.SDFG,
-    experiment: "ExperimentConfig",
+    experiment: ExperimentConfig,
     rng: np.random.Generator,
-    noise: Optional[Dict[str, Noise]] = None,
-    reads: Optional[AbstractSet[str]] = None,
-) -> Dict[str, Any]:
+    noise: dict[str, Noise] | None = None,
+    reads: set[str] | None = None,
+) -> dict[str, Any]:
     """
     Build the kwargs for one run: every non-transient array (read arrays sampled
     from their distribution then optionally perturbed by ``noise``) plus the symbol and scalar values.
@@ -171,7 +167,7 @@ def make_call_args(
     noise = noise or {}
     if reads is None:
         reads, _ = sdfg.read_and_write_sets()
-    args: Dict[str, Any] = {}
+    args: dict[str, Any] = {}
     for name, desc in sdfg.arrays.items():
         if desc.transient or not isinstance(desc, dace.data.Array):
             continue

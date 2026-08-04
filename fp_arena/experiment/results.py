@@ -5,7 +5,7 @@ serialises to a plain dict (``to_dict``) for the results database.
 """
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
 from fp_arena.experiment.config import PrecisionMap
 
@@ -55,19 +55,19 @@ class PerfResult:
     """
 
     precision: PrecisionMap
-    total_times: List[float] = field(default_factory=list)
-    h2d_times: List[float] = field(
+    total_times: list[float] = field(default_factory=list)
+    h2d_times: list[float] = field(
         default_factory=list
     )  # host->device transfer (GPU only)
-    d2h_times: List[float] = field(
+    d2h_times: list[float] = field(
         default_factory=list
     )  # device->host transfer (GPU only)
-    cast_in_times: List[float] = field(default_factory=list)  # input precision cast
-    cast_out_times: List[float] = field(default_factory=list)  # output precision cast
-    kernel_times: List[float] = field(default_factory=list)  # compute
+    cast_in_times: list[float] = field(default_factory=list)  # input precision cast
+    cast_out_times: list[float] = field(default_factory=list)  # output precision cast
+    kernel_times: list[float] = field(default_factory=list)  # compute
     seed: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -76,11 +76,11 @@ class ErrorResult:
     """Per-array error for one precision point."""
 
     precision: PrecisionMap
-    errors: Dict[str, ErrorStats]
+    errors: dict[str, ErrorStats]
     n_samples: int
     seed: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -93,9 +93,9 @@ class PerturbationResult:
 
     precision: PrecisionMap
     perturbed: str
-    errors: Dict[str, ErrorStats]
+    errors: dict[str, ErrorStats]
     n_samples: int
     seed: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)

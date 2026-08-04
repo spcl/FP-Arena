@@ -3,12 +3,14 @@
 Append-only results database.
 """
 
+from __future__ import annotations
+
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from dace.transformation.passes.vectorization.config import VectorizeConfig
 
@@ -46,7 +48,7 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _vectorization_json(config: Optional[VectorizeConfig]) -> str:
+def _vectorization_json(config: VectorizeConfig | None) -> str:
     """Serialise the applied vectorization config; ``None`` (no vectorization) is JSON ``null``."""
     if config is None:
         return "null"
@@ -61,11 +63,11 @@ class StoredResult:
     kind: str
     experiment: str
     created_at: str
-    precision: Dict[str, Any]
-    symbols: Dict[str, Any]
-    scalars: Dict[str, Any]
-    payload: Dict[str, Any]
-    vectorization: Optional[Dict[str, Any]] = None
+    precision: dict[str, Any]
+    symbols: dict[str, Any]
+    scalars: dict[str, Any]
+    payload: dict[str, Any]
+    vectorization: dict[str, Any] | None = None
 
 
 class ResultStore:
@@ -84,10 +86,10 @@ class ResultStore:
     def add(
         self,
         experiment: str,
-        result: Union[PerfResult, ErrorResult, PerturbationResult],
-        symbols: Optional[Dict[str, Any]] = None,
-        scalars: Optional[Dict[str, Any]] = None,
-        vectorization: Optional[VectorizeConfig] = None,
+        result: PerfResult | ErrorResult | PerturbationResult,
+        symbols: dict[str, Any] | None = None,
+        scalars: dict[str, Any] | None = None,
+        vectorization: VectorizeConfig | None = None,
     ) -> int:
         """Append one result record. :returns: the new row id."""
         kind = _KIND_OF.get(type(result))
@@ -111,8 +113,8 @@ class ResultStore:
             return int(cur.lastrowid)
 
     def query(
-        self, experiment: Optional[str] = None, kind: Optional[str] = None
-    ) -> List[StoredResult]:
+        self, experiment: str | None = None, kind: str | None = None
+    ) -> list[StoredResult]:
         """Fetch stored results, newest first, optionally filtered by experiment/kind."""
         clauses, params = [], []
         if experiment is not None:

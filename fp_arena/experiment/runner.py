@@ -7,14 +7,15 @@ Drivers that execute the experiment kinds.
 * :func:`run_perturbation` -- perturb one input at a time and compare against the clean run at the same precision point.
 """
 
+from __future__ import annotations
+
 import math
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
-from tqdm.auto import tqdm
+from typing import Any
 
 import dace
+import numpy as np
+from tqdm.auto import tqdm
 
 from fp_arena.experiment.config import (
     ErrorAnalysisConfig,
@@ -22,13 +23,13 @@ from fp_arena.experiment.config import (
     PerturbationAnalysisConfig,
     PrecisionMap,
 )
+from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.results import (
     ErrorResult,
     ErrorStats,
     PerfResult,
     PerturbationResult,
 )
-from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.retarget import (
     _transfer_direction,
     apply_precision,
@@ -40,7 +41,7 @@ from fp_arena.experiment.retarget import (
 from fp_arena.experiment.store import ResultStore
 
 
-def _copy_args(args: Dict[str, Any]) -> Dict[str, Any]:
+def _copy_args(args: dict[str, Any]) -> dict[str, Any]:
     """Independent copy of the array arguments; scalars/symbols pass through."""
     return {
         k: (np.array(v, copy=True) if isinstance(v, np.ndarray) else v)
@@ -48,14 +49,14 @@ def _copy_args(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _reset_arrays(working: Dict[str, Any], source: Dict[str, Any]) -> None:
+def _reset_arrays(working: dict[str, Any], source: dict[str, Any]) -> None:
     """Refill ``working``'s array buffers in place from ``source``."""
     for k, v in source.items():
         if isinstance(v, np.ndarray):
             working[k][...] = v
 
 
-def _sample_rngs(seed: int, n: int) -> List[np.random.Generator]:
+def _sample_rngs(seed: int, n: int) -> list[np.random.Generator]:
     """
     ``n`` independent, reproducible per-sample generators from one base seed.
     """
@@ -64,7 +65,7 @@ def _sample_rngs(seed: int, n: int) -> List[np.random.Generator]:
     ]
 
 
-def _new_acc() -> Dict[str, float]:
+def _new_acc() -> dict[str, float]:
     return {
         "abs_sum": 0.0,
         "abs_cnt": 0,
@@ -79,7 +80,7 @@ def _new_acc() -> Dict[str, float]:
     }
 
 
-def _accumulate(acc: Dict[str, float], ref: np.ndarray, cand: np.ndarray) -> None:
+def _accumulate(acc: dict[str, float], ref: np.ndarray, cand: np.ndarray) -> None:
     """Fold one (reference, candidate) array pair into the running error stats."""
     r = np.asarray(ref, dtype=np.float64).ravel()
     c = np.asarray(cand, dtype=np.float64).ravel()
@@ -111,7 +112,7 @@ def _ratio(num: float, den: float) -> float:
     return 0.0 if num <= 0.0 else math.inf
 
 
-def _finalize(acc: Dict[str, float]) -> ErrorStats:
+def _finalize(acc: dict[str, float]) -> ErrorStats:
     abs_mean = acc["abs_sum"] / acc["abs_cnt"] if acc["abs_cnt"] else 0.0
     rel_mean = acc["rel_sum"] / acc["rel_cnt"] if acc["rel_cnt"] else 0.0
     err_power = acc["sq_err_sum"]
@@ -160,8 +161,8 @@ def _classify_state(sdfg: dace.SDFG, state) -> str:
 
 
 def _group_per_invocation(
-    samples: List[float], n_invocations: int, name: str
-) -> List[float]:
+    samples: list[float], n_invocations: int, name: str
+) -> list[float]:
     """Sum a timer's per-execution samples into one value per invocation (loop bodies fire repeatedly)."""
     if not samples:
         return []
@@ -177,7 +178,7 @@ def _group_per_invocation(
     return [math.fsum(samples[i * k : (i + 1) * k]) for i in range(n_invocations)]
 
 
-def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> List[float]:
+def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> list[float]:
     """Per-rep milliseconds summed over matching timers, warmup invocations dropped."""
     out = [0.0] * n_reps
     matched = False
@@ -198,15 +199,15 @@ def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> List[fl
 
 def _phase_breakdown(
     sdfg: dace.SDFG, n_reps: int, n_invocations: int
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Reduce the latest report into per-rep phase series; ``total`` is their sum."""
     report = sdfg.get_latest_report()
     # Map each state's report name -> phase category.
-    cat_of: Dict[str, str] = {}
+    cat_of: dict[str, str] = {}
     for state in sdfg.all_states():
         cat_of.setdefault(f"State {state.label}", _classify_state(sdfg, state))
 
-    def series(category: str) -> List[float]:
+    def series(category: str) -> list[float]:
         return _phase_series(
             report, lambda nm: cat_of.get(nm) == category, n_reps, n_invocations
         )
@@ -228,7 +229,7 @@ def _fmt_pin(pin_map: PrecisionMap) -> str:
     return " ".join(f"{k}={v}" for k, v in pin_map.items())
 
 
-def _output_arrays(sdfg: dace.SDFG) -> List[str]:
+def _output_arrays(sdfg: dace.SDFG) -> list[str]:
     """Non-transient written array names -- the arrays error metrics are reduced over."""
     _, writes = sdfg.read_and_write_sets()
     return sorted(
@@ -241,7 +242,7 @@ def _output_arrays(sdfg: dace.SDFG) -> List[str]:
 
 
 #: Per input sample: (pristine call args, reference outputs of the written arrays).
-ReferenceSamples = List[Tuple[Dict[str, Any], Dict[str, Any]]]
+ReferenceSamples = list[tuple[dict[str, Any], dict[str, Any]]]
 
 
 def _pin_tag(pin_map: PrecisionMap) -> str:
@@ -319,8 +320,8 @@ def measure_error(
     for args, ref_out in tqdm(ref_samples, desc="samples", unit="smp", leave=False):
         cand_args = _copy_args(args)
         cand_csdfg(**cand_args)
-        for name in acc:
-            _accumulate(acc[name], ref_out[name], cand_args[name])
+        for name, value in acc.items():
+            _accumulate(value, ref_out[name], cand_args[name])
 
     errors = {name: _finalize(a) for name, a in acc.items()}
     return ErrorResult(
@@ -329,10 +330,10 @@ def measure_error(
 
 
 def run_performance(
-    cfg: PerformanceAnalysisConfig, store: Optional[ResultStore] = None
-) -> List[PerfResult]:
+    cfg: PerformanceAnalysisConfig, store: ResultStore | None = None
+) -> list[PerfResult]:
     """Time each precision point, optionally appending to ``store``."""
-    results: List[PerfResult] = []
+    results: list[PerfResult] = []
     target = cfg.experiment.target
     vectorization = resolve_vectorize_config(
         target, cfg.experiment.gpu_vectorize, cfg.experiment.gpu_vectorize_config
@@ -416,8 +417,8 @@ def run_performance(
 
 
 def run_perturbation(
-    cfg: PerturbationAnalysisConfig, store: Optional[ResultStore] = None
-) -> List[PerturbationResult]:
+    cfg: PerturbationAnalysisConfig, store: ResultStore | None = None
+) -> list[PerturbationResult]:
     """
     Measure per-array output sensitivity to input noise: for each precision
     point, execute clean and perturbed inputs (one noisy array at a time) on the
@@ -429,7 +430,7 @@ def run_perturbation(
             "PerturbationAnalysisConfig.noise must name at least one input array"
         )
     exp = cfg.experiment
-    results: List[PerturbationResult] = []
+    results: list[PerturbationResult] = []
     vectorization = resolve_vectorize_config(
         exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
     )
@@ -494,14 +495,14 @@ def run_perturbation(
 
 
 def run_error(
-    cfg: ErrorAnalysisConfig, store: Optional[ResultStore] = None
-) -> List[ErrorResult]:
+    cfg: ErrorAnalysisConfig, store: ResultStore | None = None
+) -> list[ErrorResult]:
     """Measure per-array error of each precision point, optionally appending to ``store`` database."""
     exp = cfg.experiment
     ref_samples = run_reference(
         exp, cfg.reference, cfg.n_samples, exp.seed, noise=cfg.noise
     )
-    results: List[ErrorResult] = []
+    results: list[ErrorResult] = []
     vectorization = resolve_vectorize_config(
         exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
     )
