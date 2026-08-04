@@ -241,10 +241,6 @@ def _output_arrays(sdfg: dace.SDFG) -> list[str]:
     )
 
 
-#: Per input sample: (pristine call args, reference outputs of the written arrays).
-ReferenceSamples = list[tuple[dict[str, Any], dict[str, Any]]]
-
-
 def _pin_tag(pin_map: PrecisionMap) -> str:
     """Identifier-safe tag naming a precision point's build folder."""
     return "_".join(f"{k}_{v}" for k, v in sorted(pin_map.items())) or "baseline"
@@ -274,59 +270,19 @@ def compile_reference(experiment, reference):
     return sdfg.compile()
 
 
-def run_reference(
-    experiment, reference, n_samples: int, seed: int, noise=None
-) -> ReferenceSamples:
-    """
-    Execute the reference once per input sample.
-    """
-    ref_csdfg = compile_reference(experiment, reference)
-    program = experiment.program
-    reads, _ = program.read_and_write_sets()
-    outputs = _output_arrays(program)
-    samples: ReferenceSamples = []
-    for rng in tqdm(
-        _sample_rngs(seed, n_samples), desc="reference", unit="smp", leave=False
-    ):
-        args = make_call_args(program, experiment, rng, noise, reads=reads)
-        ref_args = _copy_args(args)
-        ref_csdfg(**ref_args)
-        samples.append((args, {name: ref_args[name] for name in outputs}))
-    return samples
-
-
-def measure_error(
-    experiment,
-    pin_map: PrecisionMap,
-    ref_samples: ReferenceSamples,
-    seed: int,
-) -> ErrorResult:
-    """
-    Execute one precision point on the reference's input samples and reduce the per-array error against the cached reference outputs.
-    """
-    cand_sdfg = fresh_sdfg(experiment)
-    apply_precision(cand_sdfg, pin_map, experiment.promotion_rules)
+def compile_candidate(experiment, pin_map: PrecisionMap):
+    """Build and compile one precision point."""
+    sdfg = fresh_sdfg(experiment)
+    apply_precision(sdfg, pin_map, experiment.promotion_rules)
     apply_target(
-        cand_sdfg,
+        sdfg,
         experiment.target,
         gpu_block_size=experiment.gpu_block_size,
         gpu_vectorize=experiment.gpu_vectorize,
         gpu_vectorize_config=experiment.gpu_vectorize_config,
     )
-    _distinguish(cand_sdfg, _pin_tag(pin_map))
-    cand_csdfg = cand_sdfg.compile()
-
-    acc = {name: _new_acc() for name in _output_arrays(cand_sdfg)}
-    for args, ref_out in tqdm(ref_samples, desc="samples", unit="smp", leave=False):
-        cand_args = _copy_args(args)
-        cand_csdfg(**cand_args)
-        for name, value in acc.items():
-            _accumulate(value, ref_out[name], cand_args[name])
-
-    errors = {name: _finalize(a) for name, a in acc.items()}
-    return ErrorResult(
-        precision=dict(pin_map), errors=errors, n_samples=len(ref_samples), seed=seed
-    )
+    _distinguish(sdfg, _pin_tag(pin_map))
+    return sdfg.compile()
 
 
 def run_performance(
@@ -497,19 +453,66 @@ def run_perturbation(
 def run_error(
     cfg: ErrorAnalysisConfig, store: ResultStore | None = None
 ) -> list[ErrorResult]:
-    """Measure per-array error of each precision point, optionally appending to ``store`` database."""
+    """
+    Measure per-array error of each precision point, optionally appending to
+    ``store`` database.
+
+    Samples are the outer loop: every point is compiled up front, then each
+    input realisation is executed by the reference and by every candidate in
+    lockstep and folded into that point's accumulator. Only one sample is ever
+    resident, so memory is flat in ``n_samples``.
+    """
     exp = cfg.experiment
-    ref_samples = run_reference(
-        exp, cfg.reference, cfg.n_samples, exp.seed, noise=cfg.noise
-    )
     results: list[ErrorResult] = []
     vectorization = resolve_vectorize_config(
         exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
     )
-    points = tqdm(cfg.precisions, desc="error", unit="pt")
-    for pin_map in points:
-        points.set_postfix_str(_fmt_pin(pin_map))
-        result = measure_error(exp, pin_map, ref_samples, exp.seed)
+    reads, _ = exp.program.read_and_write_sets()
+    outputs = _output_arrays(exp.program)
+
+    ref_csdfg = compile_reference(exp, cfg.reference)
+    candidates = [
+        compile_candidate(exp, pin_map)
+        for pin_map in tqdm(cfg.precisions, desc="compiling", unit="pt")
+    ]
+    # One accumulator per (precision point, written array); the samples fold in.
+    accs = [{name: _new_acc() for name in outputs} for _ in cfg.precisions]
+
+    for rng in tqdm(
+        _sample_rngs(exp.seed, cfg.n_samples),
+        desc="error",
+        unit="smp",
+        total=cfg.n_samples,
+    ):
+        args = make_call_args(exp.program, exp, rng, cfg.noise, reads=reads)
+        ref_args = _copy_args(args)
+        ref_csdfg(**ref_args)
+        # Only the reference's written arrays are compared against; dropping the
+        # rest keeps the read-only inputs from being held a third time over.
+        ref_out = {name: ref_args[name] for name in outputs}
+        del ref_args
+        cand_args = _copy_args(args)
+        points = tqdm(cfg.precisions, desc="points", unit="pt", leave=False)
+        for i, pin_map in enumerate(points):
+            points.set_postfix_str(_fmt_pin(pin_map))
+            _reset_arrays(cand_args, args)
+            candidates[i](**cand_args)
+            for name in outputs:
+                _accumulate(accs[i][name], ref_out[name], cand_args[name])
+
+    if cfg.n_samples > 0:
+        # Release each point's persistent (on GPU, device-resident) state.
+        ref_csdfg.finalize()
+        for csdfg in candidates:
+            csdfg.finalize()
+
+    for pin_map, acc in zip(cfg.precisions, accs):
+        result = ErrorResult(
+            precision=dict(pin_map),
+            errors={name: _finalize(a) for name, a in acc.items()},
+            n_samples=cfg.n_samples,
+            seed=exp.seed,
+        )
         results.append(result)
         if store is not None:
             store.add(
