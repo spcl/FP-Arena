@@ -60,7 +60,7 @@ class PerformanceAnalysisConfig:
     """
 
     experiment: ExperimentConfig
-    precisions: list[PrecisionMap]
+    precisions: list[PrecisionMap] = field(default_factory=lambda: [{}])
     noise: dict[str, Noise] = field(default_factory=dict)
     n_warmup: int = 1
     n_reps: int = 10
@@ -75,7 +75,7 @@ class ErrorAnalysisConfig:
     """
 
     experiment: ExperimentConfig
-    precisions: list[PrecisionMap]
+    precisions: list[PrecisionMap] = field(default_factory=lambda: [{}])
     noise: dict[str, Noise] = field(default_factory=dict)
     reference: str | dict[str, str] = "fp64"
     n_samples: int = 1
