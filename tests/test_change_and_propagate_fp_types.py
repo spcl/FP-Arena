@@ -180,6 +180,72 @@ def test_map_passthrough():
     sdfg.compile()
 
 
+def _conditional_write_sdfg(n=8, dtype=dace.float64):
+    """
+    ``B[i] = 3*A[i] where A[i] < 0.5``, in the shape the DaCe frontend lowers a
+    boolean-masked assignment (``B[I] = ...``) to: the tasklet performs the
+    write itself, so its output memlet is dynamic.
+    """
+    sdfg = dace.SDFG("cond_write")
+    sdfg.add_array("A", [n], dtype, transient=False)
+    sdfg.add_array("B", [n], dtype, transient=False)
+
+    s = sdfg.add_state("s")
+    me, mx = s.add_map("m", {"i": f"0:{n}"})
+    t = s.add_tasklet("cond", {"a"}, {"b"}, "if a < 0.5:\n    b = 3.0 * a")
+    me.add_in_connector("IN_A")
+    me.add_out_connector("OUT_A")
+    mx.add_in_connector("IN_B")
+    mx.add_out_connector("OUT_B")
+
+    s.add_edge(s.add_read("A"), None, me, "IN_A", dace.Memlet(f"A[0:{n}]"))
+    s.add_edge(me, "OUT_A", t, "a", dace.Memlet("A[i]"))
+    s.add_edge(t, "b", mx, "IN_B", dace.Memlet("B[i]", dynamic=True))
+    s.add_edge(mx, "OUT_B", s.add_write("B"), None, dace.Memlet(f"B[0:{n}]"))
+    return sdfg
+
+
+def test_conditional_write_connector_stays_a_pointer():
+    """
+    A dynamic output memlet means the tasklet writes the container itself, so
+    codegen emits no copy-out; the connector must stay a pointer or the write
+    is silently dropped.
+    """
+    sdfg = _conditional_write_sdfg()
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32})
+
+    tasklet = next(
+        n
+        for s in sdfg.all_states()
+        for n in s.nodes()
+        if isinstance(n, dace.nodes.Tasklet) and n.label == "cond"
+    )
+    assert isinstance(tasklet.out_connectors["b"], dace.dtypes.pointer), (
+        tasklet.out_connectors["b"]
+    )
+    assert tasklet.out_connectors["b"].base_type == dace.float32
+
+    sdfg.validate()
+
+
+def test_conditional_write_survives_retyping():
+    """End to end: the masked write still happens after a precision change."""
+    import numpy as np
+
+    n = 8
+    sdfg = _conditional_write_sdfg(n)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32})
+    # B is non-transient, so the fp32 computation happens on an internal
+    # transient and the fp64 interface is preserved.
+    assert sdfg.arrays["fp_casted_B_float32"].dtype == dace.float32
+    assert sdfg.arrays["B"].dtype == dace.float64
+
+    A = np.arange(n, dtype=np.float64) / (n - 1)
+    B = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, B=B)
+    np.testing.assert_allclose(B, np.where(A < 0.5, 3.0 * A, 0.0), rtol=1e-6)
+
+
 def test_reduce_node():
     """Type propagates through a Reduce library node."""
     sdfg = dace.SDFG("reduce_test")
@@ -1141,6 +1207,8 @@ if __name__ == "__main__":
     test_all_nontransient_interface_preserved()
     test_mixed_precision_promotes()
     test_map_passthrough()
+    test_conditional_write_connector_stays_a_pointer()
+    test_conditional_write_survives_retyping()
     test_reduce_node()
     test_initial_type_pinned()
     test_long_chain_convergence()

@@ -375,6 +375,22 @@ def _print_type_report(
     tqdm.write("\n".join(lines))
 
 
+def _connector_type(
+    node: nodes.Node,
+    desc: dace.data.Data,
+    memlet: dace.Memlet,
+    dtype: dace.dtypes.typeclass,
+    output: bool,
+) -> dace.dtypes.typeclass:
+    scalar = bool(memlet.subset) and memlet.subset.num_elements() == 1
+    if output:
+        scalar = scalar and (not memlet.dynamic or memlet.wcr is not None)
+    scalar = scalar or isinstance(desc, dace.data.Scalar)
+    if isinstance(node, nodes.LibraryNode):
+        scalar = scalar and desc.storage is not dace.dtypes.StorageType.GPU_Global
+    return dtype if scalar else dace.dtypes.pointer(dtype)
+
+
 # Writes inferred types onto tasklet/map/library-node connectors.
 def _apply_connector_types(
     sdfg: dace.SDFG,
@@ -382,30 +398,36 @@ def _apply_connector_types(
 ) -> None:
     for state in _states_in_order(sdfg):
         for node in state.nodes():
-            if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-                for e in state.in_edges(node):
-                    if e.dst_conn is None or e.data is None or e.data.data is None:
-                        continue
-                    node.in_connectors[e.dst_conn] = inferred[e.data.data]
+            if not isinstance(
+                node,
+                (nodes.Tasklet, nodes.LibraryNode, nodes.EntryNode, nodes.ExitNode),
+            ):
+                continue
+            for e in state.in_edges(node):
+                if e.dst_conn is None or e.data is None or e.data.data is None:
+                    continue
+                if e.dst_conn not in node.in_connectors:
+                    continue
+                node.in_connectors[e.dst_conn] = _connector_type(
+                    node,
+                    sdfg.arrays[e.data.data],
+                    e.data,
+                    inferred[e.data.data],
+                    output=False,
+                )
 
-                for e in state.out_edges(node):
-                    if e.src_conn is None or e.data is None or e.data.data is None:
-                        continue
-                    node.out_connectors[e.src_conn] = inferred[e.data.data]
-
-            elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
-                # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
-                for e in state.in_edges(node):
-                    if not (e.dst_conn and e.dst_conn.startswith("IN_")):
-                        continue
-                    if e.data is None or e.data.data is None:
-                        continue
-                    t = inferred[e.data.data]
-                    out_conn = "OUT_" + e.dst_conn[3:]
-                    if e.dst_conn in node.in_connectors:
-                        node.in_connectors[e.dst_conn] = t
-                    if out_conn in node.out_connectors:
-                        node.out_connectors[out_conn] = t
+            for e in state.out_edges(node):
+                if e.src_conn is None or e.data is None or e.data.data is None:
+                    continue
+                if e.src_conn not in node.out_connectors:
+                    continue
+                node.out_connectors[e.src_conn] = _connector_type(
+                    node,
+                    sdfg.arrays[e.data.data],
+                    e.data,
+                    inferred[e.data.data],
+                    output=True,
+                )
 
 
 def _cast_tasklet(
