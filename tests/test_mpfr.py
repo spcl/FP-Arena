@@ -1,11 +1,9 @@
-import numpy as np
 import dace
-import fp_arena
+import numpy as np
+
 from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
 )
-
-dace.Config.append("compiler", "cpu", "libs", value="mpfr")
 
 
 def test_sdfg_scalar_compute():

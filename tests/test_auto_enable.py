@@ -5,9 +5,9 @@ fp_arena`` and wraps ``SDFG.compile`` so SDFGs using FP-Arena types are enabled
 without an explicit call.
 """
 
+import dace
 import numpy as np
 import pytest
-import dace
 from dace.codegen.exceptions import CompilationError
 
 import fp_arena
@@ -21,9 +21,14 @@ def _cast_sdfg_without_enable(n: int) -> dace.SDFG:
     state = sdfg.add_state()
     a = state.add_read("A")
     c = state.add_write("C")
-    me, mx = state.add_map("cast", dict(i=f"0:{n}"))
-    tasklet = state.add_tasklet("cast", {"inp"}, {"out"}, "out = static_cast<fp_arena::float32sr>(inp);",
-                                dace.Language.CPP)
+    me, mx = state.add_map("cast", {"i": f"0:{n}"})
+    tasklet = state.add_tasklet(
+        "cast",
+        {"inp"},
+        {"out"},
+        "out = static_cast<fp_arena::float32sr>(inp);",
+        dace.Language.CPP,
+    )
     state.add_memlet_path(a, me, tasklet, dst_conn="inp", memlet=dace.Memlet("A[i]"))
     state.add_memlet_path(tasklet, mx, c, src_conn="out", memlet=dace.Memlet("C[i]"))
     return sdfg
@@ -38,13 +43,33 @@ def test_auto_enable_runs_without_explicit_enable():
     assert np.all(C == np.float32(0.5))
 
 
-def test_headers_injected_at_codegen_not_compile():
-    # Header injection is a codegen concern: invoking codegen directly (no
-    # compile) must already contain the FP-Arena includes.
+def test_headers_included_at_codegen_not_compile():
+    # Attaching the environment is a codegen concern: invoking codegen directly
+    # (no compile) must already contain the FP-Arena includes, by a path
+    # relative to the environment's include root rather than an absolute one.
     sdfg = _cast_sdfg_without_enable(8)
     generated = "\n".join(co.code for co in sdfg.generate_code())
-    assert "fp_arena extensions enabled" in generated
-    assert "float32sr.h" in generated
+    assert '#include "fp_arena/float32sr.h"' in generated
+    assert fp_arena.INCLUDE_DIR not in generated
+
+
+def test_environment_attached_to_code_nodes():
+    sdfg = _cast_sdfg_without_enable(8)
+    assert fp_arena.required_environments(sdfg) == {"fp_arena.environments.FPArenaSR"}
+
+    fp_arena.attach_environments(sdfg)
+    tasklets = [
+        n for n, _ in sdfg.all_nodes_recursive() if isinstance(n, dace.nodes.Tasklet)
+    ]
+    assert tasklets
+    assert all("fp_arena.environments.FPArenaSR" in n.environments for n in tasklets)
+
+
+def test_mpfr_environment_carries_the_link_flag():
+    sdfg = dace.SDFG("mpfr_env")
+    sdfg.add_array("A", [8], dace.mpfr(128))
+    assert fp_arena.required_environments(sdfg) == {"fp_arena.environments.MPFR"}
+    assert "mpfr" in fp_arena.MPFR.cmake_libraries
 
 
 def test_uses_fp_arena_types_detection():
