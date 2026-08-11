@@ -23,7 +23,8 @@ from fp_arena.extensions import (
     enable_auto_extensions,
     disable_auto_extensions,
     disable_fast_math,
-    inject_headers,
+    patch_aligned_heap_allocation,
+    patch_memcpy_copies,
     precise_math,
     uses_fp_arena_types,
     fp_arena_global_code,
@@ -37,6 +38,9 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
 
 # Register the types and the SDFG convenience method on import (idempotent).
 register()
+
+patch_aligned_heap_allocation()
+patch_memcpy_copies()
 
 import dace as _dace
 
@@ -53,13 +57,8 @@ __all__ = [
     "float32sr",
     "float64sr",
     "mpfr",
-    "register",
-    "FP_ARENA_TYPECLASSES",
-    "enable_fp_arena_extensions",
-    "enable_auto_extensions",
-    "disable_auto_extensions",
-    "disable_fast_math",
-    "inject_headers",
+    "patch_aligned_heap_allocation",
+    "patch_memcpy_copies",
     "precise_math",
     "uses_fp_arena_types",
     "fp_arena_global_code",

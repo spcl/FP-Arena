@@ -27,7 +27,7 @@ from contextlib import contextmanager
 import dace
 from dace.config import Config
 
-#: Absolute path to the bundled C++ include root (``.../runtime/include``).
+from fp_arena.dtypes import mpfr
 INCLUDE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime", "include")
 
 #: Fast-math flags removed when FP-Arena is enabled (incompatible with the
@@ -79,6 +79,75 @@ def inject_headers(sdfg: dace.SDFG) -> dace.SDFG:
             continue
         sdfg.append_global_code(code, backend)
     return sdfg
+
+
+#: Whether the aligned-allocation patch is installed.
+_aligned_patch_installed = False
+
+
+def patch_aligned_heap_allocation() -> bool:
+    """Route mpfr heap arrays through plain ``new[]`` / ``delete[]``, which run destructors."""
+
+    global _aligned_patch_installed
+    if _aligned_patch_installed:
+        return False
+
+    from dace.codegen.targets import cpu, experimental_cpu
+
+    original = cpu.use_aligned_operator_new
+
+    def _use_aligned_operator_new(desc) -> bool:
+        if isinstance(desc.dtype, mpfr):
+            return False
+        return original(desc)
+
+    cpu.use_aligned_operator_new = _use_aligned_operator_new
+    experimental_cpu.use_aligned_operator_new = _use_aligned_operator_new
+
+    _aligned_patch_installed = True
+    return True
+
+
+#: Copy implementations that emit a raw ``memcpy``, which shallow-copies mpfr's limb pointer.
+_MEMCPY_IMPLEMENTATIONS = frozenset(
+    {"MemcpyCPU", "MemcpyCUDA1D", "MemcpyCUDA2D", "MemcpyCUDANDStrided"}
+)
+
+#: Whether the element-wise copy patch is installed.
+_copy_patch_installed = False
+
+
+def patch_memcpy_copies() -> bool:
+    """Route mpfr array copies through element-wise assignment, which deep-copies."""
+
+    global _copy_patch_installed
+    if _copy_patch_installed:
+        return False
+
+    from dace.libraries.standard.nodes import copy_node
+    from dace.transformation.passes.canonicalize import finalize
+
+    original = copy_node.select_copy_implementation
+
+    def _select_copy_implementation(node, parent_state) -> str:
+        impl = original(node, parent_state)
+        if impl not in _MEMCPY_IMPLEMENTATIONS:
+            return impl
+        _, inp, in_subset, _, _, out_subset = node.validate(
+            parent_state.sdfg, parent_state, allow_cross_storage=True
+        )
+        if not isinstance(inp.dtype, mpfr):
+            return impl
+        single = (
+            in_subset.num_elements_exact() == 1 and out_subset.num_elements_exact() == 1
+        )
+        return "Tasklet" if single else "MappedTasklet"
+
+    copy_node.select_copy_implementation = _select_copy_implementation
+    finalize.select_copy_implementation = _select_copy_implementation
+
+    _copy_patch_installed = True
+    return True
 
 
 def _strip_fast_math(args: str) -> str:
