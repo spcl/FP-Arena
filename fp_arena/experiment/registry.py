@@ -34,7 +34,7 @@ def to_typeclass(key: str) -> dace.dtypes.typeclass:
 
 
 def is_mpfr(key: str) -> bool:
-    """Whether ``key`` names an MPFR precision (which requires linking libmpfr)."""
+    """Whether ``key`` names an MPFR precision."""
     return _MPFR_KEY.match(key) is not None
 
 

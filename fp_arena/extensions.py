@@ -16,19 +16,16 @@ Two ways to apply this:
   Toggle with :func:`enable_auto_extensions` / :func:`disable_auto_extensions`.
 * Explicit: call :func:`enable_fp_arena_extensions` on an SDFG (it also strips
   fast-math from DaCe's config as a persistent default).
-
-The headers are referenced by absolute path, so no ``-I`` flag or config change
-is required -- this keeps the integration fully non-invasive.
 """
 
-import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 import dace
 from dace.config import Config
 
-#: Absolute path to the bundled C++ include root (``.../runtime/include``).
-INCLUDE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime", "include")
+from fp_arena.dtypes import mpfr
+from fp_arena.environments import MPFR, FPArenaSR
 
 #: Fast-math flags removed when FP-Arena is enabled (incompatible with the
 #: exact IEEE rounding that stochastic rounding depends on). ``Config.get``
@@ -39,46 +36,136 @@ _FAST_MATH_FLAGS = ("-ffast-math", "-ffinite-math-only", "--use_fast_math", "/fp
 #: DaCe compiler-argument config paths that may carry fast-math flags.
 _COMPILER_ARG_PATHS = (("compiler", "cpu", "args"), ("compiler", "cuda", "args"))
 
-#: Headers injected into generated code.
-_HEADERS = (
-    os.path.join(INCLUDE_DIR, "fp_arena", "float32sr.h"),
-    os.path.join(INCLUDE_DIR, "fp_arena", "float64sr.h"),
-    os.path.join(INCLUDE_DIR, "fp_arena", "mpfr.h"),
+#: The FP-Arena environments, each with the C-type substrings that require it
+#: (``fp_arena::`` for the SR types, ``dace::mpfr`` for MPFR).
+_ENVIRONMENTS = (
+    (FPArenaSR, ("fp_arena::",)),
+    (MPFR, ("dace::mpfr",)),
 )
 
-#: Backends whose global-code section receives the includes (CPU frame + CUDA).
-_BACKENDS = ("frame", "cuda")
 
-#: Marker so the includes are only injected once per SDFG.
-_GUARD = "// fp_arena extensions enabled"
-
-#: Substrings identifying an FP-Arena C type (fp_arena:: for SR types, dace::mpfr for mpfr).
-_CTYPE_MARKERS = ("fp_arena::", "dace::mpfr")
-
-
-def fp_arena_global_code() -> str:
+def _type_strings(sdfg: dace.SDFG) -> Iterator[str]:
     """
-    :returns: the C++ ``#include`` block (absolute paths) for the SR headers.
+    :param sdfg: the SDFG to inspect.
+    :returns: an iterator over every string in ``sdfg`` and its nested SDFGs that
+        may name a C type: data descriptor C types and tasklet bodies.
     """
-    includes = "\n".join('#include "%s"' % h for h in _HEADERS)
-    return "%s\n%s\n" % (_GUARD, includes)
+    from dace.sdfg import nodes as _dnodes
+
+    for nested in sdfg.all_sdfgs_recursive():
+        for desc in nested.arrays.values():
+            yield getattr(desc.dtype, "ctype", "") or ""
+        for state in nested.states():
+            for node in state.nodes():
+                if isinstance(node, _dnodes.Tasklet):
+                    try:
+                        yield node.code.as_string
+                    except AttributeError:
+                        yield str(node.code)
 
 
-def inject_headers(sdfg: dace.SDFG) -> dace.SDFG:
+def required_environments(sdfg: dace.SDFG) -> set[str]:
     """
-    Inject the SR header ``#include``s into ``sdfg``'s global code (CPU and CUDA).
-    Idempotent.
+    :param sdfg: the SDFG to inspect.
+    :returns: the full class paths (DaCe's environment identifiers) of the
+        FP-Arena environments the types used by ``sdfg`` need -- empty if it uses
+        none of them.
+    """
+    strings = list(_type_strings(sdfg))
+    return {
+        env.full_class_path()
+        for env, markers in _ENVIRONMENTS
+        if any(marker in s for s in strings for marker in markers)
+    }
 
-    :param sdfg: the SDFG to inject into.
+
+def attach_environments(sdfg: dace.SDFG) -> dace.SDFG:
+    """
+    Attach the FP-Arena environments that ``sdfg`` needs to its code nodes.
+
+    :param sdfg: the SDFG to attach to.
     :returns: the same SDFG, for chaining.
     """
-    code = fp_arena_global_code()
-    for backend in _BACKENDS:
-        existing = sdfg.global_code.get(backend)
-        if existing is not None and _GUARD in existing.code:
-            continue
-        sdfg.append_global_code(code, backend)
+    from dace.sdfg import nodes as _dnodes
+
+    envs = required_environments(sdfg)
+    if not envs:
+        return sdfg
+    for nested in sdfg.all_sdfgs_recursive():
+        for state in nested.states():
+            for node in state.nodes():
+                if isinstance(node, _dnodes.CodeNode):
+                    node.environments = frozenset(node.environments) | envs
     return sdfg
+
+
+#: Whether the aligned-allocation patch is installed.
+_aligned_patch_installed = False
+
+
+def patch_aligned_heap_allocation() -> bool:
+    """Route mpfr heap arrays through plain ``new[]`` / ``delete[]``, which run destructors."""
+
+    global _aligned_patch_installed
+    if _aligned_patch_installed:
+        return False
+
+    from dace.codegen.targets import cpu, experimental_cpu
+
+    original = cpu.use_aligned_operator_new
+
+    def _use_aligned_operator_new(desc) -> bool:
+        if isinstance(desc.dtype, mpfr):
+            return False
+        return original(desc)
+
+    cpu.use_aligned_operator_new = _use_aligned_operator_new
+    experimental_cpu.use_aligned_operator_new = _use_aligned_operator_new
+
+    _aligned_patch_installed = True
+    return True
+
+
+#: Copy implementations that emit a raw ``memcpy``, which shallow-copies mpfr's limb pointer.
+_MEMCPY_IMPLEMENTATIONS = frozenset(
+    {"MemcpyCPU", "MemcpyCUDA1D", "MemcpyCUDA2D", "MemcpyCUDANDStrided"}
+)
+
+#: Whether the element-wise copy patch is installed.
+_copy_patch_installed = False
+
+
+def patch_memcpy_copies() -> bool:
+    """Route mpfr array copies through element-wise assignment, which deep-copies."""
+
+    global _copy_patch_installed
+    if _copy_patch_installed:
+        return False
+
+    from dace.libraries.standard.nodes import copy_node
+    from dace.transformation.passes.canonicalize import finalize
+
+    original = copy_node.select_copy_implementation
+
+    def _select_copy_implementation(node, parent_state) -> str:
+        impl = original(node, parent_state)
+        if impl not in _MEMCPY_IMPLEMENTATIONS:
+            return impl
+        _, inp, in_subset, _, _, out_subset = node.validate(
+            parent_state.sdfg, parent_state, allow_cross_storage=True
+        )
+        if not isinstance(inp.dtype, mpfr):
+            return impl
+        single = (
+            in_subset.num_elements_exact() == 1 and out_subset.num_elements_exact() == 1
+        )
+        return "Tasklet" if single else "MappedTasklet"
+
+    copy_node.select_copy_implementation = _select_copy_implementation
+    finalize.select_copy_implementation = _select_copy_implementation
+
+    _copy_patch_installed = True
+    return True
 
 
 def _strip_fast_math(args: str) -> str:
@@ -128,18 +215,18 @@ def precise_math():
 
 def enable_fp_arena_extensions(sdfg: dace.SDFG) -> dace.SDFG:
     """
-    Make ``sdfg`` compile with the FP-Arena types by injecting the SR header
-    includes into its generated global code, and remove ``-ffast-math`` from
-    DaCe's compiler flags (persistently; see :func:`disable_fast_math`).
+    Make ``sdfg`` compile with the FP-Arena types by attaching the FP-Arena
+    environments and remove ``-ffast-math`` from DaCe's compiler flags (persistently;
+    see :func:`disable_fast_math`).
 
-    Idempotent. Applies to the CPU and CUDA backends. With automatic enablement
-    active (the default), calling this explicitly is optional.
+    Idempotent. With automatic enablement active (the default), calling this
+    explicitly is optional.
 
     :param sdfg: the SDFG to enable FP-Arena types for.
     :returns: the same SDFG, for chaining.
     """
     disable_fast_math()
-    inject_headers(sdfg)
+    attach_environments(sdfg)
     return sdfg
 
 
@@ -149,21 +236,7 @@ def uses_fp_arena_types(sdfg: dace.SDFG) -> bool:
     :returns: ``True`` if any data descriptor or tasklet body in ``sdfg`` or its
         nested SDFGs references an FP-Arena C type, ``False`` otherwise.
     """
-    from dace.sdfg import nodes as _dnodes
-    for nested in sdfg.all_sdfgs_recursive():
-        for desc in nested.arrays.values():
-            if any(m in (getattr(desc.dtype, "ctype", "") or "") for m in _CTYPE_MARKERS):
-                return True
-        for state in nested.states():
-            for node in state.nodes():
-                if isinstance(node, _dnodes.Tasklet):
-                    try:
-                        code_str = node.code.as_string
-                    except AttributeError:
-                        code_str = str(node.code)
-                    if any(m in code_str for m in _CTYPE_MARKERS):
-                        return True
-    return False
+    return bool(required_environments(sdfg))
 
 
 #: Whether the automatic wrappers are currently installed.
@@ -181,11 +254,11 @@ def enable_auto_extensions():
 
     Two wrappers are installed, each at the layer its concern belongs to:
 
-    * Header injection (a code-generation concern) wraps the single codegen
-      entry point ``dace.codegen.codegen.generate_code``, so headers are added
-      on every path -- ``compile``, ``SDFG.generate_code``, or a direct codegen
-      call. ``compile`` code-generates a deep copy, so the caller's SDFG object
-      is left untouched.
+    * Attaching the environments (a code-generation concern) wraps the single
+      codegen entry point ``dace.codegen.codegen.generate_code``, so they are
+      attached on every path -- ``compile``, ``SDFG.generate_code``, or a direct
+      codegen call. ``compile`` code-generates a deep copy, so the caller's SDFG
+      object is left untouched.
     * Removing ``-ffast-math`` (a build concern) wraps ``SDFG.compile``, scoped
       to the build of FP-Arena SDFGs only.
 
@@ -199,8 +272,7 @@ def enable_auto_extensions():
     _original_generate_code = codegen.generate_code
 
     def _generate_code(sdfg, *args, **kwargs):
-        if uses_fp_arena_types(sdfg):
-            inject_headers(sdfg)
+        attach_environments(sdfg)
         return _original_generate_code(sdfg, *args, **kwargs)
 
     codegen.generate_code = _generate_code
@@ -223,6 +295,7 @@ def disable_auto_extensions():
     if not _auto_installed:
         return
     from dace.codegen import codegen
+
     codegen.generate_code = _original_generate_code
     dace.SDFG.compile = _original_compile
     _original_generate_code = None
