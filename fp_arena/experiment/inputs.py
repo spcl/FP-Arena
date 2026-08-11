@@ -14,6 +14,7 @@ As a default, any read array is sampled from a uniform distribution on [0, 1] wi
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import (
@@ -168,13 +169,18 @@ def make_call_args(
     if reads is None:
         reads, _ = sdfg.read_and_write_sets()
     args: dict[str, Any] = {}
+    defaulted: list[str] = []
     for name, desc in sdfg.arrays.items():
         if desc.transient or not isinstance(desc, dace.data.Array):
             continue
         shape = materialize_shape(desc.shape, experiment.symbols)
         np_dtype = desc.dtype.as_numpy_dtype()
         if name in reads:
-            dist = as_distribution(experiment.inputs.get(name, _DEFAULT_INPUT))
+            spec = experiment.inputs.get(name)
+            if spec is None:
+                defaulted.append(name)
+                spec = _DEFAULT_INPUT
+            dist = as_distribution(spec)
             arr = dist.sample(shape, np_dtype, rng)
             n = noise.get(name)
             if n is not None:
@@ -182,6 +188,11 @@ def make_call_args(
             args[name] = arr
         else:
             args[name] = np.zeros(shape, np_dtype)
+    if defaulted:
+        warnings.warn(
+            f"No input distribution for arrays: {sorted(defaulted)}. "
+            f"Using default uniform[0, 1]."
+        )
     args.update(experiment.symbols)
     args.update(experiment.scalar_args)
     return args
