@@ -14,7 +14,12 @@ from typing import Any
 
 from dace.transformation.passes.vectorization.config import VectorizeConfig
 
-from fp_arena.experiment.results import ErrorResult, PerfResult, PerturbationResult
+from fp_arena.experiment.results import (
+    ErrorResult,
+    PerfResult,
+    PerturbationResult,
+    SelectionResult,
+)
 
 DEFAULT_DB_PATH = ".fp_arena_results.db"
 
@@ -23,12 +28,13 @@ _KIND_OF = {
     PerfResult: "performance",
     ErrorResult: "error",
     PerturbationResult: "perturbation",
+    SelectionResult: "selection",
 }
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind          TEXT NOT NULL,        -- 'performance' | 'error' | 'perturbation'
+    kind          TEXT NOT NULL,        -- 'performance' | 'error' | 'perturbation' | 'selection'
     experiment    TEXT NOT NULL,        -- ExperimentConfig.name
     created_at    TEXT NOT NULL,        -- ISO-8601 UTC
     precision     TEXT NOT NULL,        -- JSON: the precision map
@@ -87,7 +93,7 @@ class ResultStore:
     def add(
         self,
         experiment: str,
-        result: PerfResult | ErrorResult | PerturbationResult,
+        result: PerfResult | ErrorResult | PerturbationResult | SelectionResult,
         symbols: dict[str, Any] | None = None,
         scalars: dict[str, Any] | None = None,
         vectorization: VectorizeConfig | None = None,

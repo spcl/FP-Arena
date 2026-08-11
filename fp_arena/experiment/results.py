@@ -4,10 +4,15 @@ Result records returned by the analysis drivers, one per precision point. Each
 serialises to a plain dict (``to_dict``) for the results database.
 """
 
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from fp_arena.experiment.config import PrecisionMap
+
+#: Error metrics where a *larger* value is better; every other
+HIGHER_IS_BETTER = frozenset({"snr"})
 
 
 @dataclass
@@ -96,6 +101,72 @@ class PerturbationResult:
     errors: dict[str, ErrorStats]
     n_samples: int
     seed: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ConstraintResult:
+    """
+    One budget constraint checked on one output array of one precision point.
+
+    ``ok`` is set if ``value`` stays below ``limit``, or above it for the
+    :data:`HIGHER_IS_BETTER` metrics.
+    """
+
+    metric: str
+    array: str
+    value: float
+    limit: float
+    ok: bool
+
+
+@dataclass
+class SelectionCandidate:
+    """
+    One precision point as evaluated by the selection search.
+    """
+
+    precision: PrecisionMap
+    errors: dict[str, ErrorStats]
+    constraints: list[ConstraintResult]
+    feasible: bool
+    objective_ms: float | None = None
+    speedup: float | None = None
+    #: ``{perturbed_input: {output_array: stats}}``
+    sensitivity: dict[str, dict[str, ErrorStats]] | None = None
+
+
+@dataclass
+class SelectionResult:
+    """
+    The outcome of a selection search: the fastest precision point that met the
+    budget, plus every candidate that was evaluated.
+
+    ``best`` is ``None`` if nothing met the budget.
+
+    ``limits`` stores the resolved numeric thresholds.
+    """
+
+    best: PrecisionMap | None
+    speedup_baseline: PrecisionMap
+    objective: str
+    #: ``{metric: {array: limit}}`` -- the thresholds actually applied.
+    limits: dict[str, dict[str, float]]
+    #: ``{metric: {array: value}}`` -- input-noise-induced deviation at the baseline.
+    noise_floor: dict[str, dict[str, float]]
+    #: Feasible points first, fastest first; then the rest.
+    candidates: list[SelectionCandidate]
+    n_evaluated: int
+    n_feasible: int
+    n_samples: int = 1
+    seed: int = 0
+
+    @property
+    def precision(self) -> PrecisionMap:
+        """The winning assignment, or ``{}`` if none -- the store's precision column."""
+        return dict(self.best) if self.best is not None else {}
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

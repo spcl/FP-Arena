@@ -6,25 +6,39 @@ FP-Arena experiment framework: precision performance and error analysis.
 from fp_arena.experiment import registry
 from fp_arena.experiment.config import (
     CONSTANTS_KEY,
+    OBJECTIVES,
     ErrorAnalysisConfig,
+    ErrorBudget,
     ExperimentConfig,
     PerformanceAnalysisConfig,
     PerturbationAnalysisConfig,
     PrecisionMap,
+    SelectionAnalysisConfig,
+    precision_grid,
 )
 from fp_arena.experiment.inputs import Noise
 from fp_arena.experiment.results import (
+    HIGHER_IS_BETTER,
+    ConstraintResult,
     ErrorResult,
     ErrorStats,
     PerfResult,
     PerturbationResult,
+    SelectionCandidate,
+    SelectionResult,
 )
+from fp_arena.experiment.retarget import candidate_fp_arrays
 from fp_arena.experiment.runner import run_error, run_performance, run_perturbation
+from fp_arena.experiment.selection import format_selection, run_selection
 from fp_arena.experiment.store import ResultStore, StoredResult
 
 __all__ = [
     "CONSTANTS_KEY",
+    "HIGHER_IS_BETTER",
+    "OBJECTIVES",
+    "ConstraintResult",
     "ErrorAnalysisConfig",
+    "ErrorBudget",
     "ErrorResult",
     "ErrorStats",
     "ExperimentConfig",
@@ -35,9 +49,16 @@ __all__ = [
     "PerturbationResult",
     "PrecisionMap",
     "ResultStore",
+    "SelectionAnalysisConfig",
+    "SelectionCandidate",
+    "SelectionResult",
     "StoredResult",
+    "candidate_fp_arrays",
+    "format_selection",
+    "precision_grid",
     "registry",
     "run_error",
     "run_performance",
     "run_perturbation",
+    "run_selection",
 ]
