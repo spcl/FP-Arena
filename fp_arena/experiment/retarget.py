@@ -58,13 +58,6 @@ def _validate_pins(sdfg: dace.SDFG, pin_map: PrecisionMap) -> None:
             raise ValueError(f"Pinned array {name!r} is not a floating-point array")
 
 
-def _ensure_mpfr_linked() -> None:
-    """Add the MPFR library to DaCe's CPU link line."""
-    libs = dace.Config.get("compiler", "cpu", "libs") or ""
-    if "mpfr" not in libs.split():
-        dace.Config.append("compiler", "cpu", "libs", value=" mpfr")
-
-
 def apply_precision(
     sdfg: dace.SDFG,
     pin_map: PrecisionMap,
@@ -75,8 +68,6 @@ def apply_precision(
     """
     if not pin_map:
         return
-    if any(registry.is_mpfr(key) for key in pin_map.values()):
-        _ensure_mpfr_linked()
     pins = dict(pin_map)
     constants_key = pins.pop(CONSTANTS_KEY, None)
     _validate_pins(sdfg, pins)
