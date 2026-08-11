@@ -18,10 +18,11 @@ from fp_arena.experiment.config import (
 )
 from fp_arena.experiment.inputs import Noise
 from fp_arena.experiment.results import (
-    HIGHER_IS_BETTER,
+    METRICS,
     ConstraintResult,
     ErrorResult,
     ErrorStats,
+    Metric,
     PerfResult,
     PerturbationResult,
     SelectionCandidate,
@@ -34,7 +35,7 @@ from fp_arena.experiment.store import ResultStore, StoredResult
 
 __all__ = [
     "CONSTANTS_KEY",
-    "HIGHER_IS_BETTER",
+    "METRICS",
     "OBJECTIVES",
     "ConstraintResult",
     "ErrorAnalysisConfig",
@@ -42,6 +43,7 @@ __all__ = [
     "ErrorResult",
     "ErrorStats",
     "ExperimentConfig",
+    "Metric",
     "Noise",
     "PerfResult",
     "PerformanceAnalysisConfig",

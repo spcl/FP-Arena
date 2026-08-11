@@ -10,12 +10,13 @@ from scipy import stats
 import fp_arena  # noqa: F401
 from fp_arena.experiment import (
     CONSTANTS_KEY,
-    HIGHER_IS_BETTER,
+    METRICS,
     ConstraintResult,
     ErrorAnalysisConfig,
     ErrorBudget,
     ErrorStats,
     ExperimentConfig,
+    Metric,
     Noise,
     PerformanceAnalysisConfig,
     PerturbationAnalysisConfig,
@@ -41,7 +42,6 @@ from fp_arena.experiment.runner import (
     _new_acc,
 )
 from fp_arena.experiment.selection import (
-    _scale,
     check,
     noise_floor,
     resolve_limits,
@@ -579,12 +579,26 @@ def test_selection_config_validation():
         _selection_cfg(objective="wall_clock")
 
 
+def test_metrics_registry_covers_every_error_stat():
+    # A new ErrorStats field has to declare its direction and scale before a budget can name it.
+    assert set(METRICS) == {f.name for f in dataclasses.fields(ErrorStats)}
+
+
 def test_scale_treats_the_factor_as_an_error_multiple():
     # An error magnitude scales directly...
-    assert _scale("rel_max", 1e-6, 2.0) == pytest.approx(2e-6)
+    assert METRICS["rel_max"].scale(1e-6, 2.0) == pytest.approx(2e-6)
     # ...but snr is a dB ratio, where "2x the error" is a 6.02 dB shift down.
-    assert _scale("snr", 60.0, 2.0) == pytest.approx(60.0 - 20.0 * np.log10(2.0))
-    assert _scale("snr", 60.0, 1.0) == pytest.approx(60.0)
+    assert METRICS["snr"].scale(60.0, 2.0) == pytest.approx(60.0 - 20.0 * np.log10(2.0))
+    assert METRICS["snr"].scale(60.0, 1.0) == pytest.approx(60.0)
+
+
+def test_metric_direction_and_scale_are_independent():
+    # The dB scaling belongs to snr, not to "higher is better" in general: a
+    # linear higher-is-better metric keeps the proportional scale.
+    linear_up = Metric(higher_is_better=True)
+    assert linear_up.scale(1e-6, 2.0) == pytest.approx(2e-6)
+    assert linear_up.better(1.0, 2.0) == 2.0
+    assert linear_up.satisfies(2.0, 1.0)
 
 
 def test_noise_floor_keeps_the_least_accurate_perturbation():
@@ -776,7 +790,7 @@ def _candidate(precision, constraints, **kw):
                 array=array,
                 value=value,
                 limit=limit,
-                ok=(value >= limit if metric in HIGHER_IS_BETTER else value <= limit),
+                ok=METRICS[metric].satisfies(value, limit),
             )
             for (metric, array), (value, limit) in sorted(constraints.items())
         ],
@@ -787,7 +801,7 @@ def _candidate(precision, constraints, **kw):
 
 def test_format_selection_adapts_to_whatever_the_search_varied():
     # Nothing heat3d-shaped here: other array names, a second metric, an
-    # array that only some points pin, and a HIGHER_IS_BETTER metric.
+    # array that only some points pin, and a higher-is-better metric.
     winner = _candidate(
         {"u": "fp32", "flux": "fp16", CONSTANTS_KEY: "fp32"},
         {

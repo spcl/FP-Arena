@@ -35,7 +35,7 @@ from fp_arena.experiment.config import (
     SelectionAnalysisConfig,
 )
 from fp_arena.experiment.results import (
-    HIGHER_IS_BETTER,
+    METRICS,
     ConstraintResult,
     ErrorStats,
     PerfResult,
@@ -68,29 +68,6 @@ def _dedupe(points: list[PrecisionMap]) -> list[PrecisionMap]:
     return out
 
 
-def _better(metric: str, a: float, b: float) -> float:
-    """The more accurate of two values of ``metric``."""
-    return max(a, b) if metric in HIGHER_IS_BETTER else min(a, b)
-
-
-def _worse(metric: str, a: float, b: float) -> float:
-    """The less accurate of two values of ``metric``."""
-    return min(a, b) if metric in HIGHER_IS_BETTER else max(a, b)
-
-
-def _satisfies(metric: str, value: float, limit: float) -> bool:
-    return value >= limit if metric in HIGHER_IS_BETTER else value <= limit
-
-
-def _scale(metric: str, floor: float, factor: float) -> float:
-    """
-    The limit meaning "allow ``factor`` times the noise-floor error".
-    """
-    if metric in HIGHER_IS_BETTER:
-        return floor - 20.0 * math.log10(factor)
-    return floor * factor
-
-
 def noise_floor(
     results: list[PerturbationResult], metrics: list[str]
 ) -> dict[str, dict[str, float]]:
@@ -104,7 +81,7 @@ def noise_floor(
                 value = float(getattr(stats, m))
                 current = floor[m].get(array)
                 floor[m][array] = (
-                    value if current is None else _worse(m, current, value)
+                    value if current is None else METRICS[m].worse(current, value)
                 )
     return floor
 
@@ -136,10 +113,10 @@ def resolve_limits(
         for array, value in floor.get(metric, {}).items():
             if array not in arrays:
                 continue
-            derived = _scale(metric, value, factor)
+            derived = METRICS[metric].scale(value, factor)
             current = per.get(array)
             per[array] = (
-                derived if current is None else _better(metric, current, derived)
+                derived if current is None else METRICS[metric].better(current, derived)
             )
     return out
 
@@ -161,7 +138,7 @@ def check(
                     array=array,
                     value=value,
                     limit=limit,
-                    ok=_satisfies(metric, value, limit),
+                    ok=METRICS[metric].satisfies(value, limit),
                 )
             )
     return out
@@ -373,7 +350,7 @@ def format_selection(
     for (metric, array), values in sorted(misses.items()):
         closest = values[0]
         for v in values[1:]:
-            closest = _better(metric, closest, v)
+            closest = METRICS[metric].better(closest, v)
         miss_rows.append(
             [
                 metric,

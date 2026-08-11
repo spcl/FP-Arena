@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import dace
@@ -176,13 +176,12 @@ class ErrorBudget:
                 "and/or a predicate (otherwise every point is trivially feasible)"
             )
         # Local import: results imports PrecisionMap from this module.
-        from fp_arena.experiment.results import ErrorStats
+        from fp_arena.experiment.results import METRICS
 
-        known = {f.name for f in fields(ErrorStats)}
         for metric in (*self.limits, *(self.from_perturbation or {})):
-            if metric not in known:
+            if metric not in METRICS:
                 raise ValueError(
-                    f"Unknown error metric {metric!r}; known: {sorted(known)}"
+                    f"Unknown error metric {metric!r}; known: {sorted(METRICS)}"
                 )
         for metric, factor in (self.from_perturbation or {}).items():
             if factor <= 0.0:

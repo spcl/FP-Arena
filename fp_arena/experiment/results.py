@@ -6,13 +6,12 @@ serialises to a plain dict (``to_dict``) for the results database.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from fp_arena.experiment.config import PrecisionMap
-
-#: Error metrics where a *larger* value is better; every other
-HIGHER_IS_BETTER = frozenset({"snr"})
 
 
 @dataclass
@@ -49,6 +48,63 @@ class ErrorStats:
     l2_norm: float
     linf_norm: float
     snr: float
+
+
+def proportional(floor: float, factor: float) -> float:
+    """``factor`` times the error, for a metric that is linear in the error."""
+    return floor * factor
+
+
+def power_decibels(floor: float, factor: float) -> float:
+    """
+    ``factor`` times the error, for a power ratio in dB: scaling the error
+    vector by ``factor`` scales its power by ``factor**2``, i.e. costs
+    ``20*log10(factor)`` dB.
+    """
+    return floor - 20.0 * math.log10(factor)
+
+
+@dataclass(frozen=True)
+class Metric:
+    """
+    How one :class:`ErrorStats` field behaves as a budget constraint.
+
+    :param higher_is_better: whether a *larger* value means the more accurate
+        result. Sets the direction of every comparison against a limit.
+    :param scale: turns a measured error into the limit meaning "allow
+        ``factor`` times that much error", as ``(floor, factor) -> limit``.
+    """
+
+    higher_is_better: bool = False
+    scale: Callable[[float, float], float] = proportional
+
+    def better(self, a: float, b: float) -> float:
+        """The more accurate of two values."""
+        return max(a, b) if self.higher_is_better else min(a, b)
+
+    def worse(self, a: float, b: float) -> float:
+        """The less accurate of two values."""
+        return min(a, b) if self.higher_is_better else max(a, b)
+
+    def satisfies(self, value: float, limit: float) -> bool:
+        """Whether ``value`` is inside ``limit``."""
+        return value >= limit if self.higher_is_better else value <= limit
+
+
+#: Every metric a budget can constrain, i.e. every :class:`ErrorStats` field.
+#: A new field has to be entered here before it can be used as a constraint.
+METRICS: dict[str, Metric] = {
+    "abs_mean": Metric(),
+    "rel_mean": Metric(),
+    "rel_max": Metric(),
+    "l1": Metric(),
+    "l2": Metric(),
+    "linf": Metric(),
+    "l1_norm": Metric(),
+    "l2_norm": Metric(),
+    "linf_norm": Metric(),
+    "snr": Metric(higher_is_better=True, scale=power_decibels),
+}
 
 
 @dataclass
@@ -111,8 +167,8 @@ class ConstraintResult:
     """
     One budget constraint checked on one output array of one precision point.
 
-    ``ok`` is set if ``value`` stays below ``limit``, or above it for the
-    :data:`HIGHER_IS_BETTER` metrics.
+    ``ok`` is set if ``value`` stays inside ``limit``, in whichever direction
+    the metric's :class:`Metric` calls accurate.
     """
 
     metric: str
