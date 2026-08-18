@@ -828,16 +828,6 @@ def change_and_propagate_fp_types(
     # Build the array-level dataflow graph and solve the precision fixed point.
     producers, consumers = _build_dataflow(sdfgs, uf)
 
-    # Treat every unpinned floating-point *source* as a constant at that precision.
-    if constant_type is not None:
-        for rep in members:
-            if (
-                rep not in pins
-                and not producers.get(rep)
-                and _is_fp(original_types[rep])
-            ):
-                pins[rep] = constant_type
-
     inferred = _infer_types(
         members,
         producers,
