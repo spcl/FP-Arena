@@ -9,9 +9,12 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fp_arena.experiment.config import PrecisionMap
+
+if TYPE_CHECKING:
+    from fp_arena.experiment.knobs import Knob
 
 
 @dataclass
@@ -222,6 +225,49 @@ class SelectionResult:
     @property
     def precision(self) -> PrecisionMap:
         """The winning assignment, or ``{}`` if none -- the store's precision column."""
+        return dict(self.best) if self.best is not None else {}
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SearchCandidate:
+    """One feasible config the selection *search* measured."""
+
+    #: The lowered pins (knobs left at their highest rung are omitted).
+    precision: PrecisionMap
+    objective_ms: float
+    #: Speedup over the all-highest root.
+    speedup: float
+
+
+@dataclass
+class SearchResult:
+    """The outcome of a selection search (``fp_arena.experiment.search``)."""
+
+    #: The fastest feasible config, or ``None`` if none was feasible.
+    best: dict[str, str] | None
+    #: Objective milliseconds of ``best``.
+    best_ms: float | None
+    #: ``best`` speedup over the all-highest root.
+    speedup: float | None
+    objective: str
+    #: The knobs searched, in order.
+    knobs: list[Knob]
+    #: Resolved budget thresholds, ``{metric: {array: limit}}``.
+    limits: dict[str, dict[str, float]]
+    n_evaluated: int
+    n_pruned: int
+    n_timed: int
+    #: Every feasible config that was measured, fastest first.
+    candidates: list[SearchCandidate] = field(default_factory=list)
+    #: Set when even the all-highest root was over budget.
+    unsatisfiable: bool = False
+
+    @property
+    def precision(self) -> PrecisionMap:
+        """The winning config, or ``{}``"""
         return dict(self.best) if self.best is not None else {}
 
     def to_dict(self) -> dict[str, Any]:

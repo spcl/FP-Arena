@@ -17,6 +17,7 @@ from fp_arena.experiment.config import (
     precision_grid,
 )
 from fp_arena.experiment.inputs import Noise
+from fp_arena.experiment.knobs import Knob, KnobSelection, find_knobs
 from fp_arena.experiment.results import (
     METRICS,
     ConstraintResult,
@@ -30,6 +31,14 @@ from fp_arena.experiment.results import (
 )
 from fp_arena.experiment.retarget import candidate_fp_arrays
 from fp_arena.experiment.runner import run_error, run_performance, run_perturbation
+from fp_arena.experiment.screening import Screening, screen
+from fp_arena.experiment.search import (
+    SearchCandidate,
+    SearchResult,
+    SelectionSearchConfig,
+    format_search,
+    run_search,
+)
 from fp_arena.experiment.selection import format_selection, run_selection
 from fp_arena.experiment.store import ResultStore, StoredResult
 
@@ -43,6 +52,8 @@ __all__ = [
     "ErrorResult",
     "ErrorStats",
     "ExperimentConfig",
+    "Knob",
+    "KnobSelection",
     "Metric",
     "Noise",
     "PerfResult",
@@ -51,16 +62,24 @@ __all__ = [
     "PerturbationResult",
     "PrecisionMap",
     "ResultStore",
+    "Screening",
+    "SearchCandidate",
+    "SearchResult",
     "SelectionAnalysisConfig",
     "SelectionCandidate",
     "SelectionResult",
+    "SelectionSearchConfig",
     "StoredResult",
     "candidate_fp_arrays",
+    "find_knobs",
+    "format_search",
     "format_selection",
     "precision_grid",
     "registry",
     "run_error",
     "run_performance",
     "run_perturbation",
+    "run_search",
     "run_selection",
+    "screen",
 ]
