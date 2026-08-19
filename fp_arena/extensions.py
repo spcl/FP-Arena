@@ -142,10 +142,11 @@ def patch_memcpy_copies() -> bool:
     if _copy_patch_installed:
         return False
 
-    from dace.libraries.standard.nodes import copy_node
-    from dace.transformation.passes.canonicalize import finalize
+    from dace.libraries.standard.nodes import copy as copy_lib
+    from dace.libraries.standard.nodes.copy import select as copy_select
+    from dace.libraries.standard.nodes.copy.expansions import auto as copy_auto
 
-    original = copy_node.select_copy_implementation
+    original = copy_select.select_copy_implementation
 
     def _select_copy_implementation(node, parent_state) -> str:
         impl = original(node, parent_state)
@@ -161,8 +162,9 @@ def patch_memcpy_copies() -> bool:
         )
         return "Tasklet" if single else "MappedTasklet"
 
-    copy_node.select_copy_implementation = _select_copy_implementation
-    finalize.select_copy_implementation = _select_copy_implementation
+    copy_select.select_copy_implementation = _select_copy_implementation
+    copy_lib.select_copy_implementation = _select_copy_implementation
+    copy_auto.select_copy_implementation = _select_copy_implementation
 
     _copy_patch_installed = True
     return True
