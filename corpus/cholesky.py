@@ -1,6 +1,7 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """
 The Cholesky decomposition kernel.
+Adapted from: https://github.com/spcl/npbench/tree/main
 """
 
 import dace as dc
