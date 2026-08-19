@@ -29,7 +29,6 @@ from fp_arena.experiment.config import (
     OBJECTIVES,
     ErrorBudget,
     ExperimentConfig,
-    PerformanceAnalysisConfig,
     PrecisionMap,
 )
 from fp_arena.experiment.inputs import Noise, make_call_args, materialize_shape
@@ -55,9 +54,9 @@ from fp_arena.experiment.runner import (
     _new_acc,
     _output_arrays,
     _sample_rngs,
-    compile_candidate,
+    build_candidate_sdfg,
     compile_reference,
-    run_performance,
+    measure,
 )
 from fp_arena.experiment.screening import screen
 from fp_arena.experiment.selection import _objective_ms, check
@@ -82,10 +81,10 @@ class SelectionSearchConfig:
     :param objective: the timing phase to minimise, one of :data:`OBJECTIVES`.
     :param compute_budget: max distinct programs to compile; ``None`` runs to
         exhaustion.
-    :param n_workers: number of parallel compile workers
-    :param n_timing_workers: exclusive timing slots -- one per GPU on a GPU node
-    :param devices: GPU ids to pin the timing workers to via
-        ``CUDA_VISIBLE_DEVICES``; ``None`` leaves them unpinned (CPU / default).
+    :param n_workers: number of unpinned worker processes when ``devices`` is
+        ``None`` (CPU / testing); ignored when ``devices`` is given.
+    :param devices: GPU ids to pin workers to via ``CUDA_VISIBLE_DEVICES`` -- one
+        worker per id, each owning its device exclusively.
     :param name: database/report name; defaults to the experiment's.
 
     """
@@ -102,7 +101,6 @@ class SelectionSearchConfig:
     objective: str = "total"
     compute_budget: int | None = None
     n_workers: int = 1
-    n_timing_workers: int = 1
     devices: list[int] | None = None
     name: str | None = None
 
@@ -117,17 +115,25 @@ class SelectionSearchConfig:
 Config = dict[str, str]
 
 
-class _Evaluator:
-    """Compiles the reference once, caches its per-sample outputs, grades candidates."""
+class _Slot:
+    """
+    One evaluation slot, owning a single device (or a CPU slot).
+    """
 
     def __init__(
         self,
         experiment: ExperimentConfig,
         reference: str | dict[str, str],
         n_samples: int,
+        limits: dict[str, dict[str, float]],
+        n_warmup: int,
+        n_reps: int,
     ) -> None:
         self.experiment = experiment
         self.outputs = _output_arrays(experiment.program)
+        self.limits = limits
+        self.n_warmup = n_warmup
+        self.n_reps = n_reps
         reads, _ = experiment.program.read_and_write_sets()
         ref = compile_reference(experiment, reference)
         self._samples: list[tuple[dict, dict[str, np.ndarray]]] = []
@@ -138,49 +144,71 @@ class _Evaluator:
             self._samples.append((args, {n: ref_args[n] for n in self.outputs}))
         ref.finalize()
 
-    def error(self, pin_map: PrecisionMap) -> dict[str, ErrorStats]:
-        """Per-output error of ``pin_map`` against the reference, over the samples."""
-        csdfg = compile_candidate(self.experiment, pin_map)
+    def evaluate(
+        self, pin_map: PrecisionMap
+    ) -> tuple[dict[str, ErrorStats], PerfResult | None]:
+        """
+        Grade ``pin_map`` against the reference and, when it meets the numeric limits, time it.
+        """
+        sdfg = build_candidate_sdfg(self.experiment, pin_map, instrument=True)
+        csdfg = sdfg.compile()
         accs = {name: _new_acc() for name in self.outputs}
         for args, ref_out in self._samples:
             cand_args = _copy_args(args)
             csdfg(**cand_args)
             for name in self.outputs:
                 _accumulate(accs[name], ref_out[name], cand_args[name])
-        csdfg.finalize()
-        return {name: _finalize(a) for name, a in accs.items()}
+        errors = {name: _finalize(a) for name, a in accs.items()}
+        perf: PerfResult | None = None
+        if all(c.ok for c in check(errors, self.limits)):
+            rng = _sample_rngs(self.experiment.seed, 1)[0]
+            # The error samples already ran on this compiled object; the timing
+            # report accumulates them, so measure() drops all but the last reps.
+            perf = PerfResult(
+                precision=dict(pin_map),
+                seed=self.experiment.seed,
+                **measure(
+                    sdfg,
+                    csdfg,
+                    self.experiment,
+                    self.n_warmup,
+                    self.n_reps,
+                    rng,
+                    prior_invocations=len(self._samples),
+                ),
+            )
+        else:
+            csdfg.finalize()
+        return errors, perf
 
 
 _WORKER: dict = {}
 
 
-def _init_error_worker(
+def _init_slot(
     experiment: ExperimentConfig,
     reference: str | dict[str, str],
     n_samples: int,
+    limits: dict[str, dict[str, float]],
+    n_warmup: int,
+    n_reps: int,
+    device_queue,
 ) -> None:
-    _WORKER["ev"] = _Evaluator(experiment, reference, n_samples)
-
-
-def _error_task(pin_map: PrecisionMap) -> dict[str, ErrorStats]:
-    return _WORKER["ev"].error(pin_map)
-
-
-def _init_timing_worker(
-    experiment: ExperimentConfig, n_warmup: int, n_reps: int, device: int | None
-) -> None:
+    # Pin the device *before* anything creates a CUDA context.
+    # Each worker pops one id, so devices are distinct.
+    device = device_queue.get()
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
-    _WORKER["timing"] = (experiment, n_warmup, n_reps)
+    dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    if experiment.target == "gpu":
+        dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
+    _WORKER["slot"] = _Slot(experiment, reference, n_samples, limits, n_warmup, n_reps)
 
 
-def _timing_task(pin_map: PrecisionMap) -> PerfResult:
-    experiment, n_warmup, n_reps = _WORKER["timing"]
-    return run_performance(
-        PerformanceAnalysisConfig(
-            experiment, precisions=[pin_map], n_warmup=n_warmup, n_reps=n_reps
-        )
-    )[0]
+def _eval_task(
+    pin_map: PrecisionMap,
+) -> tuple[dict[str, ErrorStats], PerfResult | None]:
+    return _WORKER["slot"].evaluate(pin_map)
 
 
 def _array_sizes(experiment: ExperimentConfig, names: list[str]) -> dict[str, int]:
@@ -289,18 +317,20 @@ def run_search(
             push(nb)
 
     ctx = mp.get_context("spawn")
-    devices = cfg.devices if cfg.devices else [None] * max(1, cfg.n_timing_workers)
+    # One worker per device (each pinned + exclusive); with no devices, n_workers
+    # unpinned CPU slots. Compile, error grade, and timing of a config all run on
+    # the one slot that owns it.
+    devices = cfg.devices if cfg.devices else [None] * max(1, cfg.n_workers)
+    n_slots = len(devices)
 
     errors_cache: dict[
         CanonicalKey, dict[str, ErrorStats]
     ] = {}  # dedup across pin-maps
     perf_cache: dict[CanonicalKey, PerfResult] = {}
-    err_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
-    time_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
+    eval_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
     candidates: list[SearchCandidate] = []
-    round_robin = itertools.cycle(range(len(devices)))
 
     def key_of(config: Config) -> CanonicalKey:
         return canonical_typing(exp, pin_map(config))
@@ -315,46 +345,51 @@ def run_search(
         if best_ms[0] is None or ms < best_ms[0]:
             best_ms[0], best[0] = ms, config
 
-    def start_timing(config: Config, key: CanonicalKey) -> None:
-        if key in perf_cache:
-            update_best(config, perf_cache[key])
-            return
-        # One single-worker pool per device -> each device times one config at a
-        # time (clean, exclusive); round-robin balances across them.
-        pool = time_pools[next(round_robin)]
-        time_futs[pool.submit(_timing_task, pin_map(config))] = (config, key)
-
     def integrate(
-        config: Config, key: CanonicalKey, errors: dict[str, ErrorStats]
+        config: Config,
+        key: CanonicalKey,
+        errors: dict[str, ErrorStats],
+        perf: PerfResult | None,
     ) -> None:
+        """Fold one config's result in. ``perf`` is this config's own timing, or
+        ``None`` when it was over the numeric budget or this is a dedup hit (its
+        timing, if any, already sits in ``perf_cache``)."""
         if _feasible(errors, limits, cfg.budget):
-            start_timing(config, key)
+            if key in perf_cache:
+                update_best(config, perf_cache[key])  # dedup: reuse the timing
+            elif perf is not None:
+                perf_cache[key] = perf
+                stats["timed"] += 1
+                update_best(config, perf)
             expand(config)
         else:
             infeasible.append(vec(config))
 
-    err_pool = cf.ProcessPoolExecutor(
-        cfg.n_workers,
+    # Each worker pops one device id from the queue at init and pins to it.
+    device_queue = ctx.Queue()
+    for device in devices:
+        device_queue.put(device)
+    pool = cf.ProcessPoolExecutor(
+        n_slots,
         mp_context=ctx,
-        initializer=_init_error_worker,
-        initargs=(exp, cfg.reference, cfg.n_samples),
+        initializer=_init_slot,
+        initargs=(
+            exp,
+            cfg.reference,
+            cfg.n_samples,
+            limits,
+            cfg.n_warmup,
+            cfg.n_reps,
+            device_queue,
+        ),
     )
-    time_pools = [
-        cf.ProcessPoolExecutor(
-            1,
-            mp_context=ctx,
-            initializer=_init_timing_worker,
-            initargs=(exp, cfg.n_warmup, cfg.n_reps, device),
-        )
-        for device in devices
-    ]
     root_ms = None
     try:
-        # Root first: the feasible root and the speedup denominator.
+        # Root first: the feasibility floor and the speedup denominator.
         visited.add(vec(root))
         root_key = key_of(root)
         stats["evaluated"] += 1
-        root_errors = err_pool.submit(_error_task, pin_map(root)).result()
+        root_errors, root_perf = pool.submit(_eval_task, pin_map(root)).result()
         errors_cache[root_key] = root_errors
         if not _feasible(root_errors, limits, cfg.budget):
             return _finish(
@@ -374,7 +409,8 @@ def run_search(
                 exp,
                 store,
             )
-        root_perf = time_pools[0].submit(_timing_task, pin_map(root)).result()
+        # Feasible root cleared the numeric limits, so the worker timed it.
+        assert root_perf is not None
         perf_cache[root_key] = root_perf
         stats["timed"] += 1
         root_ms = _objective_ms(root_perf, cfg.objective)
@@ -396,9 +432,9 @@ def run_search(
         expand(root)
 
         budget_hit = False
-        while (heap and not budget_hit) or err_futs or time_futs:
-            # Keep up to n_workers compile+error tasks in flight.
-            while heap and not budget_hit and len(err_futs) < cfg.n_workers:
+        while (heap and not budget_hit) or eval_futs:
+            # Keep up to n_slots compile+error+timing tasks in flight.
+            while heap and not budget_hit and len(eval_futs) < n_slots:
                 if (
                     cfg.compute_budget is not None
                     and stats["evaluated"] >= cfg.compute_budget
@@ -411,32 +447,21 @@ def run_search(
                     continue
                 key = key_of(config)
                 if key in errors_cache:
-                    integrate(config, key, errors_cache[key])
+                    integrate(config, key, errors_cache[key], None)
                     continue
                 stats["evaluated"] += 1
-                err_futs[err_pool.submit(_error_task, pin_map(config))] = (config, key)
+                eval_futs[pool.submit(_eval_task, pin_map(config))] = (config, key)
 
-            if not err_futs and not time_futs:
+            if not eval_futs:
                 break
-            done, _ = cf.wait(
-                list(err_futs) + list(time_futs), return_when=cf.FIRST_COMPLETED
-            )
+            done, _ = cf.wait(list(eval_futs), return_when=cf.FIRST_COMPLETED)
             for fut in done:
-                if fut in err_futs:
-                    config, key = err_futs.pop(fut)
-                    errors = fut.result()
-                    errors_cache[key] = errors
-                    integrate(config, key, errors)
-                else:
-                    config, key = time_futs.pop(fut)
-                    perf = fut.result()
-                    perf_cache[key] = perf
-                    stats["timed"] += 1
-                    update_best(config, perf)
+                config, key = eval_futs.pop(fut)
+                errors, perf = fut.result()
+                errors_cache[key] = errors
+                integrate(config, key, errors, perf)
     finally:
-        err_pool.shutdown(wait=True)
-        for pool in time_pools:
-            pool.shutdown(wait=True)
+        pool.shutdown(wait=True)
 
     result = SearchResult(
         best=best[0],

@@ -270,8 +270,16 @@ def compile_reference(experiment, reference):
     return sdfg.compile()
 
 
-def compile_candidate(experiment, pin_map: PrecisionMap):
-    """Build and compile one precision point."""
+def build_candidate_sdfg(
+    experiment, pin_map: PrecisionMap, instrument: bool = False
+) -> dace.SDFG:
+    """
+    Build one precision point's SDFG: retargeted, given its own (unique) build
+    folder, and -- when ``instrument`` is set -- with every state timed.
+
+    Returns the SDFG (not the compiled handle) so the caller can both
+    ``.compile()`` it and, after running, read its instrumentation report.
+    """
     sdfg = fresh_sdfg(experiment)
     apply_precision(sdfg, pin_map, experiment.promotion_rules)
     apply_target(
@@ -281,8 +289,52 @@ def compile_candidate(experiment, pin_map: PrecisionMap):
         gpu_vectorize=experiment.gpu_vectorize,
         gpu_vectorize_config=experiment.gpu_vectorize_config,
     )
+    if instrument:
+        provider = (
+            dace.InstrumentationType.GPU_Events
+            if experiment.target == "gpu"
+            else dace.InstrumentationType.Timer
+        )
+        for state in sdfg.all_states():
+            state.instrument = provider
     _distinguish(sdfg, _pin_tag(pin_map))
-    return sdfg.compile()
+    return sdfg
+
+
+def compile_candidate(experiment, pin_map: PrecisionMap):
+    """Build and compile one precision point."""
+    return build_candidate_sdfg(experiment, pin_map).compile()
+
+
+def measure(
+    sdfg: dace.SDFG,
+    csdfg,
+    experiment,
+    n_warmup: int,
+    n_reps: int,
+    rng: np.random.Generator,
+    noise: dict[str, Any] | None = None,
+    prior_invocations: int = 0,
+) -> dict[str, Any]:
+    """
+    Run ``n_warmup`` untimed then ``n_reps`` timed invocations of an already
+    compiled, state-instrumented ``sdfg``, finalize it (which flushes the
+    instrumentation report to disk), and reduce that report into the per-rep
+    phase breakdown -- the timing kwargs of a :class:`PerfResult`.
+
+    ``csdfg`` is finalized here, so the caller must not run or finalize it again.
+    """
+    n_invocations = prior_invocations + n_warmup + n_reps
+    initial_args = make_call_args(sdfg, experiment, rng, noise)
+    args = _copy_args(initial_args)
+    for _ in range(n_warmup):
+        _reset_arrays(args, initial_args)
+        csdfg(**args)
+    for _ in range(n_reps):
+        _reset_arrays(args, initial_args)
+        csdfg(**args)
+    csdfg.finalize()
+    return _phase_breakdown(sdfg, n_reps, n_invocations)
 
 
 def run_performance(
@@ -294,14 +346,6 @@ def run_performance(
     vectorization = resolve_vectorize_config(
         target, cfg.experiment.gpu_vectorize, cfg.experiment.gpu_vectorize_config
     )
-    # CPU: host std::chrono; GPU: CUDA events (on-device, not async-launch, time).
-    provider = (
-        dace.InstrumentationType.GPU_Events
-        if target == "gpu"
-        else dace.InstrumentationType.Timer
-    )
-    n_invocations = cfg.n_warmup + cfg.n_reps
-
     prev_each = dace.Config.get("instrumentation", "report_each_invocation")
     dace.Config.set("instrumentation", "report_each_invocation", value=False)
     prev_streams = dace.Config.get("compiler", "cuda", "max_concurrent_streams")
@@ -312,48 +356,18 @@ def run_performance(
     try:
         for pin_map in points:
             points.set_postfix_str(_fmt_pin(pin_map))
-            sdfg = fresh_sdfg(cfg.experiment)
-            apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
-            apply_target(
-                sdfg,
-                target,
-                gpu_block_size=cfg.experiment.gpu_block_size,
-                gpu_vectorize=cfg.experiment.gpu_vectorize,
-                gpu_vectorize_config=cfg.experiment.gpu_vectorize_config,
-            )
-            _distinguish(sdfg, _pin_tag(pin_map))
-            # Time every state; classified into a phase at readout.
-            for state in sdfg.all_states():
-                state.instrument = provider
+            # Time every state; each is classified into a phase at readout.
+            sdfg = build_candidate_sdfg(cfg.experiment, pin_map, instrument=True)
             csdfg = sdfg.compile()
-            sdfg.clear_instrumentation_reports()
-
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
-            initial_args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
-            args = _copy_args(initial_args)
-            runs = tqdm(
-                total=n_invocations,
-                desc="warmup",
-                unit="run",
-                leave=False,
+            breakdown = measure(
+                sdfg, csdfg, cfg.experiment, cfg.n_warmup, cfg.n_reps, rng, cfg.noise
             )
-            for _ in range(cfg.n_warmup):
-                _reset_arrays(args, initial_args)
-                csdfg(**args)
-                runs.update(1)
-            runs.set_description("reps")
-            for _ in range(cfg.n_reps):
-                _reset_arrays(args, initial_args)
-                csdfg(**args)
-                runs.update(1)
-            runs.close()
-
-            csdfg.finalize()
 
             result = PerfResult(
                 precision=dict(pin_map),
                 seed=cfg.experiment.seed,
-                **_phase_breakdown(sdfg, cfg.n_reps, n_invocations),
+                **breakdown,
             )
             results.append(result)
             if store is not None:
