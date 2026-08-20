@@ -1,3 +1,4 @@
+from __future__ import annotations
 import ast
 import warnings
 from collections import defaultdict, deque
@@ -450,6 +451,79 @@ def _cast_tasklet(
     return t
 
 
+# The join of a tasklet's floating-point input types.
+def _input_join(
+    state: dace.SDFGState,
+    node: nodes.Tasklet,
+    sdfg: dace.SDFG,
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> dace.dtypes.typeclass | None:
+    join: dace.dtypes.typeclass | None = None
+    for e in state.in_edges(node):
+        if e.dst_conn is None or e.data is None or e.data.data is None:
+            continue
+        dtype = sdfg.arrays[e.data.data].dtype
+        if not _is_fp(dtype):
+            continue
+        try:
+            join = _promote(join, dtype, rules)
+        except ValueError:
+            return None
+    return join
+
+
+# Whether storing a *join*-typed value into *out_dtype* loses precision.
+def _is_narrowing(
+    join: dace.dtypes.typeclass,
+    out_dtype: dace.dtypes.typeclass | None,
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> bool:
+    if not _is_fp(out_dtype) or _types_equal(join, out_dtype):
+        return False
+    try:
+        return not _types_equal(_promote(join, out_dtype, rules), out_dtype)
+    except ValueError:
+        return False
+
+
+# Insert explicit casts for every output edge that would otherwise narrow the join type.
+def _insert_output_narrowing_casts(
+    sdfg: dace.SDFG,
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> None:
+    for state in _states_in_order(sdfg):
+        for node in list(state.nodes()):
+            if not isinstance(node, nodes.Tasklet):
+                continue
+            join = _input_join(state, node, sdfg, rules)
+            if join is None:
+                continue
+            for e in list(state.out_edges(node)):
+                if e.src_conn is None or e.data is None or e.data.data is None:
+                    continue
+                if isinstance(node.out_connectors.get(e.src_conn), dace.dtypes.pointer):
+                    continue
+                dst = e.data.data
+                dst_dtype = sdfg.arrays[dst].dtype
+                if not _is_narrowing(join, dst_dtype, rules):
+                    continue
+
+                tmp_name, _ = sdfg.add_scalar(
+                    f"{dst}_wide", join, transient=True, find_new_name=True
+                )
+                tmp = state.add_access(tmp_name)
+                cast = _cast_tasklet(
+                    state, f"cast_{tmp_name}_to_{dst}", join, dst_dtype
+                )
+                state.remove_edge(e)
+                node.out_connectors[e.src_conn] = join
+                state.add_edge(node, e.src_conn, tmp, None, dace.Memlet(data=tmp_name))
+                state.add_edge(tmp, None, cast, "_in", dace.Memlet(data=tmp_name))
+                state.add_edge(
+                    cast, "_out", e.dst, e.dst_conn, dace.Memlet.from_memlet(e.data)
+                )
+
+
 # Inserts a cast wherever an edge connects two differently-typed containers:
 # map-boundary copies (AccessNode <-> MapExit/MapEntry) get a scalar cast
 # tasklet spliced into the enclosing map's iteration; direct
@@ -855,8 +929,7 @@ def change_and_propagate_fp_types(
                 sd.arrays[name].dtype = dtype
 
         _apply_connector_types(sd, level_inferred)
-
-        # Add casts on every edge that now connects two different dtypes.
+        _insert_output_narrowing_casts(sd, rules)
         _insert_edge_casts(sd)
 
     # Preserve the external interface: non-transient arrays of the *root* SDFG

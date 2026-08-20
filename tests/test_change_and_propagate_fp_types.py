@@ -1202,6 +1202,98 @@ def test_shared_nested_sdfg_rejected():
         change_and_propagate_fp_types(outer, {"a": dace.float32})
 
 
+def _doubling_maps(names, n=8, dtype=dace.float64):
+    """A chain of one-map states, each ``dst[i] = src[i] * 2.0``, over *names*.
+
+    The first and last array are non-transient, the rest transient.
+    """
+    sdfg = dace.SDFG("doubling")
+    for i, name in enumerate(names):
+        sdfg.add_array(name, [n], dtype, transient=0 < i < len(names) - 1)
+    prev_state = None
+    for src, dst in zip(names, names[1:]):
+        st = sdfg.add_state(f"s_{src}_{dst}")
+        if prev_state is not None:
+            sdfg.add_edge(prev_state, st, dace.InterstateEdge())
+        prev_state = st
+        me, mx = st.add_map("m", {"i": f"0:{n}"})
+        t = st.add_tasklet("t", {"x"}, {"y"}, "y = x * 2.0")
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        mx.add_in_connector(f"IN_{dst}")
+        mx.add_out_connector(f"OUT_{dst}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+        st.add_edge(me, f"OUT_{src}", t, "x", dace.Memlet(f"{src}[i]"))
+        st.add_edge(t, "y", mx, f"IN_{dst}", dace.Memlet(f"{dst}[i]"))
+        st.add_edge(
+            mx, f"OUT_{dst}", st.add_write(dst), None, dace.Memlet(f"{dst}[0:{n}]")
+        )
+    return sdfg
+
+
+def test_narrowing_write_becomes_an_explicit_cast():
+    """A tasklet that computes in f64 but stores into an f32 array keeps the
+    narrowing in a cast tasklet of its own, not inside the body."""
+    import numpy as np
+    from dace.sdfg import nodes
+
+    n = 8
+    sdfg = _doubling_maps(["A", "B", "C"], n=n)
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
+    sdfg.validate()
+
+    # The body now writes an f64 transient; a cast tasklet stores it into B.
+    assert sdfg.arrays["B"].dtype == dace.float32
+    assert "B_wide" in sdfg.arrays, sorted(sdfg.arrays)
+    assert sdfg.arrays["B_wide"].dtype == dace.float64
+    assert sdfg.arrays["B_wide"].transient
+
+    tasklets = [(s, n_) for s in sdfg.all_states() for n_ in s.nodes()
+                if isinstance(n_, nodes.Tasklet)]
+    bodies = [n_ for s, n_ in tasklets
+              if any(e.data.data == "B_wide" for e in s.out_edges(n_))]
+    assert len(bodies) == 1, [n_.label for n_ in bodies]
+    assert bodies[0].out_connectors["y"] == dace.float64
+
+    casts = [n_ for _, n_ in tasklets if n_.label == "cast_B_wide_to_B"]
+    assert len(casts) == 1, [n_.label for _, n_ in tasklets]
+    assert "float32" in casts[0].code.as_string, casts[0].code.as_string
+
+    # Rounding happens exactly where it did before: once, on the store into B.
+    A = np.arange(1, n + 1, dtype=np.float64) / 3.0
+    C = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, C=C)
+    b_ref = (A * 2.0).astype(np.float32)
+    c_ref = (b_ref.astype(np.float64) * 2.0).astype(np.float32)
+    np.testing.assert_array_equal(C, c_ref.astype(np.float64))
+
+
+def test_widening_write_is_left_alone():
+    """A pin *above* the computation's precision needs no cast node: storing an
+    f16 result into an f64 array is a widening the backend does implicitly."""
+    sdfg = _doubling_maps(["A", "B"])
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16, "B": dace.float64})
+    sdfg.validate()
+
+    assert not [name for name in sdfg.arrays if name.endswith("_wide")], (
+        f"no cast transient expected for a widening store: {sorted(sdfg.arrays)}"
+    )
+
+
+def test_narrowing_write_survives_gpu_vectorization():
+    """Regression (heat3d 'overrides' search): DaCe's GPU vectorizer turns a
+    tasklet into a typed tile op, whose operands may only widen to the output
+    dtype. An implicit narrowing inside the body fails its validation."""
+    from fp_arena.experiment.retarget import apply_target
+
+    sdfg = _doubling_maps(["A", "B", "C"])
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
+    apply_target(sdfg, "gpu", gpu_block_size=(256, 1, 1), gpu_vectorize=True)
+    sdfg.validate()
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -1238,4 +1330,7 @@ if __name__ == "__main__":
     test_nested_two_levels()
     test_nested_constant_type_reaches_inner_tasklets()
     test_shared_nested_sdfg_rejected()
+    test_narrowing_write_becomes_an_explicit_cast()
+    test_widening_write_is_left_alone()
+    test_narrowing_write_survives_gpu_vectorization()
     print("All tests passed.")
