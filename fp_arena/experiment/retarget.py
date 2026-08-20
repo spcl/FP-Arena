@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 
 import dace
+from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
 from dace.transformation.passes.vectorization.config import VectorizeConfig
 from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
@@ -131,6 +132,23 @@ def resolve_vectorize_config(
     return gpu_vectorize_config or DEFAULT_GPU_VECTORIZE_CONFIG
 
 
+def _set_gpu_block_size(sdfg: dace.SDFG, gpu_block_size: list[int]) -> None:
+    """
+    Set ``gpu_block_size`` on every GPU kernel map of ``sdfg``.
+    """
+
+    InsertExplicitCopies().apply_pass(sdfg, {})
+    sdfg.expand_library_nodes(recursive=True)
+
+    # Recursive: expansion puts the copy kernel inside a nested SDFG.
+    for node, _ in sdfg.all_nodes_recursive():
+        if (
+            isinstance(node, dace.nodes.MapEntry)
+            and node.map.schedule == dace.dtypes.ScheduleType.GPU_Device
+        ):
+            node.map.gpu_block_size = list(gpu_block_size)
+
+
 def apply_target(
     sdfg: dace.SDFG,
     target: str,
@@ -153,12 +171,6 @@ def apply_target(
         if config is not None:
             VectorizeGPU(config).apply_pass(sdfg, {})
         if gpu_block_size is not None:
-            for state in sdfg.all_states():
-                for node in state.nodes():
-                    if (
-                        isinstance(node, dace.nodes.MapEntry)
-                        and node.map.schedule == dace.dtypes.ScheduleType.GPU_Device
-                    ):
-                        node.map.gpu_block_size = list(gpu_block_size)
+            _set_gpu_block_size(sdfg, gpu_block_size)
         return
     raise ValueError(f"Unknown target {target!r}; expected 'cpu' or 'gpu'")
