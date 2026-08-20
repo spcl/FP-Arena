@@ -9,6 +9,7 @@ Drivers that execute the experiment kinds.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import uuid
 from typing import Any
@@ -241,9 +242,19 @@ def _output_arrays(sdfg: dace.SDFG) -> list[str]:
     )
 
 
+#: Length past which a pin tag becomes a hash.
+_TAG_BUDGET = 120
+
+
 def _pin_tag(pin_map: PrecisionMap) -> str:
     """Identifier-safe tag naming a precision point's build folder."""
-    return "_".join(f"{k}_{v}" for k, v in sorted(pin_map.items())) or "baseline"
+
+    if not pin_map:
+        return "baseline"
+    tag = "_".join(f"{k}_{v}" for k, v in sorted(pin_map.items()))
+    if len(tag) > _TAG_BUDGET:
+        tag = f"pins_{hashlib.blake2b(tag.encode(), digest_size=6).hexdigest()}"
+    return tag
 
 
 def _distinguish(sdfg: dace.SDFG, tag: str) -> None:
