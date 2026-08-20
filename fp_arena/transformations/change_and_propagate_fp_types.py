@@ -441,8 +441,8 @@ def _cast_tasklet(
 
     t = state.add_tasklet(
         name=name,
-        inputs={"_in"},
-        outputs={"_out"},
+        inputs={"_in": in_dtype},
+        outputs={"_out": out_dtype},
         code=f"_out = dace.{out_dtype.to_string()}(_in)",
         language=dace.Language.Python,
     )
