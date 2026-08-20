@@ -1246,18 +1246,18 @@ def test_narrowing_write_becomes_an_explicit_cast():
 
     # The body now writes an f64 transient; a cast tasklet stores it into B.
     assert sdfg.arrays["B"].dtype == dace.float32
-    assert "B_wide" in sdfg.arrays, sorted(sdfg.arrays)
-    assert sdfg.arrays["B_wide"].dtype == dace.float64
-    assert sdfg.arrays["B_wide"].transient
+    assert "B_at_float64" in sdfg.arrays, sorted(sdfg.arrays)
+    assert sdfg.arrays["B_at_float64"].dtype == dace.float64
+    assert sdfg.arrays["B_at_float64"].transient
 
     tasklets = [(s, n_) for s in sdfg.all_states() for n_ in s.nodes()
                 if isinstance(n_, nodes.Tasklet)]
     bodies = [n_ for s, n_ in tasklets
-              if any(e.data.data == "B_wide" for e in s.out_edges(n_))]
+              if any(e.data.data == "B_at_float64" for e in s.out_edges(n_))]
     assert len(bodies) == 1, [n_.label for n_ in bodies]
     assert bodies[0].out_connectors["y"] == dace.float64
 
-    casts = [n_ for _, n_ in tasklets if n_.label == "cast_B_wide_to_B"]
+    casts = [n_ for _, n_ in tasklets if n_.label == "cast_B_at_float64_to_B"]
     assert len(casts) == 1, [n_.label for _, n_ in tasklets]
     assert "float32" in casts[0].code.as_string, casts[0].code.as_string
 
@@ -1270,16 +1270,58 @@ def test_narrowing_write_becomes_an_explicit_cast():
     np.testing.assert_array_equal(C, c_ref.astype(np.float64))
 
 
-def test_widening_write_is_left_alone():
-    """A pin *above* the computation's precision needs no cast node: storing an
-    f16 result into an f64 array is a widening the backend does implicitly."""
+def test_widening_write_also_becomes_an_explicit_cast():
+    """A pin *above* the computation's precision is spliced out too: the body
+    still evaluates at the join of what it reads, and the widening to the
+    destination is its own node (a tile op may not widen on the store either)."""
+    from dace.sdfg import nodes
+
     sdfg = _doubling_maps(["A", "B"])
     change_and_propagate_fp_types(sdfg, {"A": dace.float16, "B": dace.float64})
     sdfg.validate()
 
-    assert not [name for name in sdfg.arrays if name.endswith("_wide")], (
-        f"no cast transient expected for a widening store: {sorted(sdfg.arrays)}"
-    )
+    assert sdfg.arrays["B_at_float16"].dtype == dace.float16
+    bodies = [n_ for s in sdfg.all_states() for n_ in s.nodes()
+              if isinstance(n_, nodes.Tasklet) and n_.label == "t"]
+    assert len(bodies) == 1
+    assert bodies[0].out_connectors["y"] == dace.float16
+
+
+def test_mixed_operands_are_cast_to_the_join():
+    """Two arrays of different precision feeding one tasklet: the narrower
+    operand is widened by a cast node, so the body reads a single dtype."""
+    from dace.sdfg import nodes
+
+    n = 8
+    sdfg = dace.SDFG("mixed_operands")
+    for name in ("A", "B", "C"):
+        sdfg.add_array(name, [n], dace.float64, transient=False)
+
+    st = sdfg.add_state("s")
+    me, mx = st.add_map("m", {"i": f"0:{n}"})
+    t = st.add_tasklet("t", {"x", "y"}, {"z"}, "z = x + y")
+    for src in ("A", "B"):
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+    mx.add_in_connector("IN_C")
+    mx.add_out_connector("OUT_C")
+    st.add_edge(me, "OUT_A", t, "x", dace.Memlet(f"A[i]"))
+    st.add_edge(me, "OUT_B", t, "y", dace.Memlet(f"B[i]"))
+    st.add_edge(t, "z", mx, "IN_C", dace.Memlet(f"C[i]"))
+    st.add_edge(mx, "OUT_C", st.add_write("C"), None, dace.Memlet(f"C[0:{n}]"))
+
+    # A f16, B f32 -> the body computes in f32 (the join), A is cast up to it.
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16, "B": dace.float32})
+    sdfg.validate()
+
+    body = next(n_ for s in sdfg.all_states() for n_ in s.nodes()
+                if isinstance(n_, nodes.Tasklet) and n_.label == "t")
+    assert body.in_connectors["x"] == dace.float32, body.in_connectors
+    assert body.in_connectors["y"] == dace.float32, body.in_connectors
+    assert body.out_connectors["z"] == dace.float32, body.out_connectors
 
 
 def test_narrowing_write_survives_gpu_vectorization():
@@ -1331,6 +1373,7 @@ if __name__ == "__main__":
     test_nested_constant_type_reaches_inner_tasklets()
     test_shared_nested_sdfg_rejected()
     test_narrowing_write_becomes_an_explicit_cast()
-    test_widening_write_is_left_alone()
+    test_widening_write_also_becomes_an_explicit_cast()
+    test_mixed_operands_are_cast_to_the_join()
     test_narrowing_write_survives_gpu_vectorization()
     print("All tests passed.")
