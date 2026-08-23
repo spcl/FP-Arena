@@ -9,7 +9,8 @@ Flow:
 2. Seed a per-input candidate for each safe input (based on perturbation) plus one combined candidate.
 3. Prioritise by benefit (big, low-sensitivity arrays lowered first) defined by the scoring function.
 4. Evaluate: error-check each candidate; infeasible prunes its down-set,
-   feasible is timed and expands its one-step-lower neighbours.
+   feasible is timed and expands its one-step-lower neighbours. A candidate that
+   fails to build is recorded in ``SearchResult.failures`` and skipped.
 5. Return the fastest measured feasible config.
 """
 
@@ -20,10 +21,13 @@ import heapq
 import itertools
 import multiprocessing as mp
 import os
+import warnings
 from dataclasses import dataclass, field
 
 import dace
 import numpy as np
+from dace.codegen.exceptions import CodegenError, CompilationError
+from dace.sdfg.validation import InvalidSDFGError
 
 from fp_arena.experiment.config import (
     OBJECTIVES,
@@ -44,6 +48,7 @@ from fp_arena.experiment.results import (
     ErrorStats,
     PerfResult,
     SearchCandidate,
+    SearchFailure,
     SearchResult,
 )
 from fp_arena.experiment.retarget import resolve_vectorize_config
@@ -211,6 +216,15 @@ def _eval_task(
     return _WORKER["slot"].evaluate(pin_map)
 
 
+#: Exceptions that condemn one config, not the search. The config is recorded and skipped.
+_CONFIG_FAILURES = (CompilationError, CodegenError, InvalidSDFGError)
+
+
+def _failure_text(exc: BaseException) -> str:
+    """The exception's type and its message"""
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _array_sizes(experiment: ExperimentConfig, names: list[str]) -> dict[str, int]:
     """Element count of each knob's array (1 for constants / unknown)."""
     sizes: dict[str, int] = {}
@@ -327,6 +341,8 @@ def run_search(
         CanonicalKey, dict[str, ErrorStats]
     ] = {}  # dedup across pin-maps
     perf_cache: dict[CanonicalKey, PerfResult] = {}
+    failed_keys: set[CanonicalKey] = set()  # never recompile a config that failed
+    failures: list[SearchFailure] = []
     eval_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
@@ -449,6 +465,8 @@ def run_search(
                 if key in errors_cache:
                     integrate(config, key, errors_cache[key], None)
                     continue
+                if key in failed_keys:  # same program, same build failure
+                    continue
                 stats["evaluated"] += 1
                 eval_futs[pool.submit(_eval_task, pin_map(config))] = (config, key)
 
@@ -457,7 +475,19 @@ def run_search(
             done, _ = cf.wait(list(eval_futs), return_when=cf.FIRST_COMPLETED)
             for fut in done:
                 config, key = eval_futs.pop(fut)
-                errors, perf = fut.result()
+                try:
+                    errors, perf = fut.result()
+                except _CONFIG_FAILURES as exc:
+                    # This config never became a program, so it is neither feasible nor infeasible.
+                    text = _failure_text(exc)
+                    failed_keys.add(key)
+                    failures.append(SearchFailure(pin_map(config), text))
+                    warnings.warn(
+                        f"Skipping config {pin_map(config)}: it failed to "
+                        f"build.\n{text}",
+                        stacklevel=2,
+                    )
+                    continue
                 errors_cache[key] = errors
                 integrate(config, key, errors, perf)
     finally:
@@ -474,6 +504,7 @@ def run_search(
         n_pruned=stats["pruned"],
         n_timed=stats["timed"],
         candidates=sorted(candidates, key=lambda c: c.objective_ms),
+        failures=failures,
     )
     return _finish(result, cfg, exp, store)
 
@@ -499,16 +530,14 @@ def _finish(
     return result
 
 
-def format_search(
-    result: SearchResult, name: str | None = None, max_rows: int | None = 10
-) -> str:
+def format_search(result: SearchResult, name: str | None = None) -> str:
     """A short human-readable summary of a search."""
     head = f"=== search: {name} ===" if name else "=== search ==="
     out = [head]
     out.append(
         f"knobs={len(result.knobs)}  evaluated={result.n_evaluated}  "
         f"pruned={result.n_pruned}  timed={result.n_timed}  "
-        f"objective={result.objective}"
+        f"failed={len(result.failures)}  objective={result.objective}"
     )
     if result.unsatisfiable:
         out.append(
@@ -527,14 +556,19 @@ def format_search(
     out.append(f"  {result.best_ms:.4g} ms {result.objective}{speed}")
 
     if result.candidates:
-        shown = result.candidates if max_rows is None else result.candidates[:max_rows]
         out.append("")
         out.append("--- measured feasible (fastest first) ---")
-        for c in shown:
+        for c in result.candidates:
             pins = (
                 " ".join(f"{k}={v}" for k, v in sorted(c.precision.items())) or "(root)"
             )
             out.append(f"  {c.objective_ms:>10.4g} ms  {c.speedup:>5.2f}x  {pins}")
-        if len(shown) < len(result.candidates):
-            out.append(f"  ... {len(result.candidates) - len(shown)} more")
+
+    if result.failures:
+        out.append("")
+        out.append(f"--- failed to build ({len(result.failures)}), skipped ---")
+        for f in result.failures:
+            pins = " ".join(f"{k}={v}" for k, v in sorted(f.precision.items()))
+            out.append(f"  {pins or '(root)'}")
+            out.extend(f"    {line}" for line in f.error.splitlines())
     return "\n".join(out)

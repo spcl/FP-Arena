@@ -243,6 +243,16 @@ class SearchCandidate:
 
 
 @dataclass
+class SearchFailure:
+    """One config the search could not evaluate because it failed to build."""
+
+    #: The lowered pins of the config that failed.
+    precision: PrecisionMap
+    #: The exception's type and message.
+    error: str
+
+
+@dataclass
 class SearchResult:
     """The outcome of a selection search (``fp_arena.experiment.search``)."""
 
@@ -264,6 +274,8 @@ class SearchResult:
     candidates: list[SearchCandidate] = field(default_factory=list)
     #: Set when even the all-highest root was over budget.
     unsatisfiable: bool = False
+    #: Configs that failed to build and were skipped.
+    failures: list[SearchFailure] = field(default_factory=list)
 
     @property
     def precision(self) -> PrecisionMap:

@@ -1,8 +1,11 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """Tests for the selection search (knobs, canonical typing, run_search)."""
 
+import concurrent.futures as cf
+
 import dace
 import pytest
+from dace.codegen.exceptions import CompilationError
 
 import fp_arena  # noqa: F401
 from fp_arena.experiment import (
@@ -14,8 +17,10 @@ from fp_arena.experiment import (
     SelectionSearchConfig,
     find_knobs,
     run_search,
+    search,
 )
 from fp_arena.experiment.knobs import canonical_typing
+from fp_arena.experiment.search import format_search
 
 N = dace.symbol("N")
 
@@ -185,6 +190,81 @@ def test_search_records_candidates_and_persists(tmp_path):
         assert len(rows[0].payload["candidates"]) == len(result.candidates)
     finally:
         store.close()
+
+
+class _InlinePool:
+    """A drop-in ``ProcessPoolExecutor`` that runs every task in this process."""
+
+    def __init__(self, max_workers, mp_context=None, initializer=None, initargs=()):
+        if initializer is not None:
+            initializer(*initargs)
+
+    def submit(self, fn, *args, **kwargs):
+        fut = cf.Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001
+            fut.set_exception(exc)
+        return fut
+
+    def shutdown(self, wait=True):
+        pass
+
+
+def test_search_skips_configs_that_fail_to_build(monkeypatch):
+    """A config DaCe cannot compile is recorded and skipped, not fatal."""
+    log = 'Compiler failure:\nerror: no instance of function template "ITE"'
+    original = search._Slot.evaluate
+
+    def _evaluate(self, pin_map):
+        if pin_map.get("a") == "fp32":
+            raise CompilationError(log)
+        return original(self, pin_map)
+
+    monkeypatch.setattr(search._Slot, "evaluate", _evaluate)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+
+    result = run_search(
+        SelectionSearchConfig(
+            experiment=_experiment(_AXPY),
+            budget=ErrorBudget(limits={"rel_max": 1e-10}),  # only the root passes
+            reference="fp64",
+            n_samples=1,
+            n_warmup=1,
+            n_reps=2,
+        )
+    )
+
+    # The search survived and still returned the root as the best config.
+    highest = {k.name: k.highest for k in result.knobs}
+    assert result.best == highest
+    # The failing config is recorded, with the whole compiler log kept verbatim.
+    assert [f.precision for f in result.failures] == [{"a": "fp32"}]
+    assert result.failures[0].error == f"CompilationError: {log}"
+    printed = format_search(result)  # indented, but every line is there
+    assert all(line in printed for line in log.splitlines())
+    assert "failed=1" in printed
+
+
+def test_search_build_failure_of_the_root_is_fatal(monkeypatch):
+    """Without the root there is no baseline, so its build failure propagates."""
+
+    def _evaluate(self, pin_map):
+        raise CompilationError("boom")
+
+    monkeypatch.setattr(search._Slot, "evaluate", _evaluate)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+
+    with pytest.raises(CompilationError, match="boom"):
+        run_search(
+            SelectionSearchConfig(
+                experiment=_experiment(_AXPY),
+                budget=ErrorBudget(limits={"rel_max": 1e-10}),
+                n_samples=1,
+                n_warmup=1,
+                n_reps=2,
+            )
+        )
 
 
 def test_search_no_knobs_raises():
