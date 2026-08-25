@@ -86,10 +86,14 @@ class SelectionSearchConfig:
     :param objective: the timing phase to minimise, one of :data:`OBJECTIVES`.
     :param compute_budget: max distinct programs to compile; ``None`` runs to
         exhaustion.
-    :param n_workers: number of unpinned worker processes when ``devices`` is
-        ``None`` (CPU / testing); ignored when ``devices`` is given.
-    :param devices: GPU ids to pin workers to via ``CUDA_VISIBLE_DEVICES`` -- one
-        worker per id, each owning its device exclusively.
+    :param measure_workers: number of unpinned *measurement* worker processes when
+        ``devices`` is ``None`` (CPU / testing); ignored when ``devices`` is given.
+    :param devices: GPU ids to pin measurement workers to via
+        ``CUDA_VISIBLE_DEVICES`` -- one worker per id, each owning its device
+        exclusively.
+    :param compile_workers: size of the unpinned compile pool that builds and
+        compiles candidates ahead of the measurement workers. ``None`` uses
+        ``os.cpu_count() - <measurement workers>``.
     :param name: database/report name; defaults to the experiment's.
 
     """
@@ -105,8 +109,9 @@ class SelectionSearchConfig:
     n_reps: int = 10
     objective: str = "total"
     compute_budget: int | None = None
-    n_workers: int = 1
+    measure_workers: int = 1
     devices: list[int] | None = None
+    compile_workers: int | None = None
     name: str | None = None
 
     def __post_init__(self) -> None:
@@ -149,13 +154,13 @@ class _Slot:
             self._samples.append((args, {n: ref_args[n] for n in self.outputs}))
         ref.finalize()
 
-    def evaluate(
-        self, pin_map: PrecisionMap
+    def grade_and_time(
+        self, sdfg: dace.SDFG, pin_map: PrecisionMap
     ) -> tuple[dict[str, ErrorStats], PerfResult | None]:
         """
-        Grade ``pin_map`` against the reference and, when it meets the numeric limits, time it.
+        Grade an already-built, already-compiled ``sdfg`` against the reference
+        and, when it meets the numeric limits, time it.
         """
-        sdfg = build_candidate_sdfg(self.experiment, pin_map, instrument=True)
         csdfg = sdfg.compile()
         accs = {name: _new_acc() for name in self.outputs}
         for args, ref_out in self._samples:
@@ -190,6 +195,16 @@ class _Slot:
 _WORKER: dict = {}
 
 
+def _worker_dace_config(experiment: ExperimentConfig) -> None:
+    """Config shared by both pools. ``use_cache`` lets a measurement worker
+    reload a compile worker's ``.so`` instead of rebuilding it; the CUDA stream
+    setting affects codegen, so it must match on the pool that generates code."""
+    dace.Config.set("compiler", "use_cache", value=True)
+    dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    if experiment.target == "gpu":
+        dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
+
+
 def _init_slot(
     experiment: ExperimentConfig,
     reference: str | dict[str, str],
@@ -204,16 +219,29 @@ def _init_slot(
     device = device_queue.get()
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
-    dace.Config.set("instrumentation", "report_each_invocation", value=False)
-    if experiment.target == "gpu":
-        dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
+    _worker_dace_config(experiment)
     _WORKER["slot"] = _Slot(experiment, reference, n_samples, limits, n_warmup, n_reps)
 
 
-def _eval_task(
+def _init_compiler(experiment: ExperimentConfig) -> None:
+    _worker_dace_config(experiment)
+    _WORKER["experiment"] = experiment
+
+
+def _compile_task(pin_map: PrecisionMap) -> dace.SDFG:
+    """Build and compile one candidate SDFG"""
+    exp = _WORKER["experiment"]
+    sdfg = build_candidate_sdfg(exp, pin_map, instrument=True)
+    sdfg.build_folder = os.path.abspath(sdfg.build_folder)
+    sdfg.compile()
+    return sdfg
+
+
+def _grade_task(
+    sdfg: dace.SDFG,
     pin_map: PrecisionMap,
 ) -> tuple[dict[str, ErrorStats], PerfResult | None]:
-    return _WORKER["slot"].evaluate(pin_map)
+    return _WORKER["slot"].grade_and_time(sdfg, pin_map)
 
 
 #: Exceptions that condemn one config, not the search. The config is recorded and skipped.
@@ -331,11 +359,15 @@ def run_search(
             push(nb)
 
     ctx = mp.get_context("spawn")
-    # One worker per device (each pinned + exclusive); with no devices, n_workers
-    # unpinned CPU slots. Compile, error grade, and timing of a config all run on
-    # the one slot that owns it.
-    devices = cfg.devices if cfg.devices else [None] * max(1, cfg.n_workers)
+    # Measurement slots: one per device (each pinned + exclusive);
+    # Compilation is split off onto a separate, larger pool of unpinned workers
+    devices = cfg.devices if cfg.devices else [None] * max(1, cfg.measure_workers)
     n_slots = len(devices)
+    n_compilers = (
+        max(1, cfg.compile_workers)
+        if cfg.compile_workers is not None
+        else max(1, (os.cpu_count() or 1) - n_slots)
+    )
 
     errors_cache: dict[
         CanonicalKey, dict[str, ErrorStats]
@@ -343,7 +375,11 @@ def run_search(
     perf_cache: dict[CanonicalKey, PerfResult] = {}
     failed_keys: set[CanonicalKey] = set()  # never recompile a config that failed
     failures: list[SearchFailure] = []
-    eval_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
+    # Two-stage pipeline: configs compile on the compile pool, land in ``ready``,
+    # then go to a measurement slot as one frees.
+    compile_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
+    ready: list[tuple[Config, CanonicalKey, dace.SDFG]] = []
+    grade_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
     candidates: list[SearchCandidate] = []
@@ -381,11 +417,17 @@ def run_search(
         else:
             infeasible.append(vec(config))
 
-    # Each worker pops one device id from the queue at init and pins to it.
+    # Each measurement worker pops one device id from the queue at init and pins to it.
     device_queue = ctx.Queue()
     for device in devices:
         device_queue.put(device)
-    pool = cf.ProcessPoolExecutor(
+    compile_pool = cf.ProcessPoolExecutor(
+        n_compilers,
+        mp_context=ctx,
+        initializer=_init_compiler,
+        initargs=(exp,),
+    )
+    grade_pool = cf.ProcessPoolExecutor(
         n_slots,
         mp_context=ctx,
         initializer=_init_slot,
@@ -405,7 +447,10 @@ def run_search(
         visited.add(vec(root))
         root_key = key_of(root)
         stats["evaluated"] += 1
-        root_errors, root_perf = pool.submit(_eval_task, pin_map(root)).result()
+        root_sdfg = compile_pool.submit(_compile_task, pin_map(root)).result()
+        root_errors, root_perf = grade_pool.submit(
+            _grade_task, root_sdfg, pin_map(root)
+        ).result()
         errors_cache[root_key] = root_errors
         if not _feasible(root_errors, limits, cfg.budget):
             return _finish(
@@ -448,9 +493,9 @@ def run_search(
         expand(root)
 
         budget_hit = False
-        while (heap and not budget_hit) or eval_futs:
-            # Keep up to n_slots compile+error+timing tasks in flight.
-            while heap and not budget_hit and len(eval_futs) < n_slots:
+        while (heap and not budget_hit) or compile_futs or ready or grade_futs:
+            # Feed the compile pool from the heap. Dedup hits and build failures are resolved here
+            while heap and not budget_hit and len(compile_futs) < n_compilers:
                 if (
                     cfg.compute_budget is not None
                     and stats["evaluated"] >= cfg.compute_budget
@@ -468,30 +513,52 @@ def run_search(
                 if key in failed_keys:  # same program, same build failure
                     continue
                 stats["evaluated"] += 1
-                eval_futs[pool.submit(_eval_task, pin_map(config))] = (config, key)
+                compile_futs[compile_pool.submit(_compile_task, pin_map(config))] = (
+                    config,
+                    key,
+                )
 
-            if not eval_futs:
-                break
-            done, _ = cf.wait(list(eval_futs), return_when=cf.FIRST_COMPLETED)
-            for fut in done:
-                config, key = eval_futs.pop(fut)
-                try:
-                    errors, perf = fut.result()
-                except _CONFIG_FAILURES as exc:
-                    # This config never became a program, so it is neither feasible nor infeasible.
-                    text = _failure_text(exc)
-                    failed_keys.add(key)
-                    failures.append(SearchFailure(pin_map(config), text))
-                    warnings.warn(
-                        f"Skipping config {pin_map(config)}: it failed to "
-                        f"build.\n{text}",
-                        stacklevel=2,
-                    )
+            # Hand compiled candidates to free measurement slots, re-checking
+            # domination: results that landed while a config was building may
+            # have pruned it, sparing its measurement.
+            while ready and len(grade_futs) < n_slots:
+                config, key, sdfg = ready.pop(0)
+                if dominated(config):
+                    stats["pruned"] += 1
                     continue
+                grade_futs[grade_pool.submit(_grade_task, sdfg, pin_map(config))] = (
+                    config,
+                    key,
+                )
+
+            if not compile_futs and not grade_futs:
+                break
+            done, _ = cf.wait(
+                list(compile_futs) + list(grade_futs), return_when=cf.FIRST_COMPLETED
+            )
+            for fut in done:
+                if fut in compile_futs:
+                    config, key = compile_futs.pop(fut)
+                    try:
+                        ready.append((config, key, fut.result()))
+                    except _CONFIG_FAILURES as exc:
+                        # Never became a program: neither feasible nor infeasible.
+                        text = _failure_text(exc)
+                        failed_keys.add(key)
+                        failures.append(SearchFailure(pin_map(config), text))
+                        warnings.warn(
+                            f"Skipping config {pin_map(config)}: it failed to "
+                            f"build.\n{text}",
+                            stacklevel=2,
+                        )
+                    continue
+                config, key = grade_futs.pop(fut)
+                errors, perf = fut.result()
                 errors_cache[key] = errors
                 integrate(config, key, errors, perf)
     finally:
-        pool.shutdown(wait=True)
+        compile_pool.shutdown(wait=True)
+        grade_pool.shutdown(wait=True)
 
     result = SearchResult(
         best=best[0],

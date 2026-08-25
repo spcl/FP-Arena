@@ -45,6 +45,12 @@ def _experiment(sdfg, name="prog", n=64, **inputs):
     return ExperimentConfig(name=name, program=sdfg, symbols={"N": n}, inputs=inputs)
 
 
+@pytest.fixture(autouse=True)
+def _small_compile_pool(monkeypatch):
+    """Keep real-process tests from spawning one compile worker per CPU core."""
+    monkeypatch.setattr(search.os, "cpu_count", lambda: 2)
+
+
 # --------------------------------------------------------------------------- knobs
 
 
@@ -144,7 +150,7 @@ def test_search_reports_unsatisfiable_when_root_fails():
 
 
 def test_search_worker_count_does_not_change_result():
-    """The result is independent of n_workers (1 pool worker vs several)."""
+    """The result is independent of measure_workers (1 pool worker vs several)."""
     exp = _experiment(_AXPY)
     budget = ErrorBudget(limits={"rel_max": 1e-10})  # only fp64 passes
     kw = {
@@ -156,8 +162,8 @@ def test_search_worker_count_does_not_change_result():
         "n_reps": 2,
         "objective": "total",
     }
-    one = run_search(SelectionSearchConfig(n_workers=1, **kw))
-    many = run_search(SelectionSearchConfig(n_workers=4, **kw))
+    one = run_search(SelectionSearchConfig(measure_workers=1, **kw))
+    many = run_search(SelectionSearchConfig(measure_workers=4, **kw))
     assert not many.unsatisfiable
     assert many.best == one.best  # nothing lowered, both
     assert many.n_pruned == one.n_pruned
@@ -214,14 +220,14 @@ class _InlinePool:
 def test_search_skips_configs_that_fail_to_build(monkeypatch):
     """A config DaCe cannot compile is recorded and skipped, not fatal."""
     log = 'Compiler failure:\nerror: no instance of function template "ITE"'
-    original = search._Slot.evaluate
+    original = search._compile_task
 
-    def _evaluate(self, pin_map):
+    def _compile(pin_map):
         if pin_map.get("a") == "fp32":
             raise CompilationError(log)
-        return original(self, pin_map)
+        return original(pin_map)
 
-    monkeypatch.setattr(search._Slot, "evaluate", _evaluate)
+    monkeypatch.setattr(search, "_compile_task", _compile)
     monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
 
     result = run_search(
@@ -249,10 +255,10 @@ def test_search_skips_configs_that_fail_to_build(monkeypatch):
 def test_search_build_failure_of_the_root_is_fatal(monkeypatch):
     """Without the root there is no baseline, so its build failure propagates."""
 
-    def _evaluate(self, pin_map):
+    def _compile(pin_map):
         raise CompilationError("boom")
 
-    monkeypatch.setattr(search._Slot, "evaluate", _evaluate)
+    monkeypatch.setattr(search, "_compile_task", _compile)
     monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
 
     with pytest.raises(CompilationError, match="boom"):
