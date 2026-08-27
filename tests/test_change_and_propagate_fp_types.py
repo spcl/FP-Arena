@@ -180,6 +180,72 @@ def test_map_passthrough():
     sdfg.compile()
 
 
+def _conditional_write_sdfg(n=8, dtype=dace.float64):
+    """
+    ``B[i] = 3*A[i] where A[i] < 0.5``, in the shape the DaCe frontend lowers a
+    boolean-masked assignment (``B[I] = ...``) to: the tasklet performs the
+    write itself, so its output memlet is dynamic.
+    """
+    sdfg = dace.SDFG("cond_write")
+    sdfg.add_array("A", [n], dtype, transient=False)
+    sdfg.add_array("B", [n], dtype, transient=False)
+
+    s = sdfg.add_state("s")
+    me, mx = s.add_map("m", {"i": f"0:{n}"})
+    t = s.add_tasklet("cond", {"a"}, {"b"}, "if a < 0.5:\n    b = 3.0 * a")
+    me.add_in_connector("IN_A")
+    me.add_out_connector("OUT_A")
+    mx.add_in_connector("IN_B")
+    mx.add_out_connector("OUT_B")
+
+    s.add_edge(s.add_read("A"), None, me, "IN_A", dace.Memlet(f"A[0:{n}]"))
+    s.add_edge(me, "OUT_A", t, "a", dace.Memlet("A[i]"))
+    s.add_edge(t, "b", mx, "IN_B", dace.Memlet("B[i]", dynamic=True))
+    s.add_edge(mx, "OUT_B", s.add_write("B"), None, dace.Memlet(f"B[0:{n}]"))
+    return sdfg
+
+
+def test_conditional_write_connector_stays_a_pointer():
+    """
+    A dynamic output memlet means the tasklet writes the container itself, so
+    codegen emits no copy-out; the connector must stay a pointer or the write
+    is silently dropped.
+    """
+    sdfg = _conditional_write_sdfg()
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32})
+
+    tasklet = next(
+        n
+        for s in sdfg.all_states()
+        for n in s.nodes()
+        if isinstance(n, dace.nodes.Tasklet) and n.label == "cond"
+    )
+    assert isinstance(tasklet.out_connectors["b"], dace.dtypes.pointer), (
+        tasklet.out_connectors["b"]
+    )
+    assert tasklet.out_connectors["b"].base_type == dace.float32
+
+    sdfg.validate()
+
+
+def test_conditional_write_survives_retyping():
+    """End to end: the masked write still happens after a precision change."""
+    import numpy as np
+
+    n = 8
+    sdfg = _conditional_write_sdfg(n)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32})
+    # B is non-transient, so the fp32 computation happens on an internal
+    # transient and the fp64 interface is preserved.
+    assert sdfg.arrays["fp_casted_B_float32"].dtype == dace.float32
+    assert sdfg.arrays["B"].dtype == dace.float64
+
+    A = np.arange(n, dtype=np.float64) / (n - 1)
+    B = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, B=B)
+    np.testing.assert_allclose(B, np.where(A < 0.5, 3.0 * A, 0.0), rtol=1e-6)
+
+
 def test_reduce_node():
     """Type propagates through a Reduce library node."""
     sdfg = dace.SDFG("reduce_test")
@@ -1136,11 +1202,147 @@ def test_shared_nested_sdfg_rejected():
         change_and_propagate_fp_types(outer, {"a": dace.float32})
 
 
+def _doubling_maps(names, n=8, dtype=dace.float64):
+    """A chain of one-map states, each ``dst[i] = src[i] * 2.0``, over *names*.
+
+    The first and last array are non-transient, the rest transient.
+    """
+    sdfg = dace.SDFG("doubling")
+    for i, name in enumerate(names):
+        sdfg.add_array(name, [n], dtype, transient=0 < i < len(names) - 1)
+    prev_state = None
+    for src, dst in zip(names, names[1:]):
+        st = sdfg.add_state(f"s_{src}_{dst}")
+        if prev_state is not None:
+            sdfg.add_edge(prev_state, st, dace.InterstateEdge())
+        prev_state = st
+        me, mx = st.add_map("m", {"i": f"0:{n}"})
+        t = st.add_tasklet("t", {"x"}, {"y"}, "y = x * 2.0")
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        mx.add_in_connector(f"IN_{dst}")
+        mx.add_out_connector(f"OUT_{dst}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+        st.add_edge(me, f"OUT_{src}", t, "x", dace.Memlet(f"{src}[i]"))
+        st.add_edge(t, "y", mx, f"IN_{dst}", dace.Memlet(f"{dst}[i]"))
+        st.add_edge(
+            mx, f"OUT_{dst}", st.add_write(dst), None, dace.Memlet(f"{dst}[0:{n}]")
+        )
+    return sdfg
+
+
+def test_narrowing_write_becomes_an_explicit_cast():
+    """A tasklet that computes in f64 but stores into an f32 array keeps the
+    narrowing in a cast tasklet of its own, not inside the body."""
+    import numpy as np
+    from dace.sdfg import nodes
+
+    n = 8
+    sdfg = _doubling_maps(["A", "B", "C"], n=n)
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
+    sdfg.validate()
+
+    # The body now writes an f64 transient; a cast tasklet stores it into B.
+    assert sdfg.arrays["B"].dtype == dace.float32
+    assert "B_at_float64" in sdfg.arrays, sorted(sdfg.arrays)
+    assert sdfg.arrays["B_at_float64"].dtype == dace.float64
+    assert sdfg.arrays["B_at_float64"].transient
+
+    tasklets = [(s, n_) for s in sdfg.all_states() for n_ in s.nodes()
+                if isinstance(n_, nodes.Tasklet)]
+    bodies = [n_ for s, n_ in tasklets
+              if any(e.data.data == "B_at_float64" for e in s.out_edges(n_))]
+    assert len(bodies) == 1, [n_.label for n_ in bodies]
+    assert bodies[0].out_connectors["y"] == dace.float64
+
+    casts = [n_ for _, n_ in tasklets if n_.label == "cast_B_at_float64_to_B"]
+    assert len(casts) == 1, [n_.label for _, n_ in tasklets]
+    assert "float32" in casts[0].code.as_string, casts[0].code.as_string
+
+    # Rounding happens exactly where it did before: once, on the store into B.
+    A = np.arange(1, n + 1, dtype=np.float64) / 3.0
+    C = np.zeros(n, dtype=np.float64)
+    sdfg(A=A, C=C)
+    b_ref = (A * 2.0).astype(np.float32)
+    c_ref = (b_ref.astype(np.float64) * 2.0).astype(np.float32)
+    np.testing.assert_array_equal(C, c_ref.astype(np.float64))
+
+
+def test_widening_write_also_becomes_an_explicit_cast():
+    """A pin *above* the computation's precision is spliced out too: the body
+    still evaluates at the join of what it reads, and the widening to the
+    destination is its own node (a tile op may not widen on the store either)."""
+    from dace.sdfg import nodes
+
+    sdfg = _doubling_maps(["A", "B"])
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16, "B": dace.float64})
+    sdfg.validate()
+
+    assert sdfg.arrays["B_at_float16"].dtype == dace.float16
+    bodies = [n_ for s in sdfg.all_states() for n_ in s.nodes()
+              if isinstance(n_, nodes.Tasklet) and n_.label == "t"]
+    assert len(bodies) == 1
+    assert bodies[0].out_connectors["y"] == dace.float16
+
+
+def test_mixed_operands_are_cast_to_the_join():
+    """Two arrays of different precision feeding one tasklet: the narrower
+    operand is widened by a cast node, so the body reads a single dtype."""
+    from dace.sdfg import nodes
+
+    n = 8
+    sdfg = dace.SDFG("mixed_operands")
+    for name in ("A", "B", "C"):
+        sdfg.add_array(name, [n], dace.float64, transient=False)
+
+    st = sdfg.add_state("s")
+    me, mx = st.add_map("m", {"i": f"0:{n}"})
+    t = st.add_tasklet("t", {"x", "y"}, {"z"}, "z = x + y")
+    for src in ("A", "B"):
+        me.add_in_connector(f"IN_{src}")
+        me.add_out_connector(f"OUT_{src}")
+        st.add_edge(
+            st.add_read(src), None, me, f"IN_{src}", dace.Memlet(f"{src}[0:{n}]")
+        )
+    mx.add_in_connector("IN_C")
+    mx.add_out_connector("OUT_C")
+    st.add_edge(me, "OUT_A", t, "x", dace.Memlet(f"A[i]"))
+    st.add_edge(me, "OUT_B", t, "y", dace.Memlet(f"B[i]"))
+    st.add_edge(t, "z", mx, "IN_C", dace.Memlet(f"C[i]"))
+    st.add_edge(mx, "OUT_C", st.add_write("C"), None, dace.Memlet(f"C[0:{n}]"))
+
+    # A f16, B f32 -> the body computes in f32 (the join), A is cast up to it.
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16, "B": dace.float32})
+    sdfg.validate()
+
+    body = next(n_ for s in sdfg.all_states() for n_ in s.nodes()
+                if isinstance(n_, nodes.Tasklet) and n_.label == "t")
+    assert body.in_connectors["x"] == dace.float32, body.in_connectors
+    assert body.in_connectors["y"] == dace.float32, body.in_connectors
+    assert body.out_connectors["z"] == dace.float32, body.out_connectors
+
+
+def test_narrowing_write_survives_gpu_vectorization():
+    """Regression (heat3d 'overrides' search): DaCe's GPU vectorizer turns a
+    tasklet into a typed tile op, whose operands may only widen to the output
+    dtype. An implicit narrowing inside the body fails its validation."""
+    from fp_arena.experiment.retarget import apply_target
+
+    sdfg = _doubling_maps(["A", "B", "C"])
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
+    apply_target(sdfg, "gpu", gpu_block_size=(256, 1, 1), gpu_vectorize=True)
+    sdfg.validate()
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
     test_mixed_precision_promotes()
     test_map_passthrough()
+    test_conditional_write_connector_stays_a_pointer()
+    test_conditional_write_survives_retyping()
     test_reduce_node()
     test_initial_type_pinned()
     test_long_chain_convergence()
@@ -1170,4 +1372,8 @@ if __name__ == "__main__":
     test_nested_two_levels()
     test_nested_constant_type_reaches_inner_tasklets()
     test_shared_nested_sdfg_rejected()
+    test_narrowing_write_becomes_an_explicit_cast()
+    test_widening_write_also_becomes_an_explicit_cast()
+    test_mixed_operands_are_cast_to_the_join()
+    test_narrowing_write_survives_gpu_vectorization()
     print("All tests passed.")
