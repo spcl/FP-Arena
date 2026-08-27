@@ -66,6 +66,7 @@ from fp_arena.experiment.runner import (
 from fp_arena.experiment.screening import screen
 from fp_arena.experiment.selection import _objective_ms, check
 from fp_arena.experiment.store import ResultStore
+from fp_arena.experiment.timers import insert_timers, timer_categories
 
 
 @dataclass
@@ -172,19 +173,19 @@ class _Slot:
         perf: PerfResult | None = None
         if all(c.ok for c in check(errors, self.limits)):
             rng = _sample_rngs(self.experiment.seed, 1)[0]
-            # The error samples already ran on this compiled object; the timing
-            # report accumulates them, so measure() drops all but the last reps.
+            # The error samples already ran on this compiled object; measure()
+            # resets the timer buffer up front, so only its own reps are timed.
             perf = PerfResult(
                 precision=dict(pin_map),
                 seed=self.experiment.seed,
                 **measure(
                     sdfg,
                     csdfg,
+                    timer_categories(sdfg),
                     self.experiment,
                     self.n_warmup,
                     self.n_reps,
                     rng,
-                    prior_invocations=len(self._samples),
                 ),
             )
         else:
@@ -200,7 +201,6 @@ def _worker_dace_config(experiment: ExperimentConfig) -> None:
     reload a compile worker's ``.so`` instead of rebuilding it; the CUDA stream
     setting affects codegen, so it must match on the pool that generates code."""
     dace.Config.set("compiler", "use_cache", value=True)
-    dace.Config.set("instrumentation", "report_each_invocation", value=False)
     if experiment.target == "gpu":
         dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
 
@@ -229,9 +229,10 @@ def _init_compiler(experiment: ExperimentConfig) -> None:
 
 
 def _compile_task(pin_map: PrecisionMap) -> dace.SDFG:
-    """Build and compile one candidate SDFG"""
+    """Build and compile one candidate SDFG, timers inserted."""
     exp = _WORKER["experiment"]
-    sdfg = build_candidate_sdfg(exp, pin_map, instrument=True)
+    sdfg = build_candidate_sdfg(exp, pin_map)
+    insert_timers(sdfg, exp.target)
     sdfg.build_folder = os.path.abspath(sdfg.build_folder)
     sdfg.compile()
     return sdfg

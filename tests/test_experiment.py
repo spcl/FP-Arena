@@ -34,17 +34,22 @@ from fp_arena.experiment import (
     run_selection,
 )
 from fp_arena.experiment.inputs import make_call_args
-from fp_arena.experiment.retarget import apply_target, fresh_sdfg
+from fp_arena.experiment.retarget import apply_precision, apply_target, fresh_sdfg
 from fp_arena.experiment.runner import (
     _accumulate,
     _finalize,
-    _group_per_invocation,
     _new_acc,
 )
 from fp_arena.experiment.selection import (
     check,
     noise_floor,
     resolve_limits,
+)
+from fp_arena.experiment.timers import (
+    PHASES,
+    insert_timers,
+    phase_breakdown,
+    timer_categories,
 )
 
 N = dace.symbol("N")
@@ -417,15 +422,41 @@ def test_is_mpfr():
     assert not registry.is_mpfr("fp32")
 
 
-def test_group_per_invocation():
-    # k executions per invocation are summed into one value per invocation.
-    assert _group_per_invocation([1.0, 2.0, 3.0, 4.0], 2, "t") == [3.0, 7.0]
-    # One execution per invocation passes through.
-    assert _group_per_invocation([1.0, 2.0], 2, "t") == [1.0, 2.0]
-    assert _group_per_invocation([], 2, "t") == []
-    # A data-dependent execution count cannot be attributed to reps: fail loudly.
-    with pytest.raises(ValueError, match="static per-invocation"):
-        _group_per_invocation([1.0] * 7, 11, "State s7")
+def test_phase_breakdown_reduces_and_drops_warmup():
+    # Two warmup rows are dropped; same-phase slots sum; total is per-rep sum.
+    cats = ["cast_in", "kernel", "kernel", "cast_out"]
+    buf = np.array(
+        [
+            [9.0, 9.0, 9.0, 9.0],  # warmup, dropped
+            [8.0, 8.0, 8.0, 8.0],  # warmup, dropped
+            [1.0, 2.0, 3.0, 4.0],
+            [1.5, 2.5, 3.5, 4.5],
+        ]
+    )
+    out = phase_breakdown(cats, buf, n_reps=2)
+    assert out["cast_in_times"] == [1.0, 1.5]
+    assert out["kernel_times"] == [5.0, 6.0]  # two kernel slots summed per rep
+    assert out["cast_out_times"] == [4.0, 4.5]
+    assert out["h2d_times"] == [] and out["d2h_times"] == []
+    assert out["total_times"] == [10.0, 12.0]  # sum over the phases present
+
+
+def test_phase_breakdown_empty_buffer():
+    out = phase_breakdown([], np.zeros((0, 0)), n_reps=3)
+    assert out == {"total_times": [], **{f"{p}_times": [] for p in PHASES}}
+
+
+def test_timer_categories_recovered_from_sdfg():
+    # The slot -> phase list is recoverable from the timed SDFG alone (the search
+    # relies on this across the compile/grade process boundary).
+    exp = _exp()
+    sdfg = fresh_sdfg(exp)
+    apply_precision(sdfg, {"a": "fp32", "b": "fp32", "c": "fp32"}, exp.promotion_rules)
+    apply_target(sdfg, "cpu")
+    cats = insert_timers(sdfg, "cpu")
+    assert cats and set(cats) <= set(PHASES)
+    assert "kernel" in cats and "cast_in" in cats and "cast_out" in cats
+    assert timer_categories(sdfg) == cats
 
 
 def test_overflowing_reference_yields_inf_error_not_nan():

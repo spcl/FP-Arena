@@ -103,15 +103,22 @@ _GPU_STORAGE = (
 
 def _transfer_direction(sdfg: dace.SDFG, state) -> str | None:
     """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
-    for e in state.edges():
-        src, dst = e.src, e.dst
-        if isinstance(src, dace.nodes.AccessNode) and isinstance(
-            dst, dace.nodes.AccessNode
-        ):
-            src_dev = sdfg.arrays[src.data].storage in _GPU_STORAGE
-            dst_dev = sdfg.arrays[dst.data].storage in _GPU_STORAGE
-            if src_dev != dst_dev:
-                return "h2d" if dst_dev else "d2h"
+    has_host = has_dev = dev_written = host_written = False
+    for node in state.data_nodes():
+        dev = sdfg.arrays[node.data].storage in _GPU_STORAGE
+        written = state.in_degree(node) > 0
+        if dev:
+            has_dev = True
+            dev_written = dev_written or written
+        else:
+            has_host = True
+            host_written = host_written or written
+    if not (has_host and has_dev):
+        return None
+    if dev_written and not host_written:
+        return "h2d"
+    if host_written and not dev_written:
+        return "d2h"
     return None
 
 

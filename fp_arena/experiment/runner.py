@@ -32,7 +32,6 @@ from fp_arena.experiment.results import (
     PerturbationResult,
 )
 from fp_arena.experiment.retarget import (
-    _transfer_direction,
     apply_precision,
     apply_reference,
     apply_target,
@@ -40,6 +39,12 @@ from fp_arena.experiment.retarget import (
     resolve_vectorize_config,
 )
 from fp_arena.experiment.store import ResultStore
+from fp_arena.experiment.timers import (
+    insert_timers,
+    phase_breakdown,
+    read_timers,
+    reset_timers,
+)
 
 
 def _copy_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -143,88 +148,6 @@ def _finalize(acc: dict[str, float]) -> ErrorStats:
     )
 
 
-def _has_cast_map(state) -> bool:
-    """Whether ``state`` contains a precision-cast map."""
-    return any(
-        isinstance(n, dace.nodes.MapEntry) and n.map.label.startswith("cast_map_")
-        for n in state.nodes()
-    )
-
-
-def _classify_state(sdfg: dace.SDFG, state) -> str:
-    """Assign ``state`` to a timing phase: h2d/d2h, cast_in/cast_out, or kernel."""
-    direction = _transfer_direction(sdfg, state)
-    if direction is not None:
-        return direction
-    if _has_cast_map(state):
-        return "cast_out" if state.label.startswith("copy_out") else "cast_in"
-    return "kernel"
-
-
-def _group_per_invocation(
-    samples: list[float], n_invocations: int, name: str
-) -> list[float]:
-    """Sum a timer's per-execution samples into one value per invocation (loop bodies fire repeatedly)."""
-    if not samples:
-        return []
-    if len(samples) % n_invocations != 0:
-        raise ValueError(
-            f"Timer {name!r} fired {len(samples)} times over {n_invocations} "
-            f"invocations; per-rep phase attribution requires a static "
-            f"per-invocation execution count"
-        )
-    k = len(samples) // n_invocations
-    if k == 1:
-        return list(samples)
-    return [math.fsum(samples[i * k : (i + 1) * k]) for i in range(n_invocations)]
-
-
-def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> list[float]:
-    """Per-rep milliseconds summed over matching timers, warmup invocations dropped."""
-    out = [0.0] * n_reps
-    matched = False
-    if report is not None:
-        for names in report.durations.values():
-            for name, tid_map in names.items():
-                if not name_pred(name):
-                    continue
-                for times_ms in tid_map.values():
-                    per_inv = _group_per_invocation(times_ms, n_invocations, name)
-                    if not per_inv:
-                        continue
-                    for i, ms in enumerate(per_inv[-n_reps:]):
-                        out[i] += ms
-                    matched = True
-    return out if matched else []
-
-
-def _phase_breakdown(
-    sdfg: dace.SDFG, n_reps: int, n_invocations: int
-) -> dict[str, Any]:
-    """Reduce the latest report into per-rep phase series; ``total`` is their sum."""
-    report = sdfg.get_latest_report()
-    # Map each state's report name -> phase category.
-    cat_of: dict[str, str] = {}
-    for state in sdfg.all_states():
-        cat_of.setdefault(f"State {state.label}", _classify_state(sdfg, state))
-
-    def series(category: str) -> list[float]:
-        return _phase_series(
-            report, lambda nm: cat_of.get(nm) == category, n_reps, n_invocations
-        )
-
-    phases = {
-        "h2d_times": series("h2d"),
-        "cast_in_times": series("cast_in"),
-        "kernel_times": series("kernel"),
-        "cast_out_times": series("cast_out"),
-        "d2h_times": series("d2h"),
-    }
-    nonempty = [p for p in phases.values() if p]
-    total = [math.fsum(col) for col in zip(*nonempty)] if nonempty else []
-    return {"total_times": total, **phases}
-
-
 def _fmt_pin(pin_map: PrecisionMap) -> str:
     """Compact one-line summary of a precision point for progress display."""
     return " ".join(f"{k}={v}" for k, v in pin_map.items())
@@ -281,15 +204,12 @@ def compile_reference(experiment, reference):
     return sdfg.compile()
 
 
-def build_candidate_sdfg(
-    experiment, pin_map: PrecisionMap, instrument: bool = False
-) -> dace.SDFG:
+def build_candidate_sdfg(experiment, pin_map: PrecisionMap) -> dace.SDFG:
     """
-    Build one precision point's SDFG: retargeted, given its own (unique) build
-    folder, and -- when ``instrument`` is set -- with every state timed.
+    Retarget one precision point into its own SDFG (unique build folder).
 
-    Returns the SDFG (not the compiled handle) so the caller can both
-    ``.compile()`` it and, after running, read its instrumentation report.
+    Returns the SDFG, not the compiled handle, so the caller can insert timers
+    (:func:`fp_arena.experiment.timers.insert_timers`) before ``.compile()``.
     """
     sdfg = fresh_sdfg(experiment)
     apply_precision(sdfg, pin_map, experiment.promotion_rules)
@@ -300,14 +220,6 @@ def build_candidate_sdfg(
         gpu_vectorize=experiment.gpu_vectorize,
         gpu_vectorize_config=experiment.gpu_vectorize_config,
     )
-    if instrument:
-        provider = (
-            dace.InstrumentationType.GPU_Events
-            if experiment.target == "gpu"
-            else dace.InstrumentationType.Timer
-        )
-        for state in sdfg.all_states():
-            state.instrument = provider
     _distinguish(sdfg, _pin_tag(pin_map))
     return sdfg
 
@@ -320,22 +232,22 @@ def compile_candidate(experiment, pin_map: PrecisionMap):
 def measure(
     sdfg: dace.SDFG,
     csdfg,
+    categories: list[str],
     experiment,
     n_warmup: int,
     n_reps: int,
     rng: np.random.Generator,
     noise: dict[str, Any] | None = None,
-    prior_invocations: int = 0,
 ) -> dict[str, Any]:
     """
-    Run ``n_warmup`` untimed then ``n_reps`` timed invocations of an already
-    compiled, state-instrumented ``sdfg``, finalize it (which flushes the
-    instrumentation report to disk), and reduce that report into the per-rep
-    phase breakdown -- the timing kwargs of a :class:`PerfResult`.
+    Run ``n_warmup`` untimed then ``n_reps`` timed invocations, then reduce the
+    timer buffer into the per-rep :class:`PerfResult` timing kwargs.
 
-    ``csdfg`` is finalized here, so the caller must not run or finalize it again.
+    The buffer is reset up front, so earlier invocations of ``csdfg`` (e.g. the
+    search's error grading) are discarded -- only the reps here are timed.
+    ``csdfg`` is finalized here; the caller must not run or finalize it again.
     """
-    n_invocations = prior_invocations + n_warmup + n_reps
+    reset_timers(csdfg)
     initial_args = make_call_args(sdfg, experiment, rng, noise)
     args = _copy_args(initial_args)
     for _ in range(n_warmup):
@@ -344,8 +256,9 @@ def measure(
     for _ in range(n_reps):
         _reset_arrays(args, initial_args)
         csdfg(**args)
+    buf = read_timers(csdfg, len(categories))
     csdfg.finalize()
-    return _phase_breakdown(sdfg, n_reps, n_invocations)
+    return phase_breakdown(categories, buf, n_reps)
 
 
 def run_performance(
@@ -357,8 +270,8 @@ def run_performance(
     vectorization = resolve_vectorize_config(
         target, cfg.experiment.gpu_vectorize, cfg.experiment.gpu_vectorize_config
     )
-    prev_each = dace.Config.get("instrumentation", "report_each_invocation")
-    dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    # All work on the default stream, so the GPU timers' per-phase syncs isolate
+    # real work rather than overlapping streams (see runtime/.../timers.h).
     prev_streams = dace.Config.get("compiler", "cuda", "max_concurrent_streams")
     if target == "gpu":
         dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
@@ -367,12 +280,19 @@ def run_performance(
     try:
         for pin_map in points:
             points.set_postfix_str(_fmt_pin(pin_map))
-            # Time every state; each is classified into a phase at readout.
-            sdfg = build_candidate_sdfg(cfg.experiment, pin_map, instrument=True)
+            sdfg = build_candidate_sdfg(cfg.experiment, pin_map)
+            categories = insert_timers(sdfg, target)
             csdfg = sdfg.compile()
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
             breakdown = measure(
-                sdfg, csdfg, cfg.experiment, cfg.n_warmup, cfg.n_reps, rng, cfg.noise
+                sdfg,
+                csdfg,
+                categories,
+                cfg.experiment,
+                cfg.n_warmup,
+                cfg.n_reps,
+                rng,
+                cfg.noise,
             )
 
             result = PerfResult(
@@ -390,7 +310,6 @@ def run_performance(
                     vectorization=vectorization,
                 )
     finally:
-        dace.Config.set("instrumentation", "report_each_invocation", value=prev_each)
         dace.Config.set(
             "compiler", "cuda", "max_concurrent_streams", value=prev_streams
         )
