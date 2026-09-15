@@ -1,6 +1,9 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 
 import dataclasses
+import logging
+import shutil
+import subprocess
 
 import dace
 import numpy as np
@@ -81,9 +84,6 @@ def _exp(**kw):
 
 def _has_gpu() -> bool:
     """Whether a runnable GPU device is present."""
-    import logging
-    import shutil
-    import subprocess
 
     logger = logging.getLogger(__name__)
 
