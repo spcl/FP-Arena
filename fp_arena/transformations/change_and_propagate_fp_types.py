@@ -1,3 +1,4 @@
+from __future__ import annotations
 import ast
 import warnings
 from collections import defaultdict, deque
@@ -375,6 +376,22 @@ def _print_type_report(
     tqdm.write("\n".join(lines))
 
 
+def _connector_type(
+    node: nodes.Node,
+    desc: dace.data.Data,
+    memlet: dace.Memlet,
+    dtype: dace.dtypes.typeclass,
+    output: bool,
+) -> dace.dtypes.typeclass:
+    scalar = bool(memlet.subset) and memlet.subset.num_elements() == 1
+    if output:
+        scalar = scalar and (not memlet.dynamic or memlet.wcr is not None)
+    scalar = scalar or isinstance(desc, dace.data.Scalar)
+    if isinstance(node, nodes.LibraryNode):
+        scalar = scalar and desc.storage is not dace.dtypes.StorageType.GPU_Global
+    return dtype if scalar else dace.dtypes.pointer(dtype)
+
+
 # Writes inferred types onto tasklet/map/library-node connectors.
 def _apply_connector_types(
     sdfg: dace.SDFG,
@@ -382,30 +399,36 @@ def _apply_connector_types(
 ) -> None:
     for state in _states_in_order(sdfg):
         for node in state.nodes():
-            if isinstance(node, (nodes.Tasklet, nodes.LibraryNode)):
-                for e in state.in_edges(node):
-                    if e.dst_conn is None or e.data is None or e.data.data is None:
-                        continue
-                    node.in_connectors[e.dst_conn] = inferred[e.data.data]
+            if not isinstance(
+                node,
+                (nodes.Tasklet, nodes.LibraryNode, nodes.EntryNode, nodes.ExitNode),
+            ):
+                continue
+            for e in state.in_edges(node):
+                if e.dst_conn is None or e.data is None or e.data.data is None:
+                    continue
+                if e.dst_conn not in node.in_connectors:
+                    continue
+                node.in_connectors[e.dst_conn] = _connector_type(
+                    node,
+                    sdfg.arrays[e.data.data],
+                    e.data,
+                    inferred[e.data.data],
+                    output=False,
+                )
 
-                for e in state.out_edges(node):
-                    if e.src_conn is None or e.data is None or e.data.data is None:
-                        continue
-                    node.out_connectors[e.src_conn] = inferred[e.data.data]
-
-            elif isinstance(node, (nodes.EntryNode, nodes.ExitNode)):
-                # MapEntry/Exit connectors follow the IN_/OUT_ convention; keep both in sync.
-                for e in state.in_edges(node):
-                    if not (e.dst_conn and e.dst_conn.startswith("IN_")):
-                        continue
-                    if e.data is None or e.data.data is None:
-                        continue
-                    t = inferred[e.data.data]
-                    out_conn = "OUT_" + e.dst_conn[3:]
-                    if e.dst_conn in node.in_connectors:
-                        node.in_connectors[e.dst_conn] = t
-                    if out_conn in node.out_connectors:
-                        node.out_connectors[out_conn] = t
+            for e in state.out_edges(node):
+                if e.src_conn is None or e.data is None or e.data.data is None:
+                    continue
+                if e.src_conn not in node.out_connectors:
+                    continue
+                node.out_connectors[e.src_conn] = _connector_type(
+                    node,
+                    sdfg.arrays[e.data.data],
+                    e.data,
+                    inferred[e.data.data],
+                    output=True,
+                )
 
 
 def _cast_tasklet(
@@ -418,14 +441,126 @@ def _cast_tasklet(
 
     t = state.add_tasklet(
         name=name,
-        inputs={"_in"},
-        outputs={"_out"},
+        inputs={"_in": in_dtype},
+        outputs={"_out": out_dtype},
         code=f"_out = dace.{out_dtype.to_string()}(_in)",
         language=dace.Language.Python,
     )
     t.in_connectors["_in"] = in_dtype
     t.out_connectors["_out"] = out_dtype
     return t
+
+
+# The join of a tasklet's floating-point input types.
+def _input_join(
+    state: dace.SDFGState,
+    node: nodes.Tasklet,
+    sdfg: dace.SDFG,
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> dace.dtypes.typeclass | None:
+    join: dace.dtypes.typeclass | None = None
+    for e in state.in_edges(node):
+        if e.dst_conn is None or e.data is None or e.data.data is None:
+            continue
+        dtype = sdfg.arrays[e.data.data].dtype
+        if not _is_fp(dtype):
+            continue
+        try:
+            join = _promote(join, dtype, rules)
+        except ValueError:
+            return None
+    return join
+
+
+# Whether a float value crosses one of *node*'s connectors as a pointer: the
+# tasklet then reads or writes a whole subset, which a scalar cast cannot mirror.
+def _has_bulk_fp_connector(
+    state: dace.SDFGState,
+    node: nodes.Tasklet,
+    sdfg: dace.SDFG,
+) -> bool:
+    edges = [(e.dst_conn, e, node.in_connectors) for e in state.in_edges(node)]
+    edges += [(e.src_conn, e, node.out_connectors) for e in state.out_edges(node)]
+    for conn, e, connectors in edges:
+        if conn is None or e.data is None or e.data.data is None:
+            continue
+        if not _is_fp(sdfg.arrays[e.data.data].dtype):
+            continue
+        if isinstance(connectors.get(conn), dace.dtypes.pointer):
+            return True
+    return False
+
+
+# Reads edge *e*'s array, converts it to *dtype*, and feeds that to the tasklet.
+def _cast_before(
+    state: dace.SDFGState,
+    sdfg: dace.SDFG,
+    e,
+    dtype: dace.dtypes.typeclass,
+) -> None:
+    src_name = e.data.data
+    tmp_name, _ = sdfg.add_scalar(
+        f"{src_name}_at_{dtype.to_string()}", dtype, transient=True, find_new_name=True
+    )
+    cast = _cast_tasklet(
+        state, f"cast_{src_name}_to_{tmp_name}", sdfg.arrays[src_name].dtype, dtype
+    )
+    tmp = state.add_access(tmp_name)
+    state.remove_edge(e)
+    e.dst.in_connectors[e.dst_conn] = dtype
+    state.add_edge(e.src, e.src_conn, cast, "_in", dace.Memlet.from_memlet(e.data))
+    state.add_edge(cast, "_out", tmp, None, dace.Memlet(data=tmp_name))
+    state.add_edge(tmp, None, e.dst, e.dst_conn, dace.Memlet(data=tmp_name))
+
+
+# Takes the tasklet's result at *dtype* and converts it into edge *e*'s array.
+def _cast_after(
+    state: dace.SDFGState,
+    sdfg: dace.SDFG,
+    e,
+    dtype: dace.dtypes.typeclass,
+) -> None:
+    dst_name = e.data.data
+    tmp_name, _ = sdfg.add_scalar(
+        f"{dst_name}_at_{dtype.to_string()}", dtype, transient=True, find_new_name=True
+    )
+    cast = _cast_tasklet(
+        state, f"cast_{tmp_name}_to_{dst_name}", dtype, sdfg.arrays[dst_name].dtype
+    )
+    tmp = state.add_access(tmp_name)
+    state.remove_edge(e)
+    e.src.out_connectors[e.src_conn] = dtype
+    state.add_edge(e.src, e.src_conn, tmp, None, dace.Memlet(data=tmp_name))
+    state.add_edge(tmp, None, cast, "_in", dace.Memlet(data=tmp_name))
+    state.add_edge(cast, "_out", e.dst, e.dst_conn, dace.Memlet.from_memlet(e.data))
+
+
+# Gives every conversion hidden inside a tasklet a node of its own: a tasklet
+# reads and writes exactly one floating-point dtype -- the join of the types it
+# reads -- and each conversion to or from it lives in a cast tasklet.
+def _homogenize_tasklet_dtypes(
+    sdfg: dace.SDFG,
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> None:
+    for state in _states_in_order(sdfg):
+        for node in list(state.nodes()):
+            if not isinstance(node, nodes.Tasklet):
+                continue
+            join = _input_join(state, node, sdfg, rules)
+            if join is None or _has_bulk_fp_connector(state, node, sdfg):
+                continue
+            for e in list(state.in_edges(node)):
+                if e.dst_conn is None or e.data is None or e.data.data is None:
+                    continue
+                dtype = sdfg.arrays[e.data.data].dtype
+                if _is_fp(dtype) and not _types_equal(dtype, join):
+                    _cast_before(state, sdfg, e, join)
+            for e in list(state.out_edges(node)):
+                if e.src_conn is None or e.data is None or e.data.data is None:
+                    continue
+                dtype = sdfg.arrays[e.data.data].dtype
+                if _is_fp(dtype) and not _types_equal(dtype, join):
+                    _cast_after(state, sdfg, e, join)
 
 
 # Inserts a cast wherever an edge connects two differently-typed containers:
@@ -806,16 +941,6 @@ def change_and_propagate_fp_types(
     # Build the array-level dataflow graph and solve the precision fixed point.
     producers, consumers = _build_dataflow(sdfgs, uf)
 
-    # Treat every unpinned floating-point *source* as a constant at that precision.
-    if constant_type is not None:
-        for rep in members:
-            if (
-                rep not in pins
-                and not producers.get(rep)
-                and _is_fp(original_types[rep])
-            ):
-                pins[rep] = constant_type
-
     inferred = _infer_types(
         members,
         producers,
@@ -844,7 +969,10 @@ def change_and_propagate_fp_types(
 
         _apply_connector_types(sd, level_inferred)
 
-        # Add casts on every edge that now connects two different dtypes.
+        # Give every conversion a node of its own: first the ones a tasklet body
+        # would otherwise hide, then those on edges between differently-typed
+        # containers.
+        _homogenize_tasklet_dtypes(sd, rules)
         _insert_edge_casts(sd)
 
     # Preserve the external interface: non-transient arrays of the *root* SDFG

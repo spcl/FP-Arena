@@ -11,7 +11,7 @@ dist/
 venv/
 
 # DaCe build artifacts
-.dacecache/
+.dacecache*/
 *.sdfg
 *.sdfgz
 *.json

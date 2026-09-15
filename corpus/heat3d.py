@@ -1,6 +1,7 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """
 The heat3d stencil kernel (Polybench), a 3D Jacobi-style heat-diffusion step.
+Adapted from: https://github.com/spcl/npbench/tree/main
 """
 
 import dace as dc
