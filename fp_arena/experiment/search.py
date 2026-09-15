@@ -254,6 +254,11 @@ def _failure_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _format_pins(precision: PrecisionMap) -> str:
+    """One config's lowered knobs, sorted; ``(root)`` when nothing is lowered."""
+    return " ".join(f"{k}={v}" for k, v in sorted(precision.items())) or "(root)"
+
+
 def _array_sizes(experiment: ExperimentConfig, names: list[str]) -> dict[str, int]:
     """Element count of each knob's array (1 for constants / unknown)."""
     sizes: dict[str, int] = {}
@@ -349,10 +354,10 @@ def run_search(
         v = vec(config)
         if v in visited:
             return
+        visited.add(v)
         if dominated(config):
             stats["pruned"] += 1
             return
-        visited.add(v)
         heapq.heappush(heap, (-score(config), next(counter), config))
 
     def expand(config: Config) -> None:
@@ -390,13 +395,18 @@ def run_search(
 
     def update_best(config: Config, perf: PerfResult) -> None:
         ms = _objective_ms(perf, cfg.objective)
-        candidates.append(
-            SearchCandidate(
-                pin_map(config), ms, (root_ms / ms) if root_ms and ms else 0.0
-            )
-        )
-        if best_ms[0] is None or ms < best_ms[0]:
+        pins = pin_map(config)
+        speedup = (root_ms / ms) if root_ms and ms else 0.0
+        candidates.append(SearchCandidate(pins, ms, speedup))
+        improved = best_ms[0] is None or ms < best_ms[0]
+        if improved:
             best_ms[0], best[0] = ms, config
+        print(
+            f"[feasible {len(candidates)}/{stats['evaluated']}] {ms:>10.4g} ms "
+            f"{speedup:>5.2f}x{'  <- new best' if improved else '':<13}  "
+            f"{_format_pins(pins)}",
+            flush=True,
+        )
 
     def integrate(
         config: Config,
@@ -476,8 +486,7 @@ def run_search(
         perf_cache[root_key] = root_perf
         stats["timed"] += 1
         root_ms = _objective_ms(root_perf, cfg.objective)
-        best_ms[0] = root_ms
-        candidates.append(SearchCandidate(pin_map(root), root_ms, 1.0))
+        update_best(root, root_perf)
 
         # Seeds: per-input safe candidates and the combined candidate, then neighbours.
         for name, fmt in screening.safe_format.items():
@@ -627,16 +636,13 @@ def format_search(result: SearchResult, name: str | None = None) -> str:
         out.append("")
         out.append("--- measured feasible (fastest first) ---")
         for c in result.candidates:
-            pins = (
-                " ".join(f"{k}={v}" for k, v in sorted(c.precision.items())) or "(root)"
-            )
+            pins = _format_pins(c.precision)
             out.append(f"  {c.objective_ms:>10.4g} ms  {c.speedup:>5.2f}x  {pins}")
 
     if result.failures:
         out.append("")
         out.append(f"--- failed to build ({len(result.failures)}), skipped ---")
         for f in result.failures:
-            pins = " ".join(f"{k}={v}" for k, v in sorted(f.precision.items()))
-            out.append(f"  {pins or '(root)'}")
+            out.append(f"  {_format_pins(f.precision)}")
             out.extend(f"    {line}" for line in f.error.splitlines())
     return "\n".join(out)
