@@ -113,4 +113,42 @@ def screen(
         errors16 = probes.get("fp16", {}).get(name)
         sensitivity[name] = _severity(errors16, limits) if errors16 is not None else 1.0
 
+    _report(source_knobs, limits, floor, probes, safe_format, sensitivity)
     return Screening(limits=limits, safe_format=safe_format, sensitivity=sensitivity)
+
+
+def _report(
+    source_knobs: list[Knob],
+    limits: dict[str, dict[str, float]],
+    floor: dict[str, dict[str, float]],
+    probes: dict[str, dict[str, dict[str, ErrorStats]]],
+    safe_format: dict[str, str],
+    sensitivity: dict[str, float],
+) -> None:
+    """Print the budget and what each probe measured, least sensitive first."""
+    print("=== screening ===", flush=True)
+    for metric in sorted(limits):
+        for array, limit in sorted(limits[metric].items()):
+            value = floor.get(metric, {}).get(array)
+            derived = f"  (noise floor {value:.4g})" if value is not None else ""
+            print(f"  budget: {metric} {array} <= {limit:.4g}{derived}")
+    print("  probe severity = worst fraction of a limit consumed; 1 is at the limit")
+    for knob in sorted(source_knobs, key=lambda k: sensitivity.get(k.name, 0.0)):
+        cells = []
+        for fmt in ("fp16", "fp32"):
+            errors = probes.get(fmt, {}).get(knob.name)
+            if errors is None:
+                continue
+            ok = all(c.ok for c in check(errors, limits))
+            severity = _severity(errors, limits)
+            cells.append(f"{fmt} {severity:>10.3g} {'ok  ' if ok else 'OVER'}")
+        probed = "  ".join(cells) or "not probed"
+        print(
+            f"  {knob.name:<20} {probed:<42} -> {safe_format.get(knob.name, '(none)')}",
+            flush=True,
+        )
+    print(
+        f"  {len(safe_format)}/{len(source_knobs)} inputs have a safe format; "
+        "each is seeded as a candidate, plus one with all of them lowered at once",
+        flush=True,
+    )
