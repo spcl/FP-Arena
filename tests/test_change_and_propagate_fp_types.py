@@ -255,8 +255,8 @@ def test_reduce_node():
     s = sdfg.add_state("s")
     reduce_node = Reduce("sum", "lambda a, b: a + b", axes=[0], identity=0)
     s.add_node(reduce_node)
-    s.add_edge(s.add_read("A"), None, reduce_node, None, dace.Memlet("A[0:4]"))
-    s.add_edge(reduce_node, None, s.add_write("S"), None, dace.Memlet("S"))
+    s.add_edge(s.add_read("A"), None, reduce_node, "_in", dace.Memlet("A[0:4]"))
+    s.add_edge(reduce_node, "_out", s.add_write("S"), None, dace.Memlet("S"))
 
     change_and_propagate_fp_types(sdfg, {"A": dace.float16})
 
