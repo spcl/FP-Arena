@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 import dace
 import numpy as np
+from dace.codegen.compiler import load_precompiled_sdfg
 from dace.codegen.exceptions import CodegenError, CompilationError
 from dace.sdfg.validation import InvalidSDFGError
 
@@ -156,13 +157,14 @@ class _Slot:
         ref.finalize()
 
     def grade_and_time(
-        self, sdfg: dace.SDFG, pin_map: PrecisionMap
+        self, build_folder: str, pin_map: PrecisionMap
     ) -> tuple[dict[str, ErrorStats], PerfResult | None]:
         """
-        Grade an already-built, already-compiled ``sdfg`` against the reference
+        Grade the candidate compiled into ``build_folder`` against the reference
         and, when it meets the numeric limits, time it.
         """
-        csdfg = sdfg.compile()
+        csdfg = load_precompiled_sdfg(build_folder)
+        sdfg = csdfg.sdfg
         accs = {name: _new_acc() for name in self.outputs}
         for args, ref_out in self._samples:
             cand_args = _copy_args(args)
@@ -240,14 +242,14 @@ def _compile_task(pin_map: PrecisionMap) -> dace.SDFG:
     insert_timers(sdfg, exp.target)
     sdfg.build_folder = os.path.abspath(sdfg.build_folder)
     sdfg.compile()
-    return sdfg
+    return sdfg.build_folder
 
 
 def _grade_task(
-    sdfg: dace.SDFG,
+    build_folder: str,
     pin_map: PrecisionMap,
 ) -> tuple[dict[str, ErrorStats], PerfResult | None]:
-    return _WORKER["slot"].grade_and_time(sdfg, pin_map)
+    return _WORKER["slot"].grade_and_time(build_folder, pin_map)
 
 
 #: Exceptions that condemn one config, not the search. The config is recorded and skipped.
@@ -390,7 +392,7 @@ def run_search(
     # then go to a measurement slot as one frees.
     key_futs: dict[cf.Future, Config] = {}
     compile_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
-    ready: list[tuple[Config, CanonicalKey, dace.SDFG]] = []
+    ready: list[tuple[Config, CanonicalKey, str]] = []  # (config, key, build folder)
     grade_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
@@ -481,9 +483,9 @@ def run_search(
         visited.add(vec(root))
         root_key = key_of(root)
         stats["evaluated"] += 1
-        root_sdfg = compile_pool.submit(_compile_task, pin_map(root)).result()
+        root_folder = compile_pool.submit(_compile_task, pin_map(root)).result()
         root_errors, root_perf = grade_pool.submit(
-            _grade_task, root_sdfg, pin_map(root)
+            _grade_task, root_folder, pin_map(root)
         ).result()
         errors_cache[root_key] = root_errors
         if not _feasible(root_errors, limits, cfg.budget):
@@ -549,11 +551,11 @@ def run_search(
             # domination: results that landed while a config was building may
             # have pruned it, sparing its measurement.
             while ready and len(grade_futs) < n_slots:
-                config, key, sdfg = ready.pop(0)
+                config, key, folder = ready.pop(0)
                 if dominated(config):
                     stats["pruned"] += 1
                     continue
-                grade_futs[grade_pool.submit(_grade_task, sdfg, pin_map(config))] = (
+                grade_futs[grade_pool.submit(_grade_task, folder, pin_map(config))] = (
                     config,
                     key,
                 )
