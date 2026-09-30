@@ -111,8 +111,8 @@ class _UnionFind:
 # All SDFGs in the hierarchy, root first. Rejects the two structures the
 # pass cannot handle safely: a nested SDFG object shared by several
 # NestedSDFG nodes (one descriptor mutation would silently retype every
-# call site) and View descriptors (their dtype must track the viewed array,
-# which this pass does not model).
+# call site) and Reference descriptors (the container they alias is bound at
+# runtime by set-reference edges, which this pass does not model).
 def _collect_sdfgs(sdfg: dace.SDFG) -> list[dace.SDFG]:
     sdfgs = list(sdfg.all_sdfgs_recursive())
     seen: set[int] = set()
@@ -124,9 +124,9 @@ def _collect_sdfgs(sdfg: dace.SDFG) -> list[dace.SDFG]:
             )
         seen.add(id(sd))
         for name, desc in sd.arrays.items():
-            if isinstance(desc, dace.data.View):
+            if isinstance(desc, dace.data.Reference):
                 raise NotImplementedError(
-                    f"View descriptor {name!r} in SDFG {sd.name!r} is not supported."
+                    f"Reference descriptor {name!r} in SDFG {sd.name!r} is not supported."
                 )
     return sdfgs
 
@@ -183,13 +183,30 @@ def _unify_nested_boundaries(sdfgs: list[dace.SDFG]) -> _UnionFind:
     return uf
 
 
+# Merges every View with the container it views.
+def _unify_views(sdfgs: list[dace.SDFG], uf: _UnionFind) -> None:
+    for sd in sdfgs:
+        sid = id(sd)
+        for state in sd.all_states():
+            for node in state.data_nodes():
+                if not isinstance(sd.arrays[node.data], dace.data.View):
+                    continue
+                viewed = sdfg_utils.get_view_node(state, node)
+                if viewed is None:
+                    raise ValueError(
+                        f"View {node.data!r} in state {state.label!r} of SDFG "
+                        f"{sd.name!r} does not view any container"
+                    )
+                uf.union((sid, viewed.data), (sid, node.data))
+
+
 # Class membership and per-class original dtype.
 #
 # Returns:
 #   members: class representative -> [(sdfg, name), ...]
 #   original: class representative -> the (single) original dtype
 # Raises if the members of one class disagree on their original dtype -- the
-# input SDFG would already be reinterpreting memory across that boundary.
+# input SDFG would already be reinterpreting memory across that boundary or view.
 def _class_types(
     sdfgs: list[dace.SDFG],
     uf: _UnionFind,
@@ -205,7 +222,8 @@ def _class_types(
         if len(dtypes) > 1:
             names = ", ".join(f"{sd.name}.{name}" for sd, name in mem)
             raise ValueError(
-                f"Arrays sharing a NestedSDFG boundary disagree on dtype: {names} "
+                f"Arrays sharing a NestedSDFG boundary or a view disagree on dtype: "
+                f"{names} "
                 f"({sorted(t.to_string() for t in dtypes)})"
             )
         original[rep] = next(iter(dtypes))
@@ -253,6 +271,8 @@ def _build_dataflow(
                 ):
                     src = uf.find((sid, e.src.data))
                     dst = uf.find((sid, e.dst.data))
+                    if src == dst:  # view edge: one container, no copy
+                        continue
                     producers[dst].add(src)
                     consumers[src].add(dst)
 
@@ -910,6 +930,7 @@ def change_and_propagate_fp_types(
 
     # Unify the two sides of every NestedSDFG boundary, then resolve classes.
     uf = _unify_nested_boundaries(sdfgs)
+    _unify_views(sdfgs, uf)
     members, original_types = _class_types(sdfgs, uf)
 
     # Resolve pins (top-level array names) to classes.

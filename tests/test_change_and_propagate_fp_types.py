@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from dace.libraries.standard.nodes.reduce import Reduce
 from dace.sdfg import nodes
+from dace.sdfg import utils as sdfg_utils
 from dace.transformation.dataflow import MapFusion
 
 from corpus.heat3d import heat3d_kernel
@@ -1231,6 +1232,123 @@ def test_narrowing_write_survives_gpu_vectorization():
     sdfg.validate()
 
 
+_VN = 8
+
+
+@dace.program
+def _double_row(x: dace.float64[_VN], y: dace.float64[_VN]):
+    y[:] = x * 2.0
+
+
+@dace.program
+def _row_views(A: dace.float64[_VN, _VN], B: dace.float64[_VN, _VN]):
+    for i in range(_VN):
+        _double_row(A[i], B[i])
+    B[1] = A[2, :] + B[3]
+
+
+def _assert_views_intact(sdfg):
+    """Every View is still bound to a container of its own dtype."""
+    n_views = 0
+    for sd in sdfg.all_sdfgs_recursive():
+        for st in sd.all_states():
+            for node in st.data_nodes():
+                if not isinstance(sd.arrays[node.data], dace.data.View):
+                    continue
+                viewed = sdfg_utils.get_view_node(st, node)
+                assert viewed is not None, node.data
+                assert sd.arrays[viewed.data].dtype == sd.arrays[node.data].dtype
+                n_views += 1
+    return n_views
+
+
+def test_frontend_views_follow_viewed_array():
+    """Row slices passed to a nested program become Views; they must take the
+    precision of the array they view, not get a cast of their own."""
+    sdfg = _row_views.to_sdfg(simplify=False)
+    assert any(
+        isinstance(d, dace.data.View)
+        for sd in sdfg.all_sdfgs_recursive()
+        for d in sd.arrays.values()
+    )
+
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32})
+    sdfg.validate()
+    assert _assert_views_intact(sdfg) > 0
+
+    A = np.random.rand(_VN, _VN)
+    B = np.zeros((_VN, _VN))
+    ref = A * 2.0
+    ref[1] = A[2] + ref[3]
+    sdfg(A=A, B=B)
+    np.testing.assert_allclose(B, ref, rtol=1e-6)
+
+
+def test_write_through_view_into_pinned_array():
+    """A float64 result written through a View into a float32-pinned array is
+    narrowed by a cast before the View; the View edge itself stays a View."""
+    n = 8
+    sdfg = dace.SDFG("write_view")
+    sdfg.add_array("A", [n], dace.float64, transient=False)
+    sdfg.add_array("C", [2, n], dace.float64, transient=False)
+    sdfg.add_view("v", [n], dace.float64)
+    st = sdfg.add_state("s")
+    me, mx = st.add_map("m", {"i": f"0:{n}"})
+    t = st.add_tasklet("t", {"x"}, {"y"}, "y = x * 2.0")
+    me.add_in_connector("IN_A")
+    me.add_out_connector("OUT_A")
+    mx.add_in_connector("IN_v")
+    mx.add_out_connector("OUT_v")
+    v = st.add_access("v")
+    st.add_edge(st.add_read("A"), None, me, "IN_A", dace.Memlet(f"A[0:{n}]"))
+    st.add_edge(me, "OUT_A", t, "x", dace.Memlet("A[i]"))
+    st.add_edge(t, "y", mx, "IN_v", dace.Memlet("v[i]"))
+    st.add_edge(mx, "OUT_v", v, None, dace.Memlet(f"v[0:{n}]"))
+    st.add_edge(v, None, st.add_write("C"), None, dace.Memlet(f"C[1, 0:{n}]"))
+
+    change_and_propagate_fp_types(sdfg, {"C": dace.float32})
+    sdfg.validate()
+
+    assert sdfg.arrays["v"].dtype == dace.float32
+    assert sdfg.arrays["A"].dtype == dace.float64
+    assert _assert_views_intact(sdfg) == 1
+
+    A = np.random.rand(n)
+    C = np.random.rand(2, n)
+    ref = C.copy()
+    ref[1] = A * 2.0
+    sdfg(A=A, C=C)
+    np.testing.assert_allclose(C, ref, rtol=1e-6)
+
+
+def test_reinterpreting_view_rejected():
+    """A View whose dtype differs from its viewed array reinterprets memory;
+    the pass refuses to pick one precision for both."""
+    sdfg = dace.SDFG("reinterpret_view")
+    sdfg.add_array("A", [4], dace.float64, transient=False)
+    sdfg.add_array("B", [1], dace.float32, transient=False)
+    sdfg.add_view("v", [4], dace.float32)
+    st = sdfg.add_state("s")
+    v = st.add_access("v")
+    t = st.add_tasklet("t", {"x"}, {"y"}, "y = x")
+    st.add_edge(st.add_read("A"), None, v, None, dace.Memlet("A[0:4]"))
+    st.add_edge(v, None, t, "x", dace.Memlet("v[0]"))
+    st.add_edge(t, "y", st.add_write("B"), None, dace.Memlet("B[0]"))
+
+    with pytest.raises(ValueError, match="disagree on dtype"):
+        change_and_propagate_fp_types(sdfg, {})
+
+
+def test_reference_rejected():
+    sdfg = dace.SDFG("reference")
+    sdfg.add_array("A", [4], dace.float64, transient=False)
+    sdfg.add_reference("r", [4], dace.float64)
+    sdfg.add_state("s")
+
+    with pytest.raises(NotImplementedError, match="Reference descriptor"):
+        change_and_propagate_fp_types(sdfg, {"A": dace.float32})
+
+
 if __name__ == "__main__":
     test_transient_intermediate_propagates()
     test_all_nontransient_interface_preserved()
@@ -1270,4 +1388,8 @@ if __name__ == "__main__":
     test_widening_write_also_becomes_an_explicit_cast()
     test_mixed_operands_are_cast_to_the_join()
     test_narrowing_write_survives_gpu_vectorization()
+    test_frontend_views_follow_viewed_array()
+    test_write_through_view_into_pinned_array()
+    test_reinterpreting_view_rejected()
+    test_reference_rejected()
     print("All tests passed.")
