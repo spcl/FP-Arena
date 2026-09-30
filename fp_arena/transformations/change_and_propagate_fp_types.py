@@ -915,6 +915,7 @@ def change_and_propagate_fp_types(
     promotion_rules: dict[frozenset[dace.dtypes.typeclass], dace.dtypes.typeclass]
     | None = None,
     constant_type: dace.dtypes.typeclass | None = None,
+    report: bool = False,
 ) -> None:
 
     # Use default promotion rules if none are provided.
@@ -971,15 +972,16 @@ def change_and_propagate_fp_types(
         rules,
     )
 
-    # Report with level-qualified names (the root level stays unqualified).
-    report_orig: dict[str, dace.dtypes.typeclass] = {}
-    report_final: dict[str, dace.dtypes.typeclass] = {}
-    for i, sd in enumerate(sdfgs):
-        prefix = "" if i == 0 else f"{sd.name}@{i}/"
-        for name, desc in sd.arrays.items():
-            report_orig[prefix + name] = desc.dtype
-            report_final[prefix + name] = inferred[uf.find((id(sd), name))]
-    _print_type_report(report_orig, report_final)
+    # Optional report, with level-qualified names (the root level stays unqualified).
+    if report:
+        report_orig: dict[str, dace.dtypes.typeclass] = {}
+        report_final: dict[str, dace.dtypes.typeclass] = {}
+        for i, sd in enumerate(sdfgs):
+            prefix = "" if i == 0 else f"{sd.name}@{i}/"
+            for name, desc in sd.arrays.items():
+                report_orig[prefix + name] = desc.dtype
+                report_final[prefix + name] = inferred[uf.find((id(sd), name))]
+        _print_type_report(report_orig, report_final)
 
     # Apply inferred dtypes to the arrays and connectors of every level.
     for sd in sdfgs:
