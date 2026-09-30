@@ -21,8 +21,10 @@ import heapq
 import itertools
 import multiprocessing as mp
 import os
+import subprocess
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import dace
 import numpy as np
@@ -93,9 +95,11 @@ class SelectionSearchConfig:
     :param devices: GPU ids to pin measurement workers to via
         ``CUDA_VISIBLE_DEVICES`` -- one worker per id, each owning its device
         exclusively.
-    :param compile_workers: size of the unpinned compile pool that builds and
+    :param compile_workers: size of the compile pool that builds and
         compiles candidates ahead of the measurement workers. ``None`` uses
         ``os.cpu_count() - <measurement workers>``.
+    :param grade_cpus_per_device: with ``devices``, each measurement worker is
+        pinned to this many CPUs
     :param name: database/report name; defaults to the experiment's.
 
     """
@@ -114,6 +118,7 @@ class SelectionSearchConfig:
     measure_workers: int = 1
     devices: list[int] | None = None
     compile_workers: int | None = None
+    grade_cpus_per_device: int = 8
     name: str | None = None
 
     def __post_init__(self) -> None:
@@ -216,18 +221,70 @@ def _init_slot(
     n_reps: int,
     device_queue,
 ) -> None:
-    # Pin the device *before* anything creates a CUDA context.
-    # Each worker pops one id, so devices are distinct.
-    device = device_queue.get()
+    # Pin the device and the CPU cores
+    device, cpus = device_queue.get()
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    if cpus:
+        os.sched_setaffinity(0, cpus)
     _worker_dace_config(experiment)
     _WORKER["slot"] = _Slot(experiment, reference, n_samples, limits, n_warmup, n_reps)
 
 
-def _init_compiler(experiment: ExperimentConfig) -> None:
+def _init_compiler(experiment: ExperimentConfig, cpus: set[int] | None) -> None:
+    if cpus:
+        os.sched_setaffinity(0, cpus)
     _worker_dace_config(experiment)
     _WORKER["experiment"] = experiment
+
+
+def _parse_cpulist(text: str) -> list[int]:
+    """Parse a kernel CPU list such as ``"0-71,144-150"``."""
+    cpus: list[int] = []
+    for part in text.strip().split(","):
+        if part:
+            lo, _, hi = part.partition("-")
+            cpus.extend(range(int(lo), int(hi or lo) + 1))
+    return cpus
+
+
+def _gpu_local_cpus(device: int) -> list[int]:
+    """The CPU cores attached to GPU ``device`` (a physical index), ascending."""
+    bus_id = subprocess.run(
+        [
+            "nvidia-smi",
+            f"--id={device}",
+            "--query-gpu=pci.bus_id",
+            "--format=csv,noheader",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    # nvidia-smi pads the PCI domain to 8 hex digits, sysfs to 4.
+    domain, _, rest = bus_id.partition(":")
+    path = Path("/sys/bus/pci/devices") / f"{int(domain, 16):04x}:{rest.lower()}"
+    return _parse_cpulist((path / "local_cpulist").read_text())
+
+
+def _partition_cpus(
+    devices: list[int | None], per_device: int
+) -> tuple[list[set[int] | None], set[int] | None]:
+    """Cores for each measurement worker and for the compile pool."""
+    if per_device <= 0 or any(d is None for d in devices):
+        return [None] * len(devices), None
+    allowed = os.sched_getaffinity(0)
+    grade: list[set[int] | None] = []
+    for device in devices:
+        local = [c for c in _gpu_local_cpus(device) if c in allowed]
+        grade.append(set(local[-per_device:]) or None)
+    reserved = set().union(*(g for g in grade if g))
+    rest = allowed - reserved
+    if not rest:
+        warnings.warn(
+            "No cores left for the compile pool; not pinning it.", stacklevel=2
+        )
+    return grade, rest or None
 
 
 def _key_task(pin_map: PrecisionMap) -> CanonicalKey:
@@ -235,7 +292,7 @@ def _key_task(pin_map: PrecisionMap) -> CanonicalKey:
     return canonical_typing(_WORKER["experiment"], pin_map)
 
 
-def _compile_task(pin_map: PrecisionMap) -> dace.SDFG:
+def _compile_task(pin_map: PrecisionMap) -> str:
     """Build and compile one candidate SDFG, timers inserted."""
     exp = _WORKER["experiment"]
     sdfg = build_candidate_sdfg(exp, pin_map)
@@ -453,15 +510,17 @@ def run_search(
                 flush=True,
             )
 
-    # Each measurement worker pops one device id from the queue at init and pins to it.
+    # Each measurement worker pops one (device, cores) pair from the queue at
+    # init and pins to both; the compile pool runs on the remaining cores.
+    grade_cpus, compile_cpus = _partition_cpus(devices, cfg.grade_cpus_per_device)
     device_queue = ctx.Queue()
-    for device in devices:
-        device_queue.put(device)
+    for device, cpus in zip(devices, grade_cpus, strict=True):
+        device_queue.put((device, cpus))
     compile_pool = cf.ProcessPoolExecutor(
         n_compilers,
         mp_context=ctx,
         initializer=_init_compiler,
-        initargs=(exp,),
+        initargs=(exp, compile_cpus),
     )
     grade_pool = cf.ProcessPoolExecutor(
         n_slots,
