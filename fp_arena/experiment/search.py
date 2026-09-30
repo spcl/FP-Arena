@@ -228,6 +228,11 @@ def _init_compiler(experiment: ExperimentConfig) -> None:
     _WORKER["experiment"] = experiment
 
 
+def _key_task(pin_map: PrecisionMap) -> CanonicalKey:
+    """The dedup key of one candidate."""
+    return canonical_typing(_WORKER["experiment"], pin_map)
+
+
 def _compile_task(pin_map: PrecisionMap) -> dace.SDFG:
     """Build and compile one candidate SDFG, timers inserted."""
     exp = _WORKER["experiment"]
@@ -383,6 +388,7 @@ def run_search(
     failures: list[SearchFailure] = []
     # Two-stage pipeline: configs compile on the compile pool, land in ``ready``,
     # then go to a measurement slot as one frees.
+    key_futs: dict[cf.Future, Config] = {}
     compile_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
     ready: list[tuple[Config, CanonicalKey, dace.SDFG]] = []
     grade_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
@@ -427,6 +433,23 @@ def run_search(
             expand(config)
         else:
             infeasible.append(vec(config))
+            over = [c for c in check(errors, limits) if not c.ok]
+            worst = max(
+                over,
+                key=lambda c: abs(c.value / c.limit) if c.limit else float("inf"),
+                default=None,
+            )
+            detail = (
+                f"{len(over)} over, worst {worst.metric} {worst.array}={worst.value:.3g} "
+                f"(limit {worst.limit:.3g})"
+                if worst is not None
+                else "predicate failed"
+            )
+            print(
+                f"[infeasible {len(infeasible)}/{stats['evaluated']}] {detail}  "
+                f"{_format_pins(pin_map(config))}",
+                flush=True,
+            )
 
     # Each measurement worker pops one device id from the queue at init and pins to it.
     device_queue = ctx.Queue()
@@ -502,33 +525,27 @@ def run_search(
             push(combined)
         expand(root)
 
-        budget_hit = False
-        while (heap and not budget_hit) or compile_futs or ready or grade_futs:
-            # Feed the compile pool from the heap. Dedup hits and build failures are resolved here
-            while heap and not budget_hit and len(compile_futs) < n_compilers:
-                if (
-                    cfg.compute_budget is not None
-                    and stats["evaluated"] >= cfg.compute_budget
-                ):
-                    budget_hit = True
-                    break
-                _, _, config = heapq.heappop(heap)
-                if dominated(config):
-                    stats["pruned"] += 1
-                    continue
-                key = key_of(config)
-                if key in errors_cache:
-                    integrate(config, key, errors_cache[key], None)
-                    continue
-                if key in failed_keys:  # same program, same build failure
-                    continue
-                stats["evaluated"] += 1
-                compile_futs[compile_pool.submit(_compile_task, pin_map(config))] = (
-                    config,
-                    key,
-                )
+        def submit_compile(config: Config, key: CanonicalKey) -> None:
+            """Resolve a keyed config: dedup hit, known build failure, or compile."""
+            if dominated(config):
+                stats["pruned"] += 1
+                return
+            if key in errors_cache:
+                integrate(config, key, errors_cache[key], None)
+                return
+            if key in failed_keys:  # same program, same build failure
+                return
+            stats["evaluated"] += 1
+            compile_futs[compile_pool.submit(_compile_task, pin_map(config))] = (
+                config,
+                key,
+            )
 
-            # Hand compiled candidates to free measurement slots, re-checking
+        budget_hit = False
+        while (
+            (heap and not budget_hit) or key_futs or compile_futs or ready or grade_futs
+        ):
+            # Hand compiled candidates to free measurement slots first, re-checking
             # domination: results that landed while a config was building may
             # have pruned it, sparing its measurement.
             while ready and len(grade_futs) < n_slots:
@@ -541,12 +558,36 @@ def run_search(
                     key,
                 )
 
-            if not compile_futs and not grade_futs:
+            # Feed the compile pool from the heap; each config is keyed first.
+            while (
+                heap
+                and not budget_hit
+                and len(key_futs) + len(compile_futs) < n_compilers
+            ):
+                if cfg.compute_budget is not None:
+                    if stats["evaluated"] >= cfg.compute_budget:
+                        budget_hit = True
+                        break
+                    # Each config still being keyed may use one more unit of the
+                    # budget (or turn out a dedup hit); wait for those first.
+                    if stats["evaluated"] + len(key_futs) >= cfg.compute_budget:
+                        break
+                _, _, config = heapq.heappop(heap)
+                if dominated(config):
+                    stats["pruned"] += 1
+                    continue
+                key_futs[compile_pool.submit(_key_task, pin_map(config))] = config
+
+            if not key_futs and not compile_futs and not grade_futs:
                 break
             done, _ = cf.wait(
-                list(compile_futs) + list(grade_futs), return_when=cf.FIRST_COMPLETED
+                list(key_futs) + list(compile_futs) + list(grade_futs),
+                return_when=cf.FIRST_COMPLETED,
             )
             for fut in done:
+                if fut in key_futs:
+                    submit_compile(key_futs.pop(fut), fut.result())
+                    continue
                 if fut in compile_futs:
                     config, key = compile_futs.pop(fut)
                     try:
