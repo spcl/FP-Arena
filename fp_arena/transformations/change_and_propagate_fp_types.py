@@ -1,23 +1,24 @@
 from __future__ import annotations
+
 import ast
 import warnings
 from collections import defaultdict, deque
-from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import ClassVar
 
 import dace
 import dace.library
 from dace import subsets
 from dace.properties import CodeBlock
-from dace.sdfg import nodes, utils as sdfg_utils
+from dace.sdfg import nodes
+from dace.sdfg import utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 from dace.transformation.transformation import ExpandTransformation
 from tqdm.auto import tqdm
 
 from fp_arena.dtypes import float32sr, float64sr
 
-
 # Default promotion rules for the standard float/SR types.
-DEFAULT_PROMOTION_RULES: Dict[FrozenSet, dace.dtypes.typeclass] = {
+DEFAULT_PROMOTION_RULES: dict[frozenset, dace.dtypes.typeclass] = {
     # Exact IEEE floats: widen.
     frozenset({dace.float16, dace.float32}): dace.float32,
     frozenset({dace.float16, dace.float64}): dace.float64,
@@ -35,11 +36,11 @@ DEFAULT_PROMOTION_RULES: Dict[FrozenSet, dace.dtypes.typeclass] = {
 
 
 #: Qualified array identity: ``(id(sdfg), array_name)``.
-QKey = Tuple[int, str]
+QKey = tuple[int, str]
 
 
 # Whether *tc* is a floating-point typeclass this pass may retarget.
-def _is_fp(tc: Optional[dace.dtypes.typeclass]) -> bool:
+def _is_fp(tc: dace.dtypes.typeclass | None) -> bool:
     if tc is None:
         return False
     if isinstance(tc, dace.mpfr):
@@ -49,10 +50,10 @@ def _is_fp(tc: Optional[dace.dtypes.typeclass]) -> bool:
 
 # Returns the promoted type of *t1* and *t2* according to *rules*.
 def _promote(
-    t1: Optional[dace.dtypes.typeclass],
-    t2: Optional[dace.dtypes.typeclass],
-    rules: Dict[FrozenSet, dace.dtypes.typeclass],
-) -> Optional[dace.dtypes.typeclass]:
+    t1: dace.dtypes.typeclass | None,
+    t2: dace.dtypes.typeclass | None,
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> dace.dtypes.typeclass | None:
     if t1 is None:
         return t2
     if t2 is None:
@@ -67,8 +68,8 @@ def _promote(
 
 # None-safe equality for optional typeclasses (``dace.typeclass != None`` is unreliable).
 def _types_equal(
-    a: Optional[dace.dtypes.typeclass],
-    b: Optional[dace.dtypes.typeclass],
+    a: dace.dtypes.typeclass | None,
+    b: dace.dtypes.typeclass | None,
 ) -> bool:
     if a is None or b is None:
         return a is b
@@ -90,7 +91,7 @@ def _states_in_order(cfg: AbstractControlFlowRegion):
 # type.
 class _UnionFind:
     def __init__(self) -> None:
-        self._parent: Dict[QKey, QKey] = {}
+        self._parent: dict[QKey, QKey] = {}
 
     def find(self, x: QKey) -> QKey:
         parent = self._parent
@@ -112,9 +113,9 @@ class _UnionFind:
 # NestedSDFG nodes (one descriptor mutation would silently retype every
 # call site) and View descriptors (their dtype must track the viewed array,
 # which this pass does not model).
-def _collect_sdfgs(sdfg: dace.SDFG) -> List[dace.SDFG]:
+def _collect_sdfgs(sdfg: dace.SDFG) -> list[dace.SDFG]:
     sdfgs = list(sdfg.all_sdfgs_recursive())
-    seen: Set[int] = set()
+    seen: set[int] = set()
     for sd in sdfgs:
         if id(sd) in seen:
             raise NotImplementedError(
@@ -134,8 +135,8 @@ def _collect_sdfgs(sdfg: dace.SDFG) -> List[dace.SDFG]:
 # symbols (symbols are not data descriptors) and float arrays read on
 # interstate edges (those reads follow the array's final precision but are
 # implicitly widened to the symbol's fixed dtype; no casts are inserted).
-def _warn_unlowerable(sdfgs: List[dace.SDFG]) -> None:
-    fp_symbols: Set[str] = set()
+def _warn_unlowerable(sdfgs: list[dace.SDFG]) -> None:
+    fp_symbols: set[str] = set()
     for sd in sdfgs:
         for state in sd.all_states():
             for node in state.nodes():
@@ -150,7 +151,7 @@ def _warn_unlowerable(sdfgs: List[dace.SDFG]) -> None:
             f"not retargetable (symbols are not data): {sorted(fp_symbols)}"
         )
 
-    interstate_reads: Set[str] = set()
+    interstate_reads: set[str] = set()
     for sd in sdfgs:
         fp_names = {n for n, d in sd.arrays.items() if _is_fp(d.dtype)}
         for e in sd.all_interstate_edges():
@@ -164,7 +165,7 @@ def _warn_unlowerable(sdfgs: List[dace.SDFG]) -> None:
 
 
 # Merges the two sides of every NestedSDFG boundary edge into one class.
-def _unify_nested_boundaries(sdfgs: List[dace.SDFG]) -> _UnionFind:
+def _unify_nested_boundaries(sdfgs: list[dace.SDFG]) -> _UnionFind:
     uf = _UnionFind()
     for sd in sdfgs:
         sid = id(sd)
@@ -190,15 +191,15 @@ def _unify_nested_boundaries(sdfgs: List[dace.SDFG]) -> _UnionFind:
 # Raises if the members of one class disagree on their original dtype -- the
 # input SDFG would already be reinterpreting memory across that boundary.
 def _class_types(
-    sdfgs: List[dace.SDFG],
+    sdfgs: list[dace.SDFG],
     uf: _UnionFind,
-) -> Tuple[Dict[QKey, List[Tuple[dace.SDFG, str]]], Dict[QKey, dace.dtypes.typeclass]]:
-    members: Dict[QKey, List[Tuple[dace.SDFG, str]]] = defaultdict(list)
+) -> tuple[dict[QKey, list[tuple[dace.SDFG, str]]], dict[QKey, dace.dtypes.typeclass]]:
+    members: dict[QKey, list[tuple[dace.SDFG, str]]] = defaultdict(list)
     for sd in sdfgs:
         for name in sd.arrays:
             members[uf.find((id(sd), name))].append((sd, name))
 
-    original: Dict[QKey, dace.dtypes.typeclass] = {}
+    original: dict[QKey, dace.dtypes.typeclass] = {}
     for rep, mem in members.items():
         dtypes = {sd.arrays[name].dtype for sd, name in mem}
         if len(dtypes) > 1:
@@ -217,11 +218,11 @@ def _class_types(
 #   producers: array -> set of arrays that feed any computation writing it
 #   consumers: the reverse map (array -> arrays it feeds into)
 def _build_dataflow(
-    sdfgs: List[dace.SDFG],
+    sdfgs: list[dace.SDFG],
     uf: _UnionFind,
-) -> Tuple[Dict[QKey, Set[QKey]], Dict[QKey, Set[QKey]]]:
-    producers: Dict[QKey, Set[QKey]] = defaultdict(set)
-    consumers: Dict[QKey, Set[QKey]] = defaultdict(set)
+) -> tuple[dict[QKey, set[QKey]], dict[QKey, set[QKey]]]:
+    producers: dict[QKey, set[QKey]] = defaultdict(set)
+    consumers: dict[QKey, set[QKey]] = defaultdict(set)
 
     for sd in sdfgs:
         sid = id(sd)
@@ -260,9 +261,9 @@ def _build_dataflow(
 
 # Arrays reachable in the producer graph from any *seed*, following the producer -> consumer direction.
 def _reachable_from(
-    seeds: Set[QKey],
-    consumers: Dict[QKey, Set[QKey]],
-) -> Set[QKey]:
+    seeds: set[QKey],
+    consumers: dict[QKey, set[QKey]],
+) -> set[QKey]:
     reached = set(seeds)
     stack = list(seeds)
     while stack:
@@ -291,13 +292,13 @@ def _reachable_from(
 #     producers) falls back to its original dtype.
 # Returns class representative -> dtype for every class.
 def _infer_types(
-    members: Dict[QKey, List[Tuple[dace.SDFG, str]]],
-    producers: Dict[QKey, Set[QKey]],
-    consumers: Dict[QKey, Set[QKey]],
-    initial_types: Dict[QKey, dace.dtypes.typeclass],
-    original_types: Dict[QKey, dace.dtypes.typeclass],
-    rules: Dict[FrozenSet, dace.dtypes.typeclass],
-) -> Dict[QKey, dace.dtypes.typeclass]:
+    members: dict[QKey, list[tuple[dace.SDFG, str]]],
+    producers: dict[QKey, set[QKey]],
+    consumers: dict[QKey, set[QKey]],
+    initial_types: dict[QKey, dace.dtypes.typeclass],
+    original_types: dict[QKey, dace.dtypes.typeclass],
+    rules: dict[frozenset, dace.dtypes.typeclass],
+) -> dict[QKey, dace.dtypes.typeclass]:
 
     seeds = {
         name
@@ -308,8 +309,8 @@ def _infer_types(
     }
     reachable = _reachable_from(seeds, consumers)
 
-    inferred: Dict[QKey, Optional[dace.dtypes.typeclass]] = {}
-    pinned: Set[QKey] = set()
+    inferred: dict[QKey, dace.dtypes.typeclass | None] = {}
+    pinned: set[QKey] = set()
     for name in members:
         if name in initial_types:
             inferred[name] = initial_types[name]  # pin: constant
@@ -332,7 +333,7 @@ def _infer_types(
         name = worklist.popleft()
         queued.discard(name)
 
-        new: Optional[dace.dtypes.typeclass] = None
+        new: dace.dtypes.typeclass | None = None
         for prod in producers[name]:
             t = inferred[prod]
             if t is None or not _is_fp(t):
@@ -357,8 +358,8 @@ def _infer_types(
 
 # Prints a report of each array's original and final (inferred) precision
 def _print_type_report(
-    original_types: Dict[str, dace.dtypes.typeclass],
-    inferred: Dict[str, dace.dtypes.typeclass],
+    original_types: dict[str, dace.dtypes.typeclass],
+    inferred: dict[str, dace.dtypes.typeclass],
 ) -> None:
     name_w = max((len(n) for n in original_types), default=0)
     name_w = max(name_w, len("array"))
@@ -395,7 +396,7 @@ def _connector_type(
 # Writes inferred types onto tasklet/map/library-node connectors.
 def _apply_connector_types(
     sdfg: dace.SDFG,
-    inferred: Dict[str, dace.dtypes.typeclass],
+    inferred: dict[str, dace.dtypes.typeclass],
 ) -> None:
     for state in _states_in_order(sdfg):
         for node in state.nodes():
@@ -796,7 +797,7 @@ def _add_copy_map(
 
 @dace.library.expansion
 class _ExpandFusionBarrier(ExpandTransformation):
-    environments = []
+    environments: ClassVar[list] = []
 
     @staticmethod
     def expansion(node, parent_state, parent_sdfg, **kwargs):
@@ -814,7 +815,7 @@ class _ExpandFusionBarrier(ExpandTransformation):
 class FusionBarrier(nodes.LibraryNode):
     """Empty, side-effecting library node used to prevent state fusion."""
 
-    implementations = {"pure": _ExpandFusionBarrier}
+    implementations: ClassVar[dict] = {"pure": _ExpandFusionBarrier}
     default_implementation = "pure"
 
     def __init__(self, name="fusion_barrier", *args, **kwargs):
@@ -867,7 +868,7 @@ def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None
 
 # Retypes every floating-point SDFG symbol and compile-time constant to *dtype*.
 def _lower_symbols_and_constants(
-    sdfgs: List[dace.SDFG], dtype: dace.dtypes.typeclass
+    sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass
 ) -> None:
     root = sdfgs[0]
     abi_symbols = set(map(str, root.free_symbols))
@@ -890,11 +891,10 @@ def _lower_symbols_and_constants(
 # Main entry point to change and propagate fp types through an SDFG.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
-    initial_types: Dict[str, dace.dtypes.typeclass],
-    promotion_rules: Optional[
-        Dict[FrozenSet[dace.dtypes.typeclass], dace.dtypes.typeclass]
-    ] = None,
-    constant_type: Optional[dace.dtypes.typeclass] = None,
+    initial_types: dict[str, dace.dtypes.typeclass],
+    promotion_rules: dict[frozenset[dace.dtypes.typeclass], dace.dtypes.typeclass]
+    | None = None,
+    constant_type: dace.dtypes.typeclass | None = None,
 ) -> None:
 
     # Use default promotion rules if none are provided.
@@ -913,7 +913,7 @@ def change_and_propagate_fp_types(
     members, original_types = _class_types(sdfgs, uf)
 
     # Resolve pins (top-level array names) to classes.
-    pins: Dict[QKey, dace.dtypes.typeclass] = {}
+    pins: dict[QKey, dace.dtypes.typeclass] = {}
     for name, dtype in initial_types.items():
         if name not in sdfg.arrays:
             raise ValueError(
@@ -934,7 +934,7 @@ def change_and_propagate_fp_types(
             )
         pins[rep] = dtype
 
-    original_nontransients: Dict[str, dace.dtypes.typeclass] = {
+    original_nontransients: dict[str, dace.dtypes.typeclass] = {
         name: desc.dtype for name, desc in sdfg.arrays.items() if not desc.transient
     }
 
@@ -951,8 +951,8 @@ def change_and_propagate_fp_types(
     )
 
     # Report with level-qualified names (the root level stays unqualified).
-    report_orig: Dict[str, dace.dtypes.typeclass] = {}
-    report_final: Dict[str, dace.dtypes.typeclass] = {}
+    report_orig: dict[str, dace.dtypes.typeclass] = {}
+    report_final: dict[str, dace.dtypes.typeclass] = {}
     for i, sd in enumerate(sdfgs):
         prefix = "" if i == 0 else f"{sd.name}@{i}/"
         for name, desc in sd.arrays.items():
@@ -993,11 +993,11 @@ def change_and_propagate_fp_types(
     }
 
     # Snapshot read/write sets before renaming so orig_name is still meaningful.
-    sdfg_inputs, sdfg_outputs = sdfg.read_and_write_sets()
+    _, sdfg_outputs = sdfg.read_and_write_sets()
     sdfg.replace_dict(repl_dict)
 
     # Reconstruct original-typed descriptors and add them back to the SDFG.
-    orig_descs: Dict[str, dace.data.Data] = {}
+    orig_descs: dict[str, dace.data.Data] = {}
     for orig_name, casted_name in repl_dict.items():
         casted_desc = sdfg.arrays[casted_name]
         casted_desc.transient = True
