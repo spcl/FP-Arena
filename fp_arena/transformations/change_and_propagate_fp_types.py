@@ -899,13 +899,20 @@ def _lower_symbols_and_constants(
         for desc, _value in sd.constants_prop.values():
             if _is_fp(getattr(desc, "dtype", None)):
                 desc.dtype = dtype
-        # Symbols only assigned on interstate edges (never declared) get their C
-        # type inferred from the assignment expression, whose float literals are
-        # doubles; declare them explicitly at the constant precision.
+
+
+# Declares every float symbol that is only assigned on interstate edges at the
+# type it has in the unmodified SDFG.
+def _declare_interstate_symbols(sdfgs: list[dace.SDFG]) -> None:
+    for sd in sdfgs:
+        found: dict[str, list[dace.dtypes.typeclass]] = {}
         for e in sd.all_interstate_edges():
             for name, stype in e.data.new_symbols(sd, sd.symbols).items():
                 if name not in sd.symbols and name not in sd.arrays and _is_fp(stype):
-                    sd.add_symbol(name, dtype)
+                    found.setdefault(name, []).append(stype)
+        for name, stypes in found.items():
+            # Several assignments may infer different floats; keep the widest.
+            sd.add_symbol(name, max(stypes, key=lambda t: t.bytes))
 
 
 # Main entry point to change and propagate fp types through an SDFG.
@@ -922,6 +929,8 @@ def change_and_propagate_fp_types(
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
 
     sdfgs = _collect_sdfgs(sdfg)
+
+    _declare_interstate_symbols(sdfgs)
 
     # Optionally cast every float literal in the computation to a fixed precision.
     if constant_type is not None:
