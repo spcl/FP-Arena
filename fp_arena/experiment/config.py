@@ -73,6 +73,7 @@ class ExperimentConfig:
     :param gpu_block_size: GPU thread-block size ``[x, y, z]`` (x = contiguous dim) set on every GPU_Device map; ``None`` uses DaCe's default.
     :param gpu_vectorize: if True, runs VectorizeGPU()
     :param gpu_vectorize_config: the ``VectorizeConfig`` used when ``gpu_vectorize`` is set; ``None`` uses ``DEFAULT_GPU_VECTORIZE_CONFIG``.
+    :param gpu_offload: program-specific GPU offload ``(sdfg) -> None`` run in place of ``apply_gpu_transformations`` when ``target="gpu"``; ``None`` uses the generic offload. Must be a module-level function: the config is pickled to the search's workers.
     """
 
     name: str
@@ -88,6 +89,7 @@ class ExperimentConfig:
     gpu_block_size: list[int] | None = None
     gpu_vectorize: bool = False
     gpu_vectorize_config: VectorizeConfig | None = None
+    gpu_offload: Callable[[dace.SDFG], None] | None = None
 
 
 @dataclass

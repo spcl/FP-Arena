@@ -199,6 +199,7 @@ def compile_reference(experiment, reference):
         gpu_block_size=experiment.gpu_block_size,
         gpu_vectorize=experiment.gpu_vectorize,
         gpu_vectorize_config=experiment.gpu_vectorize_config,
+        gpu_offload=experiment.gpu_offload,
     )
     _distinguish(sdfg, "reference")
     return sdfg.compile()
@@ -219,6 +220,7 @@ def build_candidate_sdfg(experiment, pin_map: PrecisionMap) -> dace.SDFG:
         gpu_block_size=experiment.gpu_block_size,
         gpu_vectorize=experiment.gpu_vectorize,
         gpu_vectorize_config=experiment.gpu_vectorize_config,
+        gpu_offload=experiment.gpu_offload,
     )
     _distinguish(sdfg, _pin_tag(pin_map))
     return sdfg
@@ -345,6 +347,7 @@ def run_perturbation(
             gpu_block_size=exp.gpu_block_size,
             gpu_vectorize=exp.gpu_vectorize,
             gpu_vectorize_config=exp.gpu_vectorize_config,
+            gpu_offload=exp.gpu_offload,
         )
         _distinguish(sdfg, _pin_tag(pin_map))
         csdfg = sdfg.compile()

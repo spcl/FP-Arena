@@ -6,6 +6,7 @@ The bridge between an :class:`ExperimentConfig` and DaCe: build a fresh SDFG and
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 
 import dace
 from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
@@ -162,18 +163,24 @@ def apply_target(
     gpu_block_size: list[int] | None = None,
     gpu_vectorize: bool = False,
     gpu_vectorize_config: VectorizeConfig | None = None,
+    gpu_offload: Callable[[dace.SDFG], None] | None = None,
 ) -> None:
     """
     Retarget ``sdfg`` in place for the execution target.
+
+    On GPU, ``gpu_offload`` (if given) replaces the generic offload.
     """
     if target == "cpu":
         return
     if target == "gpu":
-        sdfg.apply_gpu_transformations(simplify=False)
-        for state in sdfg.all_states():
-            if _transfer_direction(sdfg, state) is not None:
-                _add_fusion_barrier(state)
-        sdfg.simplify()
+        if gpu_offload is not None:
+            gpu_offload(sdfg)
+        else:
+            sdfg.apply_gpu_transformations(simplify=False)
+            for state in sdfg.all_states():
+                if _transfer_direction(sdfg, state) is not None:
+                    _add_fusion_barrier(state)
+            sdfg.simplify()
         config = resolve_vectorize_config(target, gpu_vectorize, gpu_vectorize_config)
         if config is not None:
             VectorizeGPU(config).apply_pass(sdfg, {})
