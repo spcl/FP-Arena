@@ -247,12 +247,16 @@ def test_search_skips_configs_that_fail_to_build(monkeypatch):
     # The search survived and still returned the root as the best config.
     highest = {k.name: k.highest for k in result.knobs}
     assert result.best == highest
-    # The failing config is recorded, with the whole compiler log kept verbatim.
-    assert [f.precision for f in result.failures] == [{"a": "fp32"}]
-    assert result.failures[0].error == f"CompilationError: {log}"
+    # Both failing configs are recorded (the all-fp32 seed, then the a=fp32
+    # neighbour), with the whole compiler log kept verbatim.
+    assert [f.precision for f in result.failures] == [
+        {"a": "fp32", "b": "fp32", "c": "fp32"},
+        {"a": "fp32"},
+    ]
+    assert all(f.error == f"CompilationError: {log}" for f in result.failures)
     printed = format_search(result)  # indented, but every line is there
     assert all(line in printed for line in log.splitlines())
-    assert "failed=1" in printed
+    assert "failed=2" in printed
 
 
 @pytest.mark.parametrize("keep", [False, True])
