@@ -98,6 +98,10 @@ class SelectionSearchConfig:
     :param compile_workers: size of the compile pool that builds and
         compiles candidates ahead of the measurement workers. ``None`` uses
         ``os.cpu_count() - <measurement workers>``.
+    :param compile_ahead: per measurement slot, how many configs may be keyed,
+        compiling, or compiled and waiting for a slot. Bounds how far
+        compilation runs ahead of measurement, so configs are picked from the
+        heap with recent results (pruning, best-first order) in hand.
     :param grade_cpus_per_device: with ``devices``, each measurement worker is
         pinned to this many CPUs
     :param name: database/report name; defaults to the experiment's.
@@ -118,6 +122,7 @@ class SelectionSearchConfig:
     measure_workers: int = 1
     devices: list[int] | None = None
     compile_workers: int | None = None
+    compile_ahead: int = 8
     grade_cpus_per_device: int = 8
     name: str | None = None
 
@@ -151,7 +156,8 @@ class _Slot:
         self.limits = limits
         self.n_warmup = n_warmup
         self.n_reps = n_reps
-        reads, _ = experiment.program.read_and_write_sets()
+        reads, writes = experiment.program.read_and_write_sets()
+        self._written = set(writes)
         ref = compile_reference(experiment, reference)
         self._samples: list[tuple[dict, dict[str, np.ndarray]]] = []
         for rng in _sample_rngs(experiment.seed, n_samples):
@@ -193,6 +199,8 @@ class _Slot:
                     self.n_warmup,
                     self.n_reps,
                     rng,
+                    initial_args=self._samples[0][0],
+                    written=self._written,
                 ),
             )
         else:
@@ -438,6 +446,8 @@ def run_search(
         if cfg.compile_workers is not None
         else max(1, (os.cpu_count() or 1) - n_slots)
     )
+    # Configs allowed between the heap and a measurement slot at once.
+    lookahead = max(1, cfg.compile_ahead) * n_slots
 
     errors_cache: dict[
         CanonicalKey, dict[str, ErrorStats]
@@ -620,10 +630,12 @@ def run_search(
                 )
 
             # Feed the compile pool from the heap; each config is keyed first.
+            # Stop when the compile pool is full, the lookahead is reached, or the budget is hit.
             while (
                 heap
                 and not budget_hit
                 and len(key_futs) + len(compile_futs) < n_compilers
+                and len(key_futs) + len(compile_futs) + len(ready) < lookahead
             ):
                 if cfg.compute_budget is not None:
                     if stats["evaluated"] >= cfg.compute_budget:

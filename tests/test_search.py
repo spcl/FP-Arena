@@ -164,8 +164,10 @@ def test_search_worker_count_does_not_change_result():
     }
     one = run_search(SelectionSearchConfig(measure_workers=1, **kw))
     many = run_search(SelectionSearchConfig(measure_workers=4, **kw))
+    # One config between the heap and the slot at a time: fully sequential.
+    serial = run_search(SelectionSearchConfig(compile_ahead=1, **kw))
     assert not many.unsatisfiable
-    assert many.best == one.best  # nothing lowered, both
+    assert many.best == one.best == serial.best  # nothing lowered, all three
     assert many.n_pruned == one.n_pruned
 
 
