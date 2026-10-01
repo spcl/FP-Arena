@@ -50,13 +50,22 @@ class Screening:
 def _severity(
     errors: dict[str, ErrorStats], limits: dict[str, dict[str, float]]
 ) -> float:
-    """The worst fraction of any (lower-is-better, finite) limit the probe consumes."""
+    """The worst fraction of any limit the probe consumes, as an error-amplitude ratio."""
     worst = 0.0
     for c in check(errors, limits):
-        if METRICS[c.metric].higher_is_better:
+        if not math.isfinite(c.limit):
             continue
-        if c.limit > 0.0 and math.isfinite(c.limit) and math.isfinite(c.value):
-            worst = max(worst, c.value / c.limit)
+        if METRICS[c.metric].higher_is_better:
+            if c.value == math.inf:
+                continue  # exact match: consumes nothing
+            if math.isnan(c.value) or c.value == -math.inf:
+                return math.inf
+            worst = max(worst, 10.0 ** ((c.limit - c.value) / 20.0))
+        else:
+            if not math.isfinite(c.value):
+                return math.inf
+            if c.limit > 0.0:
+                worst = max(worst, c.value / c.limit)
     return worst
 
 
@@ -131,7 +140,8 @@ def _report(
         for array, limit in sorted(limits[metric].items()):
             value = floor.get(metric, {}).get(array)
             derived = f"  (noise floor {value:.4g})" if value is not None else ""
-            print(f"  budget: {metric} {array} <= {limit:.4g}{derived}")
+            relation = ">=" if METRICS[metric].higher_is_better else "<="
+            print(f"  budget: {metric} {array} {relation} {limit:.4g}{derived}")
     print("  probe severity = worst fraction of a limit consumed; 1 is at the limit")
     for knob in sorted(source_knobs, key=lambda k: sensitivity.get(k.name, 0.0)):
         cells = []

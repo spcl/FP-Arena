@@ -1088,3 +1088,25 @@ def test_callable_init_function_covers_constant_and_fixed_data():
     )
     args = make_call_args(fresh_sdfg(exp), exp, np.random.default_rng(0))
     assert np.allclose(args["a"], 2.0)
+
+
+def test_severity_of_a_decibel_metric_is_an_amplitude_ratio():
+    from fp_arena.experiment.screening import _severity
+
+    limits = {"snr_var": {"c": 60.0}}
+    # 20 dB above the limit is a 10x smaller error amplitude.
+    assert _severity({"c": _stats(snr_var=80.0)}, limits) == pytest.approx(0.1)
+    assert _severity({"c": _stats(snr_var=60.0)}, limits) == pytest.approx(1.0)
+    assert _severity({"c": _stats(snr_var=40.0)}, limits) == pytest.approx(10.0)
+    # Exact match consumes nothing; a broken (NaN) output is infinitely severe.
+    assert _severity({"c": _stats(snr_var=np.inf)}, limits) == 0.0
+    assert _severity({"c": _stats(snr_var=-np.inf)}, limits) == np.inf
+
+
+def test_severity_of_a_non_finite_linear_error_is_infinite():
+    from fp_arena.experiment.screening import _severity
+
+    limits = {"l2_norm": {"c": 1e-2}}
+    assert _severity({"c": _stats(l2_norm=5e-3)}, limits) == pytest.approx(0.5)
+    assert _severity({"c": _stats(l2_norm=np.inf)}, limits) == np.inf
+    assert _severity({"c": _stats(l2_norm=np.nan)}, limits) == np.inf
