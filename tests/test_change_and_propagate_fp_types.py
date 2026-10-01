@@ -9,6 +9,7 @@ from dace.sdfg import utils as sdfg_utils
 from dace.transformation.dataflow import MapFusion
 
 from corpus.heat3d import heat3d_kernel
+from fp_arena.dtypes import mpfr
 from fp_arena.experiment.retarget import apply_target
 from fp_arena.transformations.change_and_propagate_fp_types import (
     DEFAULT_PROMOTION_RULES,
@@ -684,6 +685,48 @@ def test_constant_type_only_touches_python_tasklets():
     assert "float(0.5)" not in code, code
 
 
+def _literal_flow_sdfg(first_code: str, with_input: bool) -> dace.SDFG:
+    """[A ->] t1(first_code -> y) -> T (transient) -> t2 (v = u) -> B, all float64."""
+    sdfg = dace.SDFG("literal_flow")
+    sdfg.add_array("A", [1], dace.float64, transient=False)
+    sdfg.add_array("T", [1], dace.float64, transient=True)
+    sdfg.add_array("B", [1], dace.float64, transient=False)
+    s = sdfg.add_state("s")
+    t1 = s.add_tasklet("t1", {"x"} if with_input else set(), {"y"}, first_code)
+    if with_input:
+        s.add_edge(s.add_read("A"), None, t1, "x", dace.Memlet("A[0]"))
+    tmp = s.add_access("T")
+    s.add_edge(t1, "y", tmp, None, dace.Memlet("T[0]"))
+    t2 = s.add_tasklet("t2", {"u"}, {"v"}, "v = u")
+    s.add_edge(tmp, None, t2, "u", dace.Memlet("T[0]"))
+    s.add_edge(t2, "v", s.add_write("B"), None, dace.Memlet("B[0]"))
+    return sdfg
+
+
+@pytest.mark.parametrize(
+    "code, with_input", [("y = x * 0.5", True), ("y = 275.0", False)]
+)
+def test_wider_constant_type_widens_what_literals_flow_into(code, with_input):
+    """An mpfr literal cannot be stored in a double: data it flows into widens."""
+    mpfr128 = mpfr(128)
+    sdfg = _literal_flow_sdfg(code, with_input)
+    change_and_propagate_fp_types(sdfg, {}, constant_type=mpfr128)
+    assert sdfg.arrays["T"].dtype == mpfr128
+    # The interface keeps its type; the output is cast back.
+    assert sdfg.arrays["A"].dtype == dace.float64
+    assert sdfg.arrays["B"].dtype == dace.float64
+
+
+@pytest.mark.parametrize(
+    "code, with_input", [("y = x * 0.5", True), ("y = 275.0", False)]
+)
+def test_narrower_constant_type_leaves_what_literals_flow_into(code, with_input):
+    """A float32 literal fits a double, so the data it flows into keeps its type."""
+    sdfg = _literal_flow_sdfg(code, with_input)
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    assert sdfg.arrays["T"].dtype == dace.float64
+
+
 def _symbol_sdfg() -> dace.SDFG:
     """Symbols from a literal (c), from literals via c (e), and copying A[0] (d)."""
     sdfg = dace.SDFG("symbol_origins")
@@ -708,6 +751,15 @@ def test_constant_type_lowers_literal_symbols_but_not_data_copies():
     assert sdfg.symbols["c"] == dace.float32
     assert sdfg.symbols["e"] == dace.float32
     assert sdfg.symbols["d"] == dace.float64
+
+
+def test_wider_constant_type_retypes_every_float_symbol():
+    """An MPFR constant type (a reference) puts every float symbol at that precision."""
+    mpfr128 = mpfr(128)
+    sdfg = _symbol_sdfg()
+    change_and_propagate_fp_types(sdfg, {}, constant_type=mpfr128)
+    for name in ("c", "d", "e"):
+        assert sdfg.symbols[name] == mpfr128, name
 
 
 def test_constant_type_end_to_end_float32_precision():

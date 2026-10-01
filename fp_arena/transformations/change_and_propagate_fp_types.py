@@ -15,7 +15,7 @@ from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 from dace.transformation.transformation import ExpandTransformation
 from tqdm.auto import tqdm
 
-from fp_arena.dtypes import float32sr, float64sr
+from fp_arena.dtypes import float32sr, float64sr, mpfr
 
 # Default promotion rules for the standard float/SR types.
 DEFAULT_PROMOTION_RULES: dict[frozenset, dace.dtypes.typeclass] = {
@@ -61,6 +61,12 @@ def _promote(
     if t1 == t2:
         return t1
     key = frozenset({t1, t2})
+    if key not in rules and (isinstance(t1, mpfr) or isinstance(t2, mpfr)):
+        # MPFR is parametric, so the rule is general rather than tabulated: it
+        # outranks every native and SR float, and the higher precision wins.
+        if isinstance(t1, mpfr) and isinstance(t2, mpfr):
+            return t1 if t1.precision >= t2.precision else t2
+        return t1 if isinstance(t1, mpfr) else t2
     if key not in rules:
         raise ValueError(f"No promotion rule defined for types {t1} and {t2}")
     return rules[key]
@@ -562,12 +568,18 @@ def _cast_after(
 def _homogenize_tasklet_dtypes(
     sdfg: dace.SDFG,
     rules: dict[frozenset, dace.dtypes.typeclass],
+    constant_tasklets: set[int] = frozenset(),
+    constant_type: dace.dtypes.typeclass | None = None,
 ) -> None:
     for state in _states_in_order(sdfg):
         for node in list(state.nodes()):
             if not isinstance(node, nodes.Tasklet):
                 continue
             join = _input_join(state, node, sdfg, rules)
+            # Literals / symbols of a wider constant type take part in the
+            # operation too (see _add_literal_source).
+            if join is not None and id(node) in constant_tasklets:
+                join = _promote(join, constant_type, rules)
             if join is None or _has_bulk_fp_connector(state, node, sdfg):
                 continue
             for e in list(state.in_edges(node)):
@@ -941,16 +953,16 @@ def _literal_symbols(sdfgs: list[dace.SDFG]) -> dict[int, set[str]]:
 # With *only_literal* (a constant type narrower than or equal to double) just the
 # symbols computed from literals are retyped.
 def _lower_symbols_and_constants(
-    sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass
+    sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass, only_literal: bool = True
 ) -> None:
     root = sdfgs[0]
     abi_symbols = set(map(str, root.free_symbols))
-    literal = _literal_symbols(sdfgs)
+    literal = _literal_symbols(sdfgs) if only_literal else None
     for sd in sdfgs:
         for name, stype in list(sd.symbols.items()):
             if not _is_fp(stype) or (sd is root and name in abi_symbols):
                 continue
-            if name in literal[id(sd)]:
+            if literal is None or name in literal[id(sd)]:
                 sd.symbols[name] = dtype
         for desc, _value in sd.constants_prop.values():
             if _is_fp(getattr(desc, "dtype", None)):
@@ -971,6 +983,75 @@ def _declare_interstate_symbols(sdfgs: list[dace.SDFG]) -> None:
             sd.add_symbol(name, max(stypes, key=lambda t: t.bytes))
 
 
+# Whether *dtype* is strictly wider than double under *rules* (e.g. MPFR).
+def _widens_double(
+    dtype: dace.dtypes.typeclass, rules: dict[frozenset, dace.dtypes.typeclass]
+) -> bool:
+    if _types_equal(dtype, dace.float64):
+        return False
+    return _types_equal(_promote(dace.float64, dtype, rules), dtype)
+
+
+# ids of the Python tasklets whose code contains a float literal or reads a
+# symbol of *constant_type* (after the constants were retyped).
+def _tasklets_using_constants(
+    sdfgs: list[dace.SDFG], constant_type: dace.dtypes.typeclass
+) -> set[int]:
+    found: set[int] = set()
+    for sd in sdfgs:
+        typed = {n for n, t in sd.symbols.items() if _types_equal(t, constant_type)}
+        for state in sd.all_states():
+            for node in state.nodes():
+                if not (
+                    isinstance(node, nodes.Tasklet)
+                    and node.language == dace.Language.Python
+                ):
+                    continue
+                tree = ast.parse(node.code.as_string)
+                if any(
+                    (isinstance(n, ast.Constant) and isinstance(n.value, float))
+                    or (isinstance(n, ast.Name) and n.id in typed)
+                    for n in ast.walk(tree)
+                ):
+                    found.add(id(node))
+    return found
+
+
+#: Pseudo-class standing for "a float literal" in the dataflow graph.
+_LITERAL: QKey = (0, "__fp_literal__")
+
+
+# Adds the literals as one pinned source of *constant_type*, producing every
+# class a literal-bearing tasklet writes. Promotion then widens those classes
+# (a literal alone, or a literal combined with double data) to the constant type.
+def _add_literal_source(
+    sdfgs: list[dace.SDFG],
+    uf: _UnionFind,
+    literal_tasklets: set[int],
+    constant_type: dace.dtypes.typeclass,
+    members: dict[QKey, list[tuple[dace.SDFG, str]]],
+    original_types: dict[QKey, dace.dtypes.typeclass],
+    pins: dict[QKey, dace.dtypes.typeclass],
+    producers: dict[QKey, set[QKey]],
+    consumers: dict[QKey, set[QKey]],
+) -> None:
+    members[_LITERAL] = []
+    original_types[_LITERAL] = constant_type
+    pins[_LITERAL] = constant_type
+    for sd in sdfgs:
+        sid = id(sd)
+        for state in sd.all_states():
+            for node in state.nodes():
+                if id(node) not in literal_tasklets:
+                    continue
+                for e in state.out_edges(node):
+                    if e.data is not None and e.data.data is not None:
+                        out = uf.find((sid, e.data.data))
+                        if _is_fp(original_types.get(out)):
+                            producers[out].add(_LITERAL)
+                            consumers[_LITERAL].add(out)
+
+
 # Main entry point to change and propagate fp types through an SDFG.
 def change_and_propagate_fp_types(
     sdfg: dace.SDFG,
@@ -989,9 +1070,15 @@ def change_and_propagate_fp_types(
     _declare_interstate_symbols(sdfgs)
 
     # Optionally cast every float literal in the computation to a fixed precision.
+    literal_tasklets: set[int] = set()
     if constant_type is not None:
         _cast_float_constants(sdfg, constant_type)
-        _lower_symbols_and_constants(sdfgs, constant_type)
+        _lower_symbols_and_constants(
+            sdfgs, constant_type, only_literal=not _widens_double(constant_type, rules)
+        )
+        # A constant type wider than double (MPFR) makes literals and the retyped symbols a source of that type
+        if _widens_double(constant_type, rules):
+            literal_tasklets = _tasklets_using_constants(sdfgs, constant_type)
     _warn_unlowerable(sdfgs)
 
     # Unify the two sides of every NestedSDFG boundary, then resolve classes.
@@ -1027,6 +1114,18 @@ def change_and_propagate_fp_types(
 
     # Build the array-level dataflow graph and solve the precision fixed point.
     producers, consumers = _build_dataflow(sdfgs, uf)
+    if literal_tasklets:
+        _add_literal_source(
+            sdfgs,
+            uf,
+            literal_tasklets,
+            constant_type,
+            members,
+            original_types,
+            pins,
+            producers,
+            consumers,
+        )
 
     inferred = _infer_types(
         members,
@@ -1060,7 +1159,7 @@ def change_and_propagate_fp_types(
         # Give every conversion a node of its own: first the ones a tasklet body
         # would otherwise hide, then those on edges between differently-typed
         # containers.
-        _homogenize_tasklet_dtypes(sd, rules)
+        _homogenize_tasklet_dtypes(sd, rules, literal_tasklets, constant_type)
         _insert_edge_casts(sd)
 
     # Preserve the external interface: non-transient arrays of the *root* SDFG

@@ -87,9 +87,14 @@ def apply_precision(
 def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
     """
     Lower ``sdfg`` in place to the reference precision (a single key for every fp array, or a per-array ``{name: key}`` map).
+
+    A single MPFR key also retypes float literals and float symbols (the
+    constants knob), so the whole computation runs at that precision.
     """
     if isinstance(reference, str):
         ref_map = {name: reference for name in candidate_fp_arrays(sdfg)}
+        if registry.is_mpfr(reference):
+            ref_map[CONSTANTS_KEY] = reference
     else:
         ref_map = dict(reference)
     apply_precision(sdfg, ref_map, promotion_rules)

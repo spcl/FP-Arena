@@ -50,7 +50,7 @@ class MPFR:
     cmake_packages: ClassVar[list] = []
     cmake_variables: ClassVar[dict] = {}
     cmake_includes: ClassVar[list] = [INCLUDE_DIR]
-    cmake_libraries: ClassVar[list] = ["mpfr"]
+    cmake_libraries: ClassVar[list] = ["mpfr;gmp"]
     cmake_compile_flags: ClassVar[list] = []
     cmake_link_flags: ClassVar[list] = []
     cmake_files: ClassVar[list] = []
