@@ -21,6 +21,7 @@ import heapq
 import itertools
 import multiprocessing as mp
 import os
+import shutil
 import subprocess
 import warnings
 from dataclasses import dataclass, field
@@ -104,6 +105,7 @@ class SelectionSearchConfig:
         heap with recent results (pruning, best-first order) in hand.
     :param grade_cpus_per_device: with ``devices``, each measurement worker is
         pinned to this many CPUs
+    :param keep_builds: keep each candidate's build folder after it is graded.
     :param name: database/report name; defaults to the experiment's.
 
     """
@@ -124,6 +126,7 @@ class SelectionSearchConfig:
     compile_workers: int | None = None
     compile_ahead: int = 8
     grade_cpus_per_device: int = 8
+    keep_builds: bool = False
     name: str | None = None
 
     def __post_init__(self) -> None:
@@ -205,6 +208,7 @@ class _Slot:
             )
         else:
             csdfg.finalize()
+        csdfg._lib.unload()
         return errors, perf
 
 
@@ -460,7 +464,7 @@ def run_search(
     key_futs: dict[cf.Future, Config] = {}
     compile_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
     ready: list[tuple[Config, CanonicalKey, str]] = []  # (config, key, build folder)
-    grade_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
+    grade_futs: dict[cf.Future, tuple[Config, CanonicalKey, str]] = {}
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
     candidates: list[SearchCandidate] = []
@@ -546,6 +550,13 @@ def run_search(
             device_queue,
         ),
     )
+    # Delete the build folders of configs that were compiled and graded
+    cleaner = cf.ThreadPoolExecutor(1, thread_name_prefix="rm-build")
+
+    def discard(folder: str) -> None:
+        if not cfg.keep_builds:
+            cleaner.submit(shutil.rmtree, folder, ignore_errors=True)
+
     root_ms = None
     try:
         # Root first: the feasibility floor and the speedup denominator.
@@ -556,6 +567,7 @@ def run_search(
         root_errors, root_perf = grade_pool.submit(
             _grade_task, root_folder, pin_map(root)
         ).result()
+        discard(root_folder)
         errors_cache[root_key] = root_errors
         if not _feasible(root_errors, limits, cfg.budget):
             return _finish(
@@ -623,10 +635,12 @@ def run_search(
                 config, key, folder = ready.pop(0)
                 if dominated(config):
                     stats["pruned"] += 1
+                    discard(folder)
                     continue
                 grade_futs[grade_pool.submit(_grade_task, folder, pin_map(config))] = (
                     config,
                     key,
+                    folder,
                 )
 
             # Feed the compile pool from the heap; each config is keyed first.
@@ -676,13 +690,17 @@ def run_search(
                             stacklevel=2,
                         )
                     continue
-                config, key = grade_futs.pop(fut)
+                config, key, folder = grade_futs.pop(fut)
                 errors, perf = fut.result()
+                discard(folder)
                 errors_cache[key] = errors
                 integrate(config, key, errors, perf)
     finally:
         compile_pool.shutdown(wait=True)
         grade_pool.shutdown(wait=True)
+        for _, _, folder in [*ready, *grade_futs.values()]:
+            discard(folder)
+        cleaner.shutdown(wait=True)
 
     result = SearchResult(
         best=best[0],

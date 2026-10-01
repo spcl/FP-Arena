@@ -2,6 +2,7 @@
 """Tests for the selection search (knobs, canonical typing, run_search)."""
 
 import concurrent.futures as cf
+import os
 
 import dace
 import pytest
@@ -252,6 +253,39 @@ def test_search_skips_configs_that_fail_to_build(monkeypatch):
     printed = format_search(result)  # indented, but every line is there
     assert all(line in printed for line in log.splitlines())
     assert "failed=1" in printed
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_search_deletes_graded_build_folders(monkeypatch, tmp_path, keep):
+    """Every graded candidate's build folder is deleted unless keep_builds is set."""
+    built: list[str] = []
+    original = search._compile_task
+
+    def _compile(pin_map):
+        built.append(original(pin_map))
+        return built[-1]
+
+    monkeypatch.setattr(search, "_compile_task", _compile)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+
+    with dace.config.set_temporary("default_build_folder", value=str(tmp_path)):
+        run_search(
+            SelectionSearchConfig(
+                experiment=_experiment(_AXPY),
+                budget=ErrorBudget(
+                    limits={"rel_max": 1e-3}
+                ),  # fp32 passes: several builds
+                reference="fp64",
+                n_samples=1,
+                n_warmup=1,
+                n_reps=2,
+                keep_builds=keep,
+            )
+        )
+
+    assert len(built) > 1
+    assert all(f.startswith(str(tmp_path)) for f in built)
+    assert [os.path.isdir(f) for f in built] == [keep] * len(built)
 
 
 def test_search_build_failure_of_the_root_is_fatal(monkeypatch):
