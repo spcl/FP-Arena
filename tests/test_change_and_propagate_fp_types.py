@@ -684,6 +684,32 @@ def test_constant_type_only_touches_python_tasklets():
     assert "float(0.5)" not in code, code
 
 
+def _symbol_sdfg() -> dace.SDFG:
+    """Symbols from a literal (c), from literals via c (e), and copying A[0] (d)."""
+    sdfg = dace.SDFG("symbol_origins")
+    sdfg.add_array("A", [1], dace.float64, transient=False)
+    sdfg.add_array("B", [1], dace.float64, transient=False)
+    s0 = sdfg.add_state("s0")
+    s1 = sdfg.add_state("s1")
+    s2 = sdfg.add_state("s2")
+    sdfg.add_edge(s0, s1, dace.InterstateEdge(assignments={"c": "0.5", "d": "A[0]"}))
+    sdfg.add_edge(s1, s2, dace.InterstateEdge(assignments={"e": "c * 2.0"}))
+    t = s2.add_tasklet("t", {"x"}, {"y"}, "y = x * c + d + e")
+    s2.add_edge(s2.add_read("A"), None, t, "x", dace.Memlet("A[0]"))
+    s2.add_edge(t, "y", s2.add_write("B"), None, dace.Memlet("B[0]"))
+    return sdfg
+
+
+def test_constant_type_lowers_literal_symbols_but_not_data_copies():
+    """The constants knob retypes symbols computed from literals; a symbol that
+    copies an array element is data and keeps its type."""
+    sdfg = _symbol_sdfg()
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    assert sdfg.symbols["c"] == dace.float32
+    assert sdfg.symbols["e"] == dace.float32
+    assert sdfg.symbols["d"] == dace.float64
+
+
 def test_constant_type_end_to_end_float32_precision():
     """The wrapped constant is evaluated in the requested precision at runtime."""
 

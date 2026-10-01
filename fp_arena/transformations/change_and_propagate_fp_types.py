@@ -886,15 +886,71 @@ def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None
                 node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
 
 
-# Retypes every floating-point SDFG symbol and compile-time constant to *dtype*.
+# Names an expression reads, minus the functions it calls.
+def _expr_names(expr: str) -> set[str]:
+    tree = ast.parse(str(expr), mode="eval")
+    called = {
+        n.func.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} - called
+
+
+# For every SDFG the float symbols whose value comes from literals only
+def _literal_symbols(sdfgs: list[dace.SDFG]) -> dict[int, set[str]]:
+    result: dict[int, set[str]] = {}
+
+    def visit(sd: dace.SDFG, inherited: set[str]) -> None:
+        definitions: dict[str, list[str]] = defaultdict(list)
+        for e in sd.all_interstate_edges():
+            for name, expr in e.data.assignments.items():
+                definitions[name].append(expr)
+        literal = set(inherited) - set(definitions)
+        candidates = set(definitions)
+        # Optimistic fixed point: start from every assigned symbol and drop
+        # each one with a definition that reads a non-literal name.
+        literal |= candidates
+        changed = True
+        while changed:
+            changed = False
+            for name in list(candidates & literal):
+                for expr in definitions[name]:
+                    if any(n not in literal for n in _expr_names(expr)):
+                        literal.discard(name)
+                        changed = True
+                        break
+        result[id(sd)] = {
+            n for n in literal if _is_fp(sd.symbols.get(n)) or n in definitions
+        }
+        for state in sd.all_states():
+            for node in state.nodes():
+                if isinstance(node, nodes.NestedSDFG):
+                    passed = {
+                        inner
+                        for inner, outer in node.symbol_mapping.items()
+                        if all(n in literal for n in _expr_names(outer))
+                    }
+                    visit(node.sdfg, passed)
+
+    visit(sdfgs[0], set())
+    return result
+
+
+# Retypes floating-point SDFG symbols and compile-time constants to *dtype*.
+# With *only_literal* (a constant type narrower than or equal to double) just the
+# symbols computed from literals are retyped.
 def _lower_symbols_and_constants(
     sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass
 ) -> None:
     root = sdfgs[0]
     abi_symbols = set(map(str, root.free_symbols))
+    literal = _literal_symbols(sdfgs)
     for sd in sdfgs:
         for name, stype in list(sd.symbols.items()):
-            if _is_fp(stype) and not (sd is root and name in abi_symbols):
+            if not _is_fp(stype) or (sd is root and name in abi_symbols):
+                continue
+            if name in literal[id(sd)]:
                 sd.symbols[name] = dtype
         for desc, _value in sd.constants_prop.values():
             if _is_fp(getattr(desc, "dtype", None)):
