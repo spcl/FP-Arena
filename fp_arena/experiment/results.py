@@ -39,6 +39,7 @@ class ErrorStats:
     l2_norm   : sqrt(sum(e**2)) / sqrt(sum(r**2))
     linf_norm : max(|e|) / max(|r|)
     snr       : 10 * log10(sum(r**2) / sum(e**2))
+    snr_var   : 10 * log10(Var(r) / Var(e))
     """
 
     abs_mean: float
@@ -51,6 +52,7 @@ class ErrorStats:
     l2_norm: float
     linf_norm: float
     snr: float
+    snr_var: float
 
 
 def proportional(floor: float, factor: float) -> float:
@@ -107,6 +109,7 @@ METRICS: dict[str, Metric] = {
     "l2_norm": Metric(),
     "linf_norm": Metric(),
     "snr": Metric(higher_is_better=True, scale=power_decibels),
+    "snr_var": Metric(higher_is_better=True, scale=power_decibels),
 }
 
 

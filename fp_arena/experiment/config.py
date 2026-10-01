@@ -74,6 +74,7 @@ class ExperimentConfig:
     :param gpu_vectorize: if True, runs VectorizeGPU()
     :param gpu_vectorize_config: the ``VectorizeConfig`` used when ``gpu_vectorize`` is set; ``None`` uses ``DEFAULT_GPU_VECTORIZE_CONFIG``.
     :param gpu_offload: program-specific GPU offload ``(sdfg) -> None`` run in place of ``apply_gpu_transformations`` when ``target="gpu"``; ``None`` uses the generic offload. Must be a module-level function: the config is pickled to the search's workers.
+    :param derived_outputs: extra outputs computed from a run's arguments after the call, ``{name: fn(args) -> ndarray}``.
     """
 
     name: str
@@ -90,6 +91,9 @@ class ExperimentConfig:
     gpu_vectorize: bool = False
     gpu_vectorize_config: VectorizeConfig | None = None
     gpu_offload: Callable[[dace.SDFG], None] | None = None
+    derived_outputs: dict[str, Callable[[dict[str, Any]], Any]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass

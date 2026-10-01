@@ -157,6 +157,28 @@ def test_error_zero_when_candidate_equals_reference():
     assert errs[0].errors["c"].linf == 0.0
 
 
+def _c_minus_b(args):
+    """A derived output: the written ``c`` minus the input ``b``."""
+    return args["c"] - args["b"]
+
+
+def test_derived_outputs_are_graded_like_written_arrays():
+    exp = _exp(derived_outputs={"c_minus_b": _c_minus_b})
+    errs = run_error(
+        ErrorAnalysisConfig(exp, precisions=[{"a": "fp16"}, {}], reference="fp64")
+    )
+    lowered, same = errs[0].errors, errs[1].errors
+    assert set(lowered) == {"c", "c_minus_b"}
+    assert lowered["c_minus_b"].linf > 0.0
+    assert same["c_minus_b"].linf == 0.0
+
+
+def test_derived_output_may_not_shadow_a_written_array():
+    exp = _exp(derived_outputs={"c": _c_minus_b})
+    with pytest.raises(ValueError, match="shadow"):
+        run_error(ErrorAnalysisConfig(exp, precisions=[{}], reference="fp64"))
+
+
 def test_performance_runs():
     perfs = run_performance(
         PerformanceAnalysisConfig(
@@ -499,8 +521,59 @@ def test_error_norms_concatenate_across_accumulate_calls():
     _accumulate(whole, np.concatenate([ref1, ref2]), np.concatenate([cand1, cand2]))
 
     a, b = _finalize(split), _finalize(whole)
-    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr"):
+    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr", "snr_var"):
         assert getattr(a, f) == pytest.approx(getattr(b, f))
+
+
+def test_snr_var_matches_hand_computed_value():
+    # r = [1, 2, 3, 4] -> Var(r) = 1.25; e = [0, 0, 0, 1] -> Var(e) = 0.1875
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0, 3.0, 4.0]), np.array([1.0, 2.0, 3.0, 5.0]))
+    s = _finalize(acc)
+    assert s.snr_var == pytest.approx(10.0 * np.log10(1.25 / 0.1875))
+
+
+def test_snr_var_ignores_a_constant_offset():
+    # A pure bias has no variability: perfect by snr_var, penalised by snr.
+    ref = np.array([1.0, 2.0, 3.0, 4.0])
+    acc = _new_acc()
+    _accumulate(acc, ref, ref + 0.5)
+    s = _finalize(acc)
+    assert s.snr_var == np.inf
+    assert np.isfinite(s.snr)
+
+    # Adding a bias on top of a varying error leaves snr_var unchanged.
+    noisy = ref + np.array([0.0, 0.0, 0.0, 1.0])
+    a, b = _new_acc(), _new_acc()
+    _accumulate(a, ref, noisy)
+    _accumulate(b, ref, noisy + 7.0)
+    assert _finalize(a).snr_var == pytest.approx(_finalize(b).snr_var)
+
+
+def test_snr_var_is_accurate_for_a_large_mean():
+    # Variance from running sums of squares would cancel catastrophically here.
+    rng = np.random.default_rng(0)
+    ref = 250.0 + 1e-3 * rng.standard_normal(100_000)
+    cand = ref + 1e-6 * rng.standard_normal(ref.size)
+    acc = _new_acc()
+    for chunk in np.array_split(np.arange(ref.size), 7):
+        _accumulate(acc, ref[chunk], cand[chunk])
+    expected = 10.0 * np.log10(ref.var() / (cand - ref).var())
+    assert _finalize(acc).snr_var == pytest.approx(expected, rel=1e-9)
+
+
+def test_snr_var_edge_cases():
+    acc = _new_acc()
+    _accumulate(acc, np.full(3, 2.0), np.array([2.0, 2.0, 3.0]))
+    assert _finalize(acc).snr_var == -np.inf  # constant reference, varying error
+
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0]), np.array([np.nan, 2.0]))
+    assert _finalize(acc).snr_var == -np.inf  # non-finite error
+
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0]), np.array([1.0, 2.0]))
+    assert _finalize(acc).snr_var == np.inf  # exact match
 
 
 def test_error_norms_zero_on_exact_match():
@@ -537,7 +610,7 @@ def test_error_metrics_persist_to_store():
         store=db,
     )
     payload = db.query(kind="error")[0].payload["errors"]["c"]
-    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr"):
+    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr", "snr_var"):
         assert f in payload
 
 

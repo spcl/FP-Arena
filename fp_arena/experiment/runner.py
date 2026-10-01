@@ -85,13 +85,42 @@ def _new_acc() -> dict[str, float]:
         "sq_ref_sum": 0.0,
         "ref_abs_sum": 0.0,
         "ref_abs_max": 0.0,
+        # Running count / mean / sum of squared deviations of r and of the for snr_var.
+        "var_n": 0,
+        "ref_mean": 0.0,
+        "ref_m2": 0.0,
+        "err_mean": 0.0,
+        "err_m2": 0.0,
+        "err_nonfinite": False,
     }
+
+
+def _merge_moments(
+    n: int, mean: float, m2: float, n_b: int, mean_b: float, m2_b: float
+) -> tuple[float, float]:
+    """Mean and sum of squared deviations of two merged samples (sizes ``n``, ``n_b``)."""
+    total = n + n_b
+    delta = mean_b - mean
+    return mean + delta * n_b / total, m2 + m2_b + delta * delta * n * n_b / total
 
 
 def _accumulate(acc: dict[str, float], ref: np.ndarray, cand: np.ndarray) -> None:
     """Fold one (reference, candidate) array pair into the running error stats."""
     r = np.asarray(ref, dtype=np.float64).ravel()
     c = np.asarray(cand, dtype=np.float64).ravel()
+    if r.size:
+        err = c - r
+        if not np.isfinite(err).all():
+            acc["err_nonfinite"] = True
+        else:
+            n = acc["var_n"]
+            for key, x in (("ref", r), ("err", err)):
+                mean_b = float(x.mean())
+                m2_b = float(np.square(x - mean_b).sum())
+                acc[f"{key}_mean"], acc[f"{key}_m2"] = _merge_moments(
+                    n, acc[f"{key}_mean"], acc[f"{key}_m2"], r.size, mean_b, m2_b
+                )
+            acc["var_n"] = n + r.size
     diff = np.abs(c - r)
     diff = np.where(np.isnan(diff), np.inf, diff)
     denom = np.abs(r)
@@ -133,6 +162,17 @@ def _finalize(acc: dict[str, float]) -> ErrorStats:
         snr = -math.inf
     else:
         snr = 10.0 * math.log10(ref_power / err_power)
+
+    err_var = acc["err_m2"] / acc["var_n"] if acc["var_n"] else 0.0
+    ref_var = acc["ref_m2"] / acc["var_n"] if acc["var_n"] else 0.0
+    if acc["err_nonfinite"]:
+        snr_var = -math.inf
+    elif err_var <= 0.0:
+        snr_var = math.inf
+    elif ref_var <= 0.0 or not math.isfinite(ref_var):
+        snr_var = -math.inf
+    else:
+        snr_var = 10.0 * math.log10(ref_var / err_var)
     l1 = acc["abs_sum"]
     l2 = math.sqrt(err_power)
     linf = acc["abs_max"]
@@ -147,6 +187,7 @@ def _finalize(acc: dict[str, float]) -> ErrorStats:
         l2_norm=_ratio(l2, math.sqrt(ref_power)),
         linf_norm=_ratio(linf, acc["ref_abs_max"]),
         snr=snr,
+        snr_var=snr_var,
     )
 
 
@@ -165,6 +206,25 @@ def _output_arrays(sdfg: dace.SDFG) -> list[str]:
         and isinstance(sdfg.arrays[name], dace.data.Array)
         and not sdfg.arrays[name].transient
     )
+
+
+def _checked_outputs(experiment, sdfg: dace.SDFG | None = None) -> list[str]:
+    """The written arrays of ``sdfg`` (default: the program) plus the experiment's derived outputs."""
+    written = _output_arrays(sdfg if sdfg is not None else experiment.program)
+    clash = set(written) & set(experiment.derived_outputs)
+    if clash:
+        raise ValueError(f"Derived outputs {sorted(clash)} shadow written arrays")
+    return written + sorted(experiment.derived_outputs)
+
+
+def _collect_outputs(
+    experiment, args: dict[str, Any], names: list[str]
+) -> dict[str, Any]:
+    """``names``' values after a run: written arrays from ``args``, derived ones computed from it."""
+    derived = experiment.derived_outputs
+    return {
+        name: derived[name](args) if name in derived else args[name] for name in names
+    }
 
 
 #: Length past which a pin tag becomes a hash.
@@ -365,7 +425,7 @@ def run_perturbation(
                 raise ValueError(
                     f"Perturbed array {name!r} is not a read input of SDFG {sdfg.name!r}"
                 )
-        outputs = _output_arrays(sdfg)
+        outputs = _checked_outputs(exp, sdfg)
         acc = {pert: {out: _new_acc() for out in outputs} for pert in cfg.noise}
 
         for rng in tqdm(
@@ -377,12 +437,14 @@ def run_perturbation(
             clean_args = make_call_args(sdfg, exp, rng, reads=reads)
             base_args = _copy_args(clean_args)
             csdfg(**base_args)
+            base_out = _collect_outputs(exp, base_args, outputs)
             for pert_name, pert_noise in cfg.noise.items():
                 pert_args = _copy_args(clean_args)
                 pert_args[pert_name] = pert_noise.apply(clean_args[pert_name], rng)
                 csdfg(**pert_args)
+                pert_out = _collect_outputs(exp, pert_args, outputs)
                 for out in outputs:
-                    _accumulate(acc[pert_name][out], base_args[out], pert_args[out])
+                    _accumulate(acc[pert_name][out], base_out[out], pert_out[out])
 
         for pert_name in cfg.noise:
             result = PerturbationResult(
@@ -422,7 +484,7 @@ def run_error(
         exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
     )
     reads, _ = exp.program.read_and_write_sets()
-    outputs = _output_arrays(exp.program)
+    outputs = _checked_outputs(exp)
 
     ref_csdfg = compile_reference(exp, cfg.reference)
     candidates = [
@@ -443,7 +505,7 @@ def run_error(
         ref_csdfg(**ref_args)
         # Only the reference's written arrays are compared against; dropping the
         # rest keeps the read-only inputs from being held a third time over.
-        ref_out = {name: ref_args[name] for name in outputs}
+        ref_out = _collect_outputs(exp, ref_args, outputs)
         del ref_args
         cand_args = _copy_args(args)
         points = tqdm(cfg.precisions, desc="points", unit="pt", leave=False)
@@ -451,8 +513,9 @@ def run_error(
             points.set_postfix_str(_fmt_pin(pin_map))
             _reset_arrays(cand_args, args)
             candidates[i](**cand_args)
+            cand_out = _collect_outputs(exp, cand_args, outputs)
             for name in outputs:
-                _accumulate(accs[i][name], ref_out[name], cand_args[name])
+                _accumulate(accs[i][name], ref_out[name], cand_out[name])
 
     if cfg.n_samples > 0:
         # Release each point's persistent (on GPU, device-resident) state.

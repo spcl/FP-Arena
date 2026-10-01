@@ -58,10 +58,11 @@ from fp_arena.experiment.results import (
 from fp_arena.experiment.retarget import resolve_vectorize_config
 from fp_arena.experiment.runner import (
     _accumulate,
+    _checked_outputs,
+    _collect_outputs,
     _copy_args,
     _finalize,
     _new_acc,
-    _output_arrays,
     _sample_rngs,
     build_candidate_sdfg,
     compile_reference,
@@ -155,7 +156,7 @@ class _Slot:
         n_reps: int,
     ) -> None:
         self.experiment = experiment
-        self.outputs = _output_arrays(experiment.program)
+        self.outputs = _checked_outputs(experiment)
         self.limits = limits
         self.n_warmup = n_warmup
         self.n_reps = n_reps
@@ -167,7 +168,9 @@ class _Slot:
             args = make_call_args(experiment.program, experiment, rng, reads=reads)
             ref_args = _copy_args(args)
             ref(**ref_args)
-            self._samples.append((args, {n: ref_args[n] for n in self.outputs}))
+            self._samples.append(
+                (args, _collect_outputs(experiment, ref_args, self.outputs))
+            )
         ref.finalize()
 
     def grade_and_time(
@@ -183,8 +186,9 @@ class _Slot:
         for args, ref_out in self._samples:
             cand_args = _copy_args(args)
             csdfg(**cand_args)
+            cand_out = _collect_outputs(self.experiment, cand_args, self.outputs)
             for name in self.outputs:
-                _accumulate(accs[name], ref_out[name], cand_args[name])
+                _accumulate(accs[name], ref_out[name], cand_out[name])
         errors = {name: _finalize(a) for name, a in accs.items()}
         perf: PerfResult | None = None
         if all(c.ok for c in check(errors, self.limits)):

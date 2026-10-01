@@ -20,7 +20,7 @@ from fp_arena.experiment.config import (
 from fp_arena.experiment.inputs import Noise
 from fp_arena.experiment.knobs import Knob
 from fp_arena.experiment.results import METRICS, ErrorStats
-from fp_arena.experiment.runner import _output_arrays, run_perturbation
+from fp_arena.experiment.runner import _checked_outputs, run_perturbation
 from fp_arena.experiment.selection import check, noise_floor, resolve_limits
 from fp_arena.experiment.store import ResultStore
 
@@ -81,7 +81,7 @@ def screen(
             store=store,
         )
         floor = noise_floor(base, metrics)
-    arrays = budget.arrays or _output_arrays(experiment.program)
+    arrays = budget.arrays or _checked_outputs(experiment)
     limits = resolve_limits(budget, floor, arrays)
 
     probes: dict[str, dict[str, dict[str, ErrorStats]]] = {}
