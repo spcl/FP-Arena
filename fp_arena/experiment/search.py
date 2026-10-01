@@ -610,6 +610,8 @@ def run_search(
                 if name in combined:
                     combined[name] = fmt
             push(combined)
+        for fmt in ("fp32", "fp16"):
+            push({n: fmt if fmt in rung[n] else highest[n] for n in names})
         expand(root)
 
         def submit_compile(config: Config, key: CanonicalKey) -> None:
