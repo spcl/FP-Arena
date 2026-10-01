@@ -12,11 +12,12 @@ Registration follows the same pattern as ``dace-fpga``: importing this module
 mutates DaCe's global registries at runtime, so no DaCe source file is changed.
 """
 
-import numpy
 import ctypes
 
 import dace
-from dace import dtypes as _ddtypes, typeclass
+import numpy
+from dace import dtypes as _ddtypes
+from dace import typeclass
 
 #: C++ namespace-qualified type names emitted into generated code.
 _FLOAT32SR_CTYPE = "fp_arena::float32sr"
@@ -159,7 +160,55 @@ def register():
         _ddtypes.TYPECLASS_TO_STRING.setdefault(tc, tc.ctype)
 
     # Also expose the parametric mpfr class so `dace.mpfr(128)` works.
-    setattr(_ddtypes, "mpfr", mpfr)
-    setattr(dace, "mpfr", mpfr)
+    _ddtypes.mpfr = mpfr
+    dace.mpfr = mpfr
+
+    _teach_dace_mpfr()
 
     return FP_ARENA_TYPECLASSES
+
+
+def _teach_dace_mpfr() -> None:
+    """
+    Extend the two DaCe helpers that assume every float has a numpy scalar type.
+
+    ``mpfr`` maps to ``numpy.object_``, whose instances are plain Python ints:
+    DaCe's type inference (``result_type_of``, used for interstate edge
+    expressions) and its ``Fill`` literals (``python_literal``) both call numpy
+    scalar methods on them and fail. Both are wrapped so an ``mpfr`` operand is
+    handled first and everything else keeps DaCe's own behaviour. Idempotent.
+    """
+    if getattr(_ddtypes.result_type_of, "_fp_arena_mpfr", False):
+        return
+
+    original_result_type_of = _ddtypes.result_type_of
+
+    def result_type_of(lhs, *rhs):
+        if len(rhs) > 1:
+            return result_type_of(result_type_of(lhs, rhs[0]), *rhs[1:])
+        other = rhs[0] if rhs else None
+        if isinstance(lhs, mpfr) or isinstance(other, mpfr):
+            # Same rule as the precision pass: mpfr outranks any other float,
+            # the higher precision wins.
+            if isinstance(lhs, mpfr) and isinstance(other, mpfr):
+                return lhs if lhs.precision >= other.precision else other
+            return lhs if isinstance(lhs, mpfr) else other
+        return original_result_type_of(lhs, *rhs)
+
+    result_type_of._fp_arena_mpfr = True
+    _ddtypes.result_type_of = result_type_of
+
+    from dace.libraries.standard.nodes.fill import common as fill_common
+
+    original_numpy_scalar = fill_common.numpy_scalar
+
+    def numpy_scalar(value, dtype):
+        if isinstance(dtype, mpfr):
+            # The fill value as a double: every Fill literal renders from this,
+            # and dace::mpfr assigns from double. Its 8 bytes never match
+            # sizeof(mpfr_t), so a fill of an mpfr array is never a memset
+            # (which would clobber the limb pointer inside mpfr_t).
+            return numpy.float64(value)
+        return original_numpy_scalar(value, dtype)
+
+    fill_common.numpy_scalar = numpy_scalar

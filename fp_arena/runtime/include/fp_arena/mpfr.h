@@ -207,6 +207,10 @@ public:
     return mpfr_cmp(lhs.val, rhs.val) >= 0;
   }
 
+  // Raw MPFR handle, for the math functions below.
+  mpfr_ptr raw() { return val; }
+  mpfr_srcptr raw() const { return val; }
+
   // IO Stream
   friend std::ostream &operator<<(std::ostream &os, const mpfr &m) {
     char *str = nullptr;
@@ -219,4 +223,97 @@ public:
   }
 };
 
+// Math functions for dace::mpfr.
+namespace math {
+
+#define FP_ARENA_MPFR_UNARY(NAME, MPFR_FN)                                     \
+  template <unsigned int P> inline mpfr<P> NAME(const mpfr<P> &a) {            \
+    mpfr<P> r;                                                                 \
+    MPFR_FN(r.raw(), a.raw(), MPFR_RNDN);                                      \
+    return r;                                                                  \
+  }
+
+FP_ARENA_MPFR_UNARY(exp, mpfr_exp)
+FP_ARENA_MPFR_UNARY(log, mpfr_log)
+FP_ARENA_MPFR_UNARY(log10, mpfr_log10)
+FP_ARENA_MPFR_UNARY(sqrt, mpfr_sqrt)
+FP_ARENA_MPFR_UNARY(tanh, mpfr_tanh)
+FP_ARENA_MPFR_UNARY(abs, mpfr_abs)
+FP_ARENA_MPFR_UNARY(fabs, mpfr_abs)
+
+#undef FP_ARENA_MPFR_UNARY
+
+template <unsigned int P>
+inline mpfr<P> pow(const mpfr<P> &a, const mpfr<P> &b) {
+  mpfr<P> r;
+  mpfr_pow(r.raw(), a.raw(), b.raw(), MPFR_RNDN);
+  return r;
+}
+
+template <unsigned int P> inline mpfr<P> pow(const mpfr<P> &a, const double &b) {
+  return pow(a, mpfr<P>(b));
+}
+
+template <unsigned int P> inline mpfr<P> pow(const double &a, const mpfr<P> &b) {
+  return pow(mpfr<P>(a), b);
+}
+
+template <unsigned int P> inline mpfr<P> pow(const mpfr<P> &a, const int &b) {
+  mpfr<P> r;
+  mpfr_pow_si(r.raw(), a.raw(), b, MPFR_RNDN);
+  return r;
+}
+
+template <unsigned int P>
+inline mpfr<P> min(const mpfr<P> &a, const mpfr<P> &b) {
+  return b < a ? b : a;
+}
+template <unsigned int P> inline mpfr<P> min(const mpfr<P> &a, const double &b) {
+  return min(a, mpfr<P>(b));
+}
+template <unsigned int P> inline mpfr<P> min(const double &a, const mpfr<P> &b) {
+  return min(mpfr<P>(a), b);
+}
+template <unsigned int P>
+inline mpfr<P> max(const mpfr<P> &a, const mpfr<P> &b) {
+  return a < b ? b : a;
+}
+template <unsigned int P> inline mpfr<P> max(const mpfr<P> &a, const double &b) {
+  return max(a, mpfr<P>(b));
+}
+template <unsigned int P> inline mpfr<P> max(const double &a, const mpfr<P> &b) {
+  return max(mpfr<P>(a), b);
+}
+
+} // namespace math
+
+template <unsigned int P> inline mpfr<P> abs(const mpfr<P> &a) {
+  return math::abs(a);
+}
+
 } // namespace dace
+
+template <unsigned int P>
+inline dace::mpfr<P> Min(const dace::mpfr<P> &a, const dace::mpfr<P> &b) {
+  return dace::math::min(a, b);
+}
+template <unsigned int P>
+inline dace::mpfr<P> Min(const dace::mpfr<P> &a, const double &b) {
+  return dace::math::min(a, b);
+}
+template <unsigned int P>
+inline dace::mpfr<P> Min(const double &a, const dace::mpfr<P> &b) {
+  return dace::math::min(a, b);
+}
+template <unsigned int P>
+inline dace::mpfr<P> Max(const dace::mpfr<P> &a, const dace::mpfr<P> &b) {
+  return dace::math::max(a, b);
+}
+template <unsigned int P>
+inline dace::mpfr<P> Max(const dace::mpfr<P> &a, const double &b) {
+  return dace::math::max(a, b);
+}
+template <unsigned int P>
+inline dace::mpfr<P> Max(const double &a, const dace::mpfr<P> &b) {
+  return dace::math::max(a, b);
+}

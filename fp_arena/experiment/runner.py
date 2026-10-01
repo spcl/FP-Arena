@@ -7,13 +7,16 @@ Drivers that execute the experiment kinds.
 * :func:`run_perturbation` -- perturb one input at a time and compare against the clean run at the same precision point.
 """
 
-import math
-from typing import Any, Dict, List, Optional, Tuple
+from __future__ import annotations
 
-import numpy as np
-from tqdm.auto import tqdm
+import hashlib
+import math
+import uuid
+from typing import Any
 
 import dace
+import numpy as np
+from tqdm.auto import tqdm
 
 from fp_arena.experiment.config import (
     ErrorAnalysisConfig,
@@ -21,23 +24,30 @@ from fp_arena.experiment.config import (
     PerturbationAnalysisConfig,
     PrecisionMap,
 )
+from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.results import (
     ErrorResult,
     ErrorStats,
     PerfResult,
     PerturbationResult,
 )
-from fp_arena.experiment.inputs import make_call_args
 from fp_arena.experiment.retarget import (
     apply_precision,
     apply_reference,
     apply_target,
     fresh_sdfg,
+    resolve_vectorize_config,
 )
 from fp_arena.experiment.store import ResultStore
+from fp_arena.experiment.timers import (
+    insert_timers,
+    phase_breakdown,
+    read_timers,
+    reset_timers,
+)
 
 
-def _copy_args(args: Dict[str, Any]) -> Dict[str, Any]:
+def _copy_args(args: dict[str, Any]) -> dict[str, Any]:
     """Independent copy of the array arguments; scalars/symbols pass through."""
     return {
         k: (np.array(v, copy=True) if isinstance(v, np.ndarray) else v)
@@ -45,14 +55,16 @@ def _copy_args(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _reset_arrays(working: Dict[str, Any], source: Dict[str, Any]) -> None:
-    """Refill ``working``'s array buffers in place from ``source``."""
+def _reset_arrays(
+    working: dict[str, Any], source: dict[str, Any], names: set[str] | None = None
+) -> None:
+    """Refill ``working``'s array buffers in place from ``source`` (only ``names``, if given)."""
     for k, v in source.items():
-        if isinstance(v, np.ndarray):
+        if isinstance(v, np.ndarray) and (names is None or k in names):
             working[k][...] = v
 
 
-def _sample_rngs(seed: int, n: int) -> List[np.random.Generator]:
+def _sample_rngs(seed: int, n: int) -> list[np.random.Generator]:
     """
     ``n`` independent, reproducible per-sample generators from one base seed.
     """
@@ -61,7 +73,7 @@ def _sample_rngs(seed: int, n: int) -> List[np.random.Generator]:
     ]
 
 
-def _new_acc() -> Dict[str, float]:
+def _new_acc() -> dict[str, float]:
     return {
         "abs_sum": 0.0,
         "abs_cnt": 0,
@@ -73,13 +85,42 @@ def _new_acc() -> Dict[str, float]:
         "sq_ref_sum": 0.0,
         "ref_abs_sum": 0.0,
         "ref_abs_max": 0.0,
+        # Running count / mean / sum of squared deviations of r and of the for snr_var.
+        "var_n": 0,
+        "ref_mean": 0.0,
+        "ref_m2": 0.0,
+        "err_mean": 0.0,
+        "err_m2": 0.0,
+        "err_nonfinite": False,
     }
 
 
-def _accumulate(acc: Dict[str, float], ref: np.ndarray, cand: np.ndarray) -> None:
+def _merge_moments(
+    n: int, mean: float, m2: float, n_b: int, mean_b: float, m2_b: float
+) -> tuple[float, float]:
+    """Mean and sum of squared deviations of two merged samples (sizes ``n``, ``n_b``)."""
+    total = n + n_b
+    delta = mean_b - mean
+    return mean + delta * n_b / total, m2 + m2_b + delta * delta * n * n_b / total
+
+
+def _accumulate(acc: dict[str, float], ref: np.ndarray, cand: np.ndarray) -> None:
     """Fold one (reference, candidate) array pair into the running error stats."""
     r = np.asarray(ref, dtype=np.float64).ravel()
     c = np.asarray(cand, dtype=np.float64).ravel()
+    if r.size:
+        err = c - r
+        if not np.isfinite(err).all():
+            acc["err_nonfinite"] = True
+        else:
+            n = acc["var_n"]
+            for key, x in (("ref", r), ("err", err)):
+                mean_b = float(x.mean())
+                m2_b = float(np.square(x - mean_b).sum())
+                acc[f"{key}_mean"], acc[f"{key}_m2"] = _merge_moments(
+                    n, acc[f"{key}_mean"], acc[f"{key}_m2"], r.size, mean_b, m2_b
+                )
+            acc["var_n"] = n + r.size
     diff = np.abs(c - r)
     diff = np.where(np.isnan(diff), np.inf, diff)
     denom = np.abs(r)
@@ -108,7 +149,7 @@ def _ratio(num: float, den: float) -> float:
     return 0.0 if num <= 0.0 else math.inf
 
 
-def _finalize(acc: Dict[str, float]) -> ErrorStats:
+def _finalize(acc: dict[str, float]) -> ErrorStats:
     abs_mean = acc["abs_sum"] / acc["abs_cnt"] if acc["abs_cnt"] else 0.0
     rel_mean = acc["rel_sum"] / acc["rel_cnt"] if acc["rel_cnt"] else 0.0
     err_power = acc["sq_err_sum"]
@@ -121,6 +162,17 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
         snr = -math.inf
     else:
         snr = 10.0 * math.log10(ref_power / err_power)
+
+    err_var = acc["err_m2"] / acc["var_n"] if acc["var_n"] else 0.0
+    ref_var = acc["ref_m2"] / acc["var_n"] if acc["var_n"] else 0.0
+    if acc["err_nonfinite"]:
+        snr_var = -math.inf
+    elif err_var <= 0.0:
+        snr_var = math.inf
+    elif ref_var <= 0.0 or not math.isfinite(ref_var):
+        snr_var = -math.inf
+    else:
+        snr_var = 10.0 * math.log10(ref_var / err_var)
     l1 = acc["abs_sum"]
     l2 = math.sqrt(err_power)
     linf = acc["abs_max"]
@@ -135,110 +187,8 @@ def _finalize(acc: Dict[str, float]) -> ErrorStats:
         l2_norm=_ratio(l2, math.sqrt(ref_power)),
         linf_norm=_ratio(linf, acc["ref_abs_max"]),
         snr=snr,
+        snr_var=snr_var,
     )
-
-
-#: Device storage types; an edge crossing this boundary is a host<->device copy.
-_GPU_STORAGE = (
-    dace.dtypes.StorageType.GPU_Global,
-    dace.dtypes.StorageType.GPU_Shared,
-)
-
-
-def _transfer_direction(sdfg: dace.SDFG, state) -> Optional[str]:
-    """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
-    for e in state.edges():
-        src, dst = e.src, e.dst
-        if isinstance(src, dace.nodes.AccessNode) and isinstance(
-            dst, dace.nodes.AccessNode
-        ):
-            src_dev = sdfg.arrays[src.data].storage in _GPU_STORAGE
-            dst_dev = sdfg.arrays[dst.data].storage in _GPU_STORAGE
-            if src_dev != dst_dev:
-                return "h2d" if dst_dev else "d2h"
-    return None
-
-
-def _has_cast_map(state) -> bool:
-    """Whether ``state`` contains a precision-cast map."""
-    return any(
-        isinstance(n, dace.nodes.MapEntry) and n.map.label.startswith("cast_map_")
-        for n in state.nodes()
-    )
-
-
-def _classify_state(sdfg: dace.SDFG, state) -> str:
-    """Assign ``state`` to a timing phase: h2d/d2h, cast_in/cast_out, or kernel."""
-    direction = _transfer_direction(sdfg, state)
-    if direction is not None:
-        return direction
-    if _has_cast_map(state):
-        return "cast_out" if state.label.startswith("copy_out") else "cast_in"
-    return "kernel"
-
-
-def _group_per_invocation(
-    samples: List[float], n_invocations: int, name: str
-) -> List[float]:
-    """Sum a timer's per-execution samples into one value per invocation (loop bodies fire repeatedly)."""
-    if not samples:
-        return []
-    if len(samples) % n_invocations != 0:
-        raise ValueError(
-            f"Timer {name!r} fired {len(samples)} times over {n_invocations} "
-            f"invocations; per-rep phase attribution requires a static "
-            f"per-invocation execution count"
-        )
-    k = len(samples) // n_invocations
-    if k == 1:
-        return list(samples)
-    return [math.fsum(samples[i * k : (i + 1) * k]) for i in range(n_invocations)]
-
-
-def _phase_series(report, name_pred, n_reps: int, n_invocations: int) -> List[float]:
-    """Per-rep milliseconds summed over matching timers, warmup invocations dropped."""
-    out = [0.0] * n_reps
-    matched = False
-    if report is not None:
-        for names in report.durations.values():
-            for name, tid_map in names.items():
-                if not name_pred(name):
-                    continue
-                for times_ms in tid_map.values():
-                    per_inv = _group_per_invocation(times_ms, n_invocations, name)
-                    if not per_inv:
-                        continue
-                    for i, ms in enumerate(per_inv[-n_reps:]):
-                        out[i] += ms
-                    matched = True
-    return out if matched else []
-
-
-def _phase_breakdown(
-    sdfg: dace.SDFG, n_reps: int, n_invocations: int
-) -> Dict[str, Any]:
-    """Reduce the latest report into per-rep phase series; ``total`` is their sum."""
-    report = sdfg.get_latest_report()
-    # Map each state's report name -> phase category.
-    cat_of: Dict[str, str] = {}
-    for state in sdfg.all_states():
-        cat_of.setdefault(f"State {state.label}", _classify_state(sdfg, state))
-
-    def series(category: str) -> List[float]:
-        return _phase_series(
-            report, lambda nm: cat_of.get(nm) == category, n_reps, n_invocations
-        )
-
-    phases = {
-        "h2d_times": series("h2d"),
-        "cast_in_times": series("cast_in"),
-        "kernel_times": series("kernel"),
-        "cast_out_times": series("cast_out"),
-        "d2h_times": series("d2h"),
-    }
-    nonempty = [p for p in phases.values() if p]
-    total = [math.fsum(col) for col in zip(*nonempty)] if nonempty else []
-    return {"total_times": total, **phases}
 
 
 def _fmt_pin(pin_map: PrecisionMap) -> str:
@@ -246,7 +196,7 @@ def _fmt_pin(pin_map: PrecisionMap) -> str:
     return " ".join(f"{k}={v}" for k, v in pin_map.items())
 
 
-def _output_arrays(sdfg: dace.SDFG) -> List[str]:
+def _output_arrays(sdfg: dace.SDFG) -> list[str]:
     """Non-transient written array names -- the arrays error metrics are reduced over."""
     _, writes = sdfg.read_and_write_sets()
     return sorted(
@@ -258,95 +208,139 @@ def _output_arrays(sdfg: dace.SDFG) -> List[str]:
     )
 
 
-#: Per input sample: (pristine call args, reference outputs of the written arrays).
-ReferenceSamples = List[Tuple[Dict[str, Any], Dict[str, Any]]]
+def _checked_outputs(experiment, sdfg: dace.SDFG | None = None) -> list[str]:
+    """The written arrays of ``sdfg`` (default: the program) plus the experiment's derived outputs."""
+    written = _output_arrays(sdfg if sdfg is not None else experiment.program)
+    clash = set(written) & set(experiment.derived_outputs)
+    if clash:
+        raise ValueError(f"Derived outputs {sorted(clash)} shadow written arrays")
+    return written + sorted(experiment.derived_outputs)
+
+
+def _collect_outputs(
+    experiment, args: dict[str, Any], names: list[str]
+) -> dict[str, Any]:
+    """``names``' values after a run: written arrays from ``args``, derived ones computed from it."""
+    derived = experiment.derived_outputs
+    return {
+        name: derived[name](args) if name in derived else args[name] for name in names
+    }
+
+
+#: Length past which a pin tag becomes a hash.
+_TAG_BUDGET = 120
 
 
 def _pin_tag(pin_map: PrecisionMap) -> str:
     """Identifier-safe tag naming a precision point's build folder."""
-    return "_".join(f"{k}_{v}" for k, v in sorted(pin_map.items())) or "baseline"
+
+    if not pin_map:
+        return "baseline"
+    tag = "_".join(f"{k}_{v}" for k, v in sorted(pin_map.items()))
+    if len(tag) > _TAG_BUDGET:
+        tag = f"pins_{hashlib.blake2b(tag.encode(), digest_size=6).hexdigest()}"
+    return tag
 
 
 def _distinguish(sdfg: dace.SDFG, tag: str) -> None:
-    """Unique build folder per point."""
+    """
+    Give the SDFG its own build folder for this build.
+    """
     safe = "".join(ch if ch.isalnum() else "_" for ch in tag)
-    sdfg.name = f"{sdfg.name}_{safe}"
+    unique = uuid.uuid4().hex[:8]
+    sdfg.name = f"{sdfg.name}_{safe}_{unique}"
 
 
 def compile_reference(experiment, reference):
     """Build and compile the high-precision reference SDFG once."""
     sdfg = fresh_sdfg(experiment)
     apply_reference(sdfg, reference, experiment.promotion_rules)
-    apply_target(sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
+    apply_target(
+        sdfg,
+        experiment.target,
+        gpu_block_size=experiment.gpu_block_size,
+        gpu_vectorize=experiment.gpu_vectorize,
+        gpu_vectorize_config=experiment.gpu_vectorize_config,
+        gpu_offload=experiment.gpu_offload,
+    )
     _distinguish(sdfg, "reference")
     return sdfg.compile()
 
 
-def run_reference(
-    experiment, reference, n_samples: int, seed: int, noise=None
-) -> ReferenceSamples:
+def build_candidate_sdfg(experiment, pin_map: PrecisionMap) -> dace.SDFG:
     """
-    Execute the reference once per input sample.
+    Retarget one precision point into its own SDFG (unique build folder).
+
+    Returns the SDFG, not the compiled handle, so the caller can insert timers
+    (:func:`fp_arena.experiment.timers.insert_timers`) before ``.compile()``.
     """
-    ref_csdfg = compile_reference(experiment, reference)
-    program = experiment.program
-    reads, _ = program.read_and_write_sets()
-    outputs = _output_arrays(program)
-    samples: ReferenceSamples = []
-    for rng in tqdm(
-        _sample_rngs(seed, n_samples), desc="reference", unit="smp", leave=False
-    ):
-        args = make_call_args(program, experiment, rng, noise, reads=reads)
-        ref_args = _copy_args(args)
-        ref_csdfg(**ref_args)
-        samples.append((args, {name: ref_args[name] for name in outputs}))
-    return samples
-
-
-def measure_error(
-    experiment,
-    pin_map: PrecisionMap,
-    ref_samples: ReferenceSamples,
-    seed: int,
-) -> ErrorResult:
-    """
-    Execute one precision point on the reference's input samples and reduce the per-array error against the cached reference outputs.
-    """
-    cand_sdfg = fresh_sdfg(experiment)
-    apply_precision(cand_sdfg, pin_map, experiment.promotion_rules)
-    apply_target(cand_sdfg, experiment.target, gpu_block_size=experiment.gpu_block_size)
-    _distinguish(cand_sdfg, _pin_tag(pin_map))
-    cand_csdfg = cand_sdfg.compile()
-
-    acc = {name: _new_acc() for name in _output_arrays(cand_sdfg)}
-    for args, ref_out in tqdm(ref_samples, desc="samples", unit="smp", leave=False):
-        cand_args = _copy_args(args)
-        cand_csdfg(**cand_args)
-        for name in acc:
-            _accumulate(acc[name], ref_out[name], cand_args[name])
-
-    errors = {name: _finalize(a) for name, a in acc.items()}
-    return ErrorResult(
-        precision=dict(pin_map), errors=errors, n_samples=len(ref_samples), seed=seed
+    sdfg = fresh_sdfg(experiment)
+    apply_precision(sdfg, pin_map, experiment.promotion_rules)
+    apply_target(
+        sdfg,
+        experiment.target,
+        gpu_block_size=experiment.gpu_block_size,
+        gpu_vectorize=experiment.gpu_vectorize,
+        gpu_vectorize_config=experiment.gpu_vectorize_config,
+        gpu_offload=experiment.gpu_offload,
     )
+    _distinguish(sdfg, _pin_tag(pin_map))
+    return sdfg
+
+
+def compile_candidate(experiment, pin_map: PrecisionMap):
+    """Build and compile one precision point."""
+    return build_candidate_sdfg(experiment, pin_map).compile()
+
+
+def measure(
+    sdfg: dace.SDFG,
+    csdfg,
+    categories: list[str],
+    experiment,
+    n_warmup: int,
+    n_reps: int,
+    rng: np.random.Generator,
+    noise: dict[str, Any] | None = None,
+    initial_args: dict[str, Any] | None = None,
+    written: set[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Run ``n_warmup`` untimed then ``n_reps`` timed invocations, then reduce the
+    timer buffer into the per-rep :class:`PerfResult` timing kwargs.
+
+    The buffer is reset up front, so earlier invocations of ``csdfg`` (e.g. the
+    search's error grading) are discarded -- only the reps here are timed.
+    ``csdfg`` is finalized here; the caller must not run or finalize it again.
+
+    ``initial_args`` reuses inputs the caller already built.
+    """
+    reset_timers(csdfg)
+    if initial_args is None:
+        initial_args = make_call_args(sdfg, experiment, rng, noise)
+    args = _copy_args(initial_args)
+    for _ in range(n_warmup):
+        _reset_arrays(args, initial_args, written)
+        csdfg(**args)
+    for _ in range(n_reps):
+        _reset_arrays(args, initial_args, written)
+        csdfg(**args)
+    buf = read_timers(csdfg, len(categories))
+    csdfg.finalize()
+    return phase_breakdown(categories, buf, n_reps)
 
 
 def run_performance(
-    cfg: PerformanceAnalysisConfig, store: Optional[ResultStore] = None
-) -> List[PerfResult]:
+    cfg: PerformanceAnalysisConfig, store: ResultStore | None = None
+) -> list[PerfResult]:
     """Time each precision point, optionally appending to ``store``."""
-    results: List[PerfResult] = []
+    results: list[PerfResult] = []
     target = cfg.experiment.target
-    # CPU: host std::chrono; GPU: CUDA events (on-device, not async-launch, time).
-    provider = (
-        dace.InstrumentationType.GPU_Events
-        if target == "gpu"
-        else dace.InstrumentationType.Timer
+    vectorization = resolve_vectorize_config(
+        target, cfg.experiment.gpu_vectorize, cfg.experiment.gpu_vectorize_config
     )
-    n_invocations = cfg.n_warmup + cfg.n_reps
-
-    prev_each = dace.Config.get("instrumentation", "report_each_invocation")
-    dace.Config.set("instrumentation", "report_each_invocation", value=False)
+    # All work on the default stream, so the GPU timers' per-phase syncs isolate
+    # real work rather than overlapping streams (see runtime/.../timers.h).
     prev_streams = dace.Config.get("compiler", "cuda", "max_concurrent_streams")
     if target == "gpu":
         dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
@@ -355,42 +349,25 @@ def run_performance(
     try:
         for pin_map in points:
             points.set_postfix_str(_fmt_pin(pin_map))
-            sdfg = fresh_sdfg(cfg.experiment)
-            apply_precision(sdfg, pin_map, cfg.experiment.promotion_rules)
-            apply_target(sdfg, target, gpu_block_size=cfg.experiment.gpu_block_size)
-            _distinguish(sdfg, _pin_tag(pin_map))
-            # Time every state; classified into a phase at readout.
-            for state in sdfg.all_states():
-                state.instrument = provider
+            sdfg = build_candidate_sdfg(cfg.experiment, pin_map)
+            categories = insert_timers(sdfg, target)
             csdfg = sdfg.compile()
-            sdfg.clear_instrumentation_reports()
-
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
-            initial_args = make_call_args(sdfg, cfg.experiment, rng, cfg.noise)
-            args = _copy_args(initial_args)
-            runs = tqdm(
-                total=n_invocations,
-                desc="warmup",
-                unit="run",
-                leave=False,
+            breakdown = measure(
+                sdfg,
+                csdfg,
+                categories,
+                cfg.experiment,
+                cfg.n_warmup,
+                cfg.n_reps,
+                rng,
+                cfg.noise,
             )
-            for _ in range(cfg.n_warmup):
-                _reset_arrays(args, initial_args)
-                csdfg(**args)
-                runs.update(1)
-            runs.set_description("reps")
-            for _ in range(cfg.n_reps):
-                _reset_arrays(args, initial_args)
-                csdfg(**args)
-                runs.update(1)
-            runs.close()
-
-            csdfg.finalize()
 
             result = PerfResult(
                 precision=dict(pin_map),
                 seed=cfg.experiment.seed,
-                **_phase_breakdown(sdfg, cfg.n_reps, n_invocations),
+                **breakdown,
             )
             results.append(result)
             if store is not None:
@@ -399,9 +376,9 @@ def run_performance(
                     result,
                     symbols=cfg.experiment.symbols,
                     scalars=cfg.experiment.scalar_args,
+                    vectorization=vectorization,
                 )
     finally:
-        dace.Config.set("instrumentation", "report_each_invocation", value=prev_each)
         dace.Config.set(
             "compiler", "cuda", "max_concurrent_streams", value=prev_streams
         )
@@ -409,8 +386,8 @@ def run_performance(
 
 
 def run_perturbation(
-    cfg: PerturbationAnalysisConfig, store: Optional[ResultStore] = None
-) -> List[PerturbationResult]:
+    cfg: PerturbationAnalysisConfig, store: ResultStore | None = None
+) -> list[PerturbationResult]:
     """
     Measure per-array output sensitivity to input noise: for each precision
     point, execute clean and perturbed inputs (one noisy array at a time) on the
@@ -422,13 +399,23 @@ def run_perturbation(
             "PerturbationAnalysisConfig.noise must name at least one input array"
         )
     exp = cfg.experiment
-    results: List[PerturbationResult] = []
+    results: list[PerturbationResult] = []
+    vectorization = resolve_vectorize_config(
+        exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
+    )
     points = tqdm(cfg.precisions, desc="perturbation", unit="pt")
     for pin_map in points:
         points.set_postfix_str(_fmt_pin(pin_map))
         sdfg = fresh_sdfg(exp)
         apply_precision(sdfg, pin_map, exp.promotion_rules)
-        apply_target(sdfg, exp.target, gpu_block_size=exp.gpu_block_size)
+        apply_target(
+            sdfg,
+            exp.target,
+            gpu_block_size=exp.gpu_block_size,
+            gpu_vectorize=exp.gpu_vectorize,
+            gpu_vectorize_config=exp.gpu_vectorize_config,
+            gpu_offload=exp.gpu_offload,
+        )
         _distinguish(sdfg, _pin_tag(pin_map))
         csdfg = sdfg.compile()
 
@@ -438,7 +425,7 @@ def run_perturbation(
                 raise ValueError(
                     f"Perturbed array {name!r} is not a read input of SDFG {sdfg.name!r}"
                 )
-        outputs = _output_arrays(sdfg)
+        outputs = _checked_outputs(exp, sdfg)
         acc = {pert: {out: _new_acc() for out in outputs} for pert in cfg.noise}
 
         for rng in tqdm(
@@ -450,12 +437,14 @@ def run_perturbation(
             clean_args = make_call_args(sdfg, exp, rng, reads=reads)
             base_args = _copy_args(clean_args)
             csdfg(**base_args)
+            base_out = _collect_outputs(exp, base_args, outputs)
             for pert_name, pert_noise in cfg.noise.items():
                 pert_args = _copy_args(clean_args)
                 pert_args[pert_name] = pert_noise.apply(clean_args[pert_name], rng)
                 csdfg(**pert_args)
+                pert_out = _collect_outputs(exp, pert_args, outputs)
                 for out in outputs:
-                    _accumulate(acc[pert_name][out], base_args[out], pert_args[out])
+                    _accumulate(acc[pert_name][out], base_out[out], pert_out[out])
 
         for pert_name in cfg.noise:
             result = PerturbationResult(
@@ -468,25 +457,86 @@ def run_perturbation(
             results.append(result)
             if store is not None:
                 store.add(
-                    exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args
+                    exp.name,
+                    result,
+                    symbols=exp.symbols,
+                    scalars=exp.scalar_args,
+                    vectorization=vectorization,
                 )
     return results
 
 
 def run_error(
-    cfg: ErrorAnalysisConfig, store: Optional[ResultStore] = None
-) -> List[ErrorResult]:
-    """Measure per-array error of each precision point, optionally appending to ``store`` database."""
+    cfg: ErrorAnalysisConfig, store: ResultStore | None = None
+) -> list[ErrorResult]:
+    """
+    Measure per-array error of each precision point, optionally appending to
+    ``store`` database.
+
+    Samples are the outer loop: every point is compiled up front, then each
+    input realisation is executed by the reference and by every candidate in
+    lockstep and folded into that point's accumulator. Only one sample is ever
+    resident, so memory is flat in ``n_samples``.
+    """
     exp = cfg.experiment
-    ref_samples = run_reference(
-        exp, cfg.reference, cfg.n_samples, exp.seed, noise=cfg.noise
+    results: list[ErrorResult] = []
+    vectorization = resolve_vectorize_config(
+        exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
     )
-    results: List[ErrorResult] = []
-    points = tqdm(cfg.precisions, desc="error", unit="pt")
-    for pin_map in points:
-        points.set_postfix_str(_fmt_pin(pin_map))
-        result = measure_error(exp, pin_map, ref_samples, exp.seed)
+    reads, _ = exp.program.read_and_write_sets()
+    outputs = _checked_outputs(exp)
+
+    ref_csdfg = compile_reference(exp, cfg.reference)
+    candidates = [
+        compile_candidate(exp, pin_map)
+        for pin_map in tqdm(cfg.precisions, desc="compiling", unit="pt")
+    ]
+    # One accumulator per (precision point, written array); the samples fold in.
+    accs = [{name: _new_acc() for name in outputs} for _ in cfg.precisions]
+
+    for rng in tqdm(
+        _sample_rngs(exp.seed, cfg.n_samples),
+        desc="error",
+        unit="smp",
+        total=cfg.n_samples,
+    ):
+        args = make_call_args(exp.program, exp, rng, cfg.noise, reads=reads)
+        ref_args = _copy_args(args)
+        ref_csdfg(**ref_args)
+        # Only the reference's written arrays are compared against; dropping the
+        # rest keeps the read-only inputs from being held a third time over.
+        ref_out = _collect_outputs(exp, ref_args, outputs)
+        del ref_args
+        cand_args = _copy_args(args)
+        points = tqdm(cfg.precisions, desc="points", unit="pt", leave=False)
+        for i, pin_map in enumerate(points):
+            points.set_postfix_str(_fmt_pin(pin_map))
+            _reset_arrays(cand_args, args)
+            candidates[i](**cand_args)
+            cand_out = _collect_outputs(exp, cand_args, outputs)
+            for name in outputs:
+                _accumulate(accs[i][name], ref_out[name], cand_out[name])
+
+    if cfg.n_samples > 0:
+        # Release each point's persistent (on GPU, device-resident) state.
+        ref_csdfg.finalize()
+        for csdfg in candidates:
+            csdfg.finalize()
+
+    for pin_map, acc in zip(cfg.precisions, accs):
+        result = ErrorResult(
+            precision=dict(pin_map),
+            errors={name: _finalize(a) for name, a in acc.items()},
+            n_samples=cfg.n_samples,
+            seed=exp.seed,
+        )
         results.append(result)
         if store is not None:
-            store.add(exp.name, result, symbols=exp.symbols, scalars=exp.scalar_args)
+            store.add(
+                exp.name,
+                result,
+                symbols=exp.symbols,
+                scalars=exp.scalar_args,
+                vectorization=vectorization,
+            )
     return results
