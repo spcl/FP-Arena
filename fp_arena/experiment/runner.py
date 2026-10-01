@@ -55,10 +55,12 @@ def _copy_args(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _reset_arrays(working: dict[str, Any], source: dict[str, Any]) -> None:
-    """Refill ``working``'s array buffers in place from ``source``."""
+def _reset_arrays(
+    working: dict[str, Any], source: dict[str, Any], names: set[str] | None = None
+) -> None:
+    """Refill ``working``'s array buffers in place from ``source`` (only ``names``, if given)."""
     for k, v in source.items():
-        if isinstance(v, np.ndarray):
+        if isinstance(v, np.ndarray) and (names is None or k in names):
             working[k][...] = v
 
 
@@ -240,6 +242,8 @@ def measure(
     n_reps: int,
     rng: np.random.Generator,
     noise: dict[str, Any] | None = None,
+    initial_args: dict[str, Any] | None = None,
+    written: set[str] | None = None,
 ) -> dict[str, Any]:
     """
     Run ``n_warmup`` untimed then ``n_reps`` timed invocations, then reduce the
@@ -248,15 +252,18 @@ def measure(
     The buffer is reset up front, so earlier invocations of ``csdfg`` (e.g. the
     search's error grading) are discarded -- only the reps here are timed.
     ``csdfg`` is finalized here; the caller must not run or finalize it again.
+
+    ``initial_args`` reuses inputs the caller already built.
     """
     reset_timers(csdfg)
-    initial_args = make_call_args(sdfg, experiment, rng, noise)
+    if initial_args is None:
+        initial_args = make_call_args(sdfg, experiment, rng, noise)
     args = _copy_args(initial_args)
     for _ in range(n_warmup):
-        _reset_arrays(args, initial_args)
+        _reset_arrays(args, initial_args, written)
         csdfg(**args)
     for _ in range(n_reps):
-        _reset_arrays(args, initial_args)
+        _reset_arrays(args, initial_args, written)
         csdfg(**args)
     buf = read_timers(csdfg, len(categories))
     csdfg.finalize()
