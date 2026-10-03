@@ -11,6 +11,7 @@ import re
 
 import dace
 import numpy as np
+from dace.sdfg import utils as sdfg_utils
 
 from fp_arena.environments import Timers, TimersGPU
 from fp_arena.experiment.retarget import _transfer_direction
@@ -44,7 +45,7 @@ def _classify_state(sdfg: dace.SDFG, state) -> str:
 
 
 def _homogeneous_category(sdfg: dace.SDFG, block) -> str | None:
-    """The block's one phase, or ``None`` if it's a region spanning several (the caller recurses into those)."""
+    """The block's one phase, or ``None`` if it's a region spanning several."""
     if isinstance(block, dace.SDFGState):
         return _classify_state(sdfg, block)
     cats = {_classify_state(sdfg, s) for s in block.all_states()}
@@ -63,41 +64,59 @@ def _timer_tasklet(state, body: str, target: str) -> None:
     tasklet.side_effects = True
 
 
-def _bracket(
-    region, block, slot: int, category: str, target: str, is_start: bool
-) -> None:
-    """Splice a ``start(slot)`` state before ``block`` and a ``stop(slot)`` after it."""
+def _bracket(region, first, last, slot: int, category: str, target: str) -> None:
+    """Splice a ``start(slot)`` state before ``first`` and a ``stop(slot)`` after ``last``."""
     pre = region.add_state_before(
-        block, label=f"{_START_LABEL}_{slot}", is_start_block=is_start
+        first,
+        label=f"{_START_LABEL}_{slot}",
+        is_start_block=first is region.start_block,
     )
     _timer_tasklet(pre, f"fp_arena::timer::start({slot});", target)
-    post = region.add_state_after(block, label=f"{_STOP_LABEL}_{slot}__{category}")
+    post = region.add_state_after(last, label=f"{_STOP_LABEL}_{slot}__{category}")
     _timer_tasklet(post, f"fp_arena::timer::stop({slot});", target)
 
 
-def _bracket_region(
-    sdfg: dace.SDFG, region, target: str, categories: list[str]
-) -> None:
-    """Bracket every phase-homogeneous child of ``region``; recurse into the rest."""
-    start_block = region.start_block
-    for block in list(region.nodes()):
-        category = _homogeneous_category(sdfg, block)
-        if category is None:
-            _bracket_region(sdfg, block, target, categories)
-            continue
-        slot = len(categories)
-        categories.append(category)
-        _bracket(region, block, slot, category, target, block is start_block)
+def _phase_sequence(sdfg: dace.SDFG) -> list[tuple[object, str]]:
+    """The top-level blocks in execution order, each with its phase."""
+    blocks = list(sdfg_utils.dfs_topological_sort(sdfg))
+    cats = [_homogeneous_category(sdfg, b) or "kernel" for b in blocks]
+    head = 0
+    while head < len(cats) and cats[head] in ("h2d", "cast_in"):
+        head += 1
+    tail = len(cats)
+    while tail > head and cats[tail - 1] in ("cast_out", "d2h"):
+        tail -= 1
+    for i in range(head, tail):
+        cats[i] = "kernel"
+    return list(zip(blocks, cats))
 
 
 def insert_timers(sdfg: dace.SDFG, target: str) -> list[str]:
     """
-    Bracket each phase with start/stop timer tasklets; prepend ``begin_invocation``.
+    Bracket each phase with start/stop timer tasklets.
 
     Must run last, after retargeting -- otherwise a later fusion pass would move the timer states.
     """
     categories: list[str] = []
-    _bracket_region(sdfg, sdfg, target, categories)
+    slot_of: dict[str, int] = {}
+    runs: list[list] = []  # [first, last, category]
+    for block, category in _phase_sequence(sdfg):
+        prev = runs[-1] if runs else None
+        if (
+            prev is not None
+            and prev[2] == category
+            and sdfg.out_degree(prev[1]) == 1
+            and sdfg.in_degree(block) == 1
+            and sdfg.out_edges(prev[1])[0].dst is block
+        ):
+            prev[1] = block
+        else:
+            runs.append([block, block, category])
+    for first, last, category in runs:
+        if category not in slot_of:
+            slot_of[category] = len(categories)
+            categories.append(category)
+        _bracket(sdfg, first, last, slot_of[category], category, target)
     begin = sdfg.add_state_before(
         sdfg.start_block, label=_BEGIN_LABEL, is_start_block=True
     )

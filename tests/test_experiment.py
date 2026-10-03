@@ -481,6 +481,20 @@ def test_timer_categories_recovered_from_sdfg():
     assert timer_categories(sdfg) == cats
 
 
+def test_timers_use_one_slot_per_phase_on_the_top_level():
+    # At most one slot per phase, and no timer state inside a loop (each
+    # start/stop synchronizes, so a bracket per iteration distorts the timing).
+    exp = _exp(program=_AXPY_LOOP_SDFG, symbols={"N": 64, "T": 4})
+    sdfg = fresh_sdfg(exp)
+    apply_precision(sdfg, {"a": "fp32", "b": "fp32", "c": "fp32"}, exp.promotion_rules)
+    apply_target(sdfg, "cpu")
+    cats = insert_timers(sdfg, "cpu")
+    assert cats == ["cast_in", "kernel", "cast_out"]
+    for state in sdfg.all_states():
+        if state.label.startswith(("__fp_timer_start", "__fp_timer_stop")):
+            assert state.parent_graph is sdfg, state.label
+
+
 def test_overflowing_reference_yields_inf_error_not_nan():
     acc = _new_acc()
     _accumulate(acc, np.array([np.inf, 2.0]), np.array([1.0, 2.0]))
