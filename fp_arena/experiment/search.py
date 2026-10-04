@@ -467,7 +467,8 @@ def run_search(
     # then go to a measurement slot as one frees.
     key_futs: dict[cf.Future, Config] = {}
     compile_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
-    ready: list[tuple[Config, CanonicalKey, str]] = []  # (config, key, build folder)
+    # Compiled configs waiting for a slot, highest score first like ``heap``
+    ready: list[tuple[float, int, Config, CanonicalKey, str]] = []
     grade_futs: dict[cf.Future, tuple[Config, CanonicalKey, str]] = {}
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
@@ -638,7 +639,7 @@ def run_search(
             # domination: results that landed while a config was building may
             # have pruned it, sparing its measurement.
             while ready and len(grade_futs) < n_slots:
-                config, key, folder = ready.pop(0)
+                _, _, config, key, folder = heapq.heappop(ready)
                 if dominated(config):
                     stats["pruned"] += 1
                     discard(folder)
@@ -684,7 +685,9 @@ def run_search(
                 if fut in compile_futs:
                     config, key = compile_futs.pop(fut)
                     try:
-                        ready.append((config, key, fut.result()))
+                        folder = fut.result()
+                        entry = (-score(config), next(counter), config, key, folder)
+                        heapq.heappush(ready, entry)
                     except _CONFIG_FAILURES as exc:
                         # Never became a program: neither feasible nor infeasible.
                         text = _failure_text(exc)
@@ -704,7 +707,7 @@ def run_search(
     finally:
         compile_pool.shutdown(wait=True)
         grade_pool.shutdown(wait=True)
-        for _, _, folder in [*ready, *grade_futs.values()]:
+        for *_, folder in [*ready, *grade_futs.values()]:
             discard(folder)
         cleaner.shutdown(wait=True)
 
