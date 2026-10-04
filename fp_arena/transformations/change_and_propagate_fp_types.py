@@ -9,7 +9,7 @@ import dace
 import dace.library
 from dace import subsets
 from dace.properties import CodeBlock
-from dace.sdfg import nodes
+from dace.sdfg import nodes, type_inference
 from dace.sdfg import utils as sdfg_utils
 from dace.sdfg.state import AbstractControlFlowRegion, SDFGState
 from dace.transformation.transformation import ExpandTransformation
@@ -898,6 +898,63 @@ def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None
                 node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
 
 
+# The expression ``dace.<typename>(node)``.
+def _dace_cast(node: ast.expr, typename: str) -> ast.Call:
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id="dace", ctx=ast.Load()), attr=typename, ctx=ast.Load()
+        ),
+        args=[node],
+        keywords=[],
+    )
+
+
+# ``k ? half : double`` is ambiguous in C++ (a half converts to and from every
+# built-in, and ``?:`` cannot be overloaded), so both arms of a conditional with
+# a half arm and an arm of another type are cast to their common type.
+class _HalfTernaryCaster(ast.NodeTransformer):
+    def __init__(self, symbols: dict) -> None:
+        self._symbols = symbols
+
+    def visit_IfExp(self, node: ast.IfExp) -> ast.AST:
+        self.generic_visit(node)
+        arms = (node.body, node.orelse)
+        try:
+            types = [
+                type_inference.infer_expr_type(ast.unparse(a), self._symbols)
+                for a in arms
+            ]
+            if dace.float16 not in types or types[0] == types[1]:
+                return node
+            common = dace.dtypes.result_type_of(*types).to_string()
+        except Exception:
+            return node
+        node.body, node.orelse = (_dace_cast(a, common) for a in arms)
+        return node
+
+
+def _cast_mixed_half_ternaries(sdfg: dace.SDFG) -> None:
+    for state in sdfg.all_states():
+        for node in state.nodes():
+            if not (
+                isinstance(node, nodes.Tasklet)
+                and node.language == dace.Language.Python
+            ):
+                continue
+            code = node.code.as_string
+            if "if" not in code:
+                continue
+            symbols = {**node.in_connectors, **node.out_connectors}
+            try:
+                symbols.update(type_inference.infer_types(code, symbols))
+            except Exception:
+                continue
+            tree = ast.fix_missing_locations(
+                _HalfTernaryCaster(symbols).visit(ast.parse(code))
+            )
+            node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+
+
 # Names an expression reads, minus the functions it calls.
 def _expr_names(expr: str) -> set[str]:
     tree = ast.parse(str(expr), mode="eval")
@@ -1161,6 +1218,7 @@ def change_and_propagate_fp_types(
         # containers.
         _homogenize_tasklet_dtypes(sd, rules, literal_tasklets, constant_type)
         _insert_edge_casts(sd)
+        _cast_mixed_half_ternaries(sd)
 
     # Preserve the external interface: non-transient arrays of the *root* SDFG
     # that changed type are renamed to an internal transient. Nested levels

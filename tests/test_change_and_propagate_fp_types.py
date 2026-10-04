@@ -1,4 +1,5 @@
 import re
+import shutil
 
 import dace
 import numpy as np
@@ -1323,6 +1324,43 @@ def test_narrowing_write_survives_gpu_vectorization():
     sdfg.validate()
 
 
+def _half_ternary_sdfg():
+    """``y = x if x > 0 else 0.5`` with x retyped to half: a half arm beside a double literal."""
+    sdfg = dace.SDFG("half_ternary")
+    sdfg.add_array("A", [8], dace.float64)
+    sdfg.add_array("B", [8], dace.float64)
+    sdfg.add_state().add_mapped_tasklet(
+        "t",
+        {"i": "0:8"},
+        {"x": dace.Memlet("A[i]")},
+        "y = x if x > 0 else 0.5",
+        {"y": dace.Memlet("B[i]")},
+        external_edges=True,
+    )
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16, "B": dace.float16})
+    return sdfg
+
+
+def test_half_ternary_arms_are_cast():
+    """``k ? half : double`` is ambiguous in CUDA, so both arms are cast to their common type."""
+    sdfg = _half_ternary_sdfg()
+    body = next(
+        n
+        for s in sdfg.all_states()
+        for n in s.nodes()
+        if isinstance(n, nodes.Tasklet) and n.label == "t"
+    )
+    assert "dace.float64(x)" in body.code.as_string, body.code.as_string
+    assert "dace.float64(0.5)" in body.code.as_string, body.code.as_string
+
+
+@pytest.mark.skipif(shutil.which("nvcc") is None, reason="nvcc not available")
+def test_half_ternary_compiles_on_gpu():
+    sdfg = _half_ternary_sdfg()
+    apply_target(sdfg, "gpu", gpu_block_size=(256, 1, 1))
+    sdfg.compile()
+
+
 _VN = 8
 
 
@@ -1480,6 +1518,8 @@ if __name__ == "__main__":
     test_widening_write_also_becomes_an_explicit_cast()
     test_mixed_operands_are_cast_to_the_join()
     test_narrowing_write_survives_gpu_vectorization()
+    test_half_ternary_arms_are_cast()
+    test_half_ternary_compiles_on_gpu()
     test_frontend_views_follow_viewed_array()
     test_write_through_view_into_pinned_array()
     test_reinterpreting_view_rejected()
