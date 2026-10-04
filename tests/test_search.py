@@ -72,6 +72,34 @@ def test_find_knobs_detects_constants():
     assert names[CONSTANTS_KEY].kind == "constants"
 
 
+def _literal_symbol_sdfg(declare: bool) -> dace.SDFG:
+    """``b = a * x`` with ``x = 0.1`` assigned on an interstate edge; no tasklet literal."""
+    sdfg = dace.SDFG("literal_symbol")
+    sdfg.add_array("a", [N], dace.float64)
+    sdfg.add_array("b", [N], dace.float64)
+    if declare:
+        sdfg.add_symbol("x", dace.float64)
+    s0 = sdfg.add_state(is_start_block=True)
+    s1 = sdfg.add_state()
+    sdfg.add_edge(s0, s1, dace.InterstateEdge(assignments={"x": "0.1"}))
+    s1.add_mapped_tasklet(
+        "t",
+        {"i": "0:N"},
+        {"__a": dace.Memlet("a[i]")},
+        "__b = __a * x",
+        {"__b": dace.Memlet("b[i]")},
+        external_edges=True,
+    )
+    return sdfg
+
+
+@pytest.mark.parametrize("declare", [True, False], ids=["declared", "undeclared"])
+def test_find_knobs_detects_literal_symbols(declare):
+    """The constants knob also lowers float symbols defined from literals, so they
+    alone make it a knob."""
+    assert CONSTANTS_KEY in {k.name for k in find_knobs(_literal_symbol_sdfg(declare))}
+
+
 def test_knob_selection_toggles_and_overrides():
     default = {k.name for k in find_knobs(_SCALED, KnobSelection())}
     assert CONSTANTS_KEY not in default  # constants off by default
@@ -81,6 +109,29 @@ def test_knob_selection_toggles_and_overrides():
         k.name for k in find_knobs(_SCALED, KnobSelection(exclude=frozenset({"a"})))
     }
     assert "a" not in excluded
+
+
+@dace.program
+def _scalar_scaled(a: dace.float64[N], c: dace.float64[N], s: dace.float64):
+    for i in dace.map[0:N]:
+        c[i] = a[i] * s
+
+
+_SCALAR_SCALED = _scalar_scaled.to_sdfg(simplify=True)
+
+
+def test_constants_knob_covers_scalar_inputs():
+    """A read-only float scalar input is a constant: the constants knob exists
+    without any float literal, and the scalar is no knob of its own."""
+    knobs = {k.name for k in find_knobs(_SCALAR_SCALED)}
+    assert CONSTANTS_KEY in knobs
+    assert "s" not in knobs
+
+
+def test_scalar_input_is_a_knob_without_the_constants_knob():
+    knobs = {k.name for k in find_knobs(_SCALAR_SCALED, KnobSelection())}
+    assert CONSTANTS_KEY not in knobs
+    assert "s" in knobs
 
 
 def test_domain_capped_at_original():

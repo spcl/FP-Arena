@@ -5,7 +5,6 @@ Knobs: the decision variables of the selection search.
 
 from __future__ import annotations
 
-import ast
 from dataclasses import dataclass, field
 
 import dace
@@ -16,7 +15,12 @@ from fp_arena.experiment.retarget import apply_precision, fresh_sdfg
 from fp_arena.transformations.change_and_propagate_fp_types import (
     _class_types,
     _collect_sdfgs,
+    _constant_scalars,
+    _has_control_flow_constants,
+    _interface_fp_symbols,
+    _is_constant_fill,
     _is_fp,
+    _tasklets_with_literals,
     _unify_nested_boundaries,
 )
 
@@ -77,24 +81,22 @@ class KnobSelection:
         return toggle[knob.kind]
 
 
-def _has_float_literals(sdfgs: list[dace.SDFG]) -> bool:
-    """Whether any Python tasklet body contains a float literal (the constants knob)."""
-    for sd in sdfgs:
-        for state in sd.all_states():
-            for node in state.nodes():
-                if not (
-                    isinstance(node, dace.nodes.Tasklet)
-                    and node.language == dace.Language.Python
-                ):
-                    continue
-                try:
-                    tree = ast.parse(node.code.as_string)
-                except (SyntaxError, ValueError):
-                    continue
-                for sub in ast.walk(tree):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, float):
-                        return True
-    return False
+def _has_constants(sdfg: dace.SDFG, sdfgs: list[dace.SDFG]) -> bool:
+    """Whether the program has constants for the constants knob to lower: float
+    literals, constant Fills, read-only float scalar inputs, float interface
+    symbols or constants of the control flow."""
+    return bool(
+        _tasklets_with_literals(sdfgs)
+        or _has_control_flow_constants(sdfgs)
+        or _constant_scalars(sdfg)
+        or _interface_fp_symbols(sdfg)
+        or any(
+            _is_constant_fill(state, node)
+            for sd in sdfgs
+            for state in sd.all_states()
+            for node in state.nodes()
+        )
+    )
 
 
 def _domain(original_key: str, ladder: tuple[str, ...]) -> tuple[str, ...]:
@@ -147,15 +149,17 @@ def find_knobs(
             )
         )
 
-    if _has_float_literals(sdfgs):
-        knobs.append(
-            Knob(
-                name=CONSTANTS_KEY,
-                kind="constants",
-                original="fp64",
-                domain=tuple(ladder),
-            )
+    if _has_constants(sdfg, sdfgs):
+        constants = Knob(
+            name=CONSTANTS_KEY,
+            kind="constants",
+            original="fp64",
+            domain=tuple(ladder),
         )
+        knobs.append(constants)
+        if selection is None or selection.wants(constants):
+            scalars = set(_constant_scalars(sdfg))
+            knobs = [k for k in knobs if k.name not in scalars]
 
     knobs.sort(key=lambda k: k.name)
     if selection is not None:

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import ast
-import warnings
 from collections import defaultdict, deque
 from typing import ClassVar
 
 import dace
 import dace.library
 from dace import subsets
+from dace.libraries.standard.nodes import FillLibraryNode
 from dace.properties import CodeBlock
 from dace.sdfg import nodes, type_inference
 from dace.sdfg import utils as sdfg_utils
@@ -135,39 +135,6 @@ def _collect_sdfgs(sdfg: dace.SDFG) -> list[dace.SDFG]:
                     f"Reference descriptor {name!r} in SDFG {sd.name!r} is not supported."
                 )
     return sdfgs
-
-
-# Warns about float data this pass cannot retarget: float-typed nested-SDFG
-# symbols (symbols are not data descriptors) and float arrays read on
-# interstate edges (those reads follow the array's final precision but are
-# implicitly widened to the symbol's fixed dtype; no casts are inserted).
-def _warn_unlowerable(sdfgs: list[dace.SDFG]) -> None:
-    fp_symbols: set[str] = set()
-    for sd in sdfgs:
-        for state in sd.all_states():
-            for node in state.nodes():
-                if not isinstance(node, nodes.NestedSDFG):
-                    continue
-                for sym in node.symbol_mapping:
-                    if _is_fp(node.sdfg.symbols.get(sym)):
-                        fp_symbols.add(sym)
-    if fp_symbols:
-        warnings.warn(
-            "change_and_propagate_fp_types: float-typed nested-SDFG symbols are "
-            f"not retargetable (symbols are not data): {sorted(fp_symbols)}"
-        )
-
-    interstate_reads: set[str] = set()
-    for sd in sdfgs:
-        fp_names = {n for n, d in sd.arrays.items() if _is_fp(d.dtype)}
-        for e in sd.all_interstate_edges():
-            interstate_reads |= e.data.free_symbols & fp_names
-    if interstate_reads:
-        warnings.warn(
-            "change_and_propagate_fp_types: float arrays read on interstate edges "
-            "follow their final precision but are widened to the target symbol's "
-            f"dtype without explicit casts: {sorted(interstate_reads)}"
-        )
 
 
 # Merges the two sides of every NestedSDFG boundary edge into one class.
@@ -478,18 +445,21 @@ def _cast_tasklet(
     return t
 
 
-# The join of a tasklet's floating-point input types.
+# The join of a tasklet's floating-point input types, including the float symbols it reads.
 def _input_join(
     state: dace.SDFGState,
     node: nodes.Tasklet,
     sdfg: dace.SDFG,
     rules: dict[frozenset, dace.dtypes.typeclass],
 ) -> dace.dtypes.typeclass | None:
+    in_types = [
+        sdfg.arrays[e.data.data].dtype
+        for e in state.in_edges(node)
+        if e.dst_conn is not None and e.data is not None and e.data.data is not None
+    ]
+    in_types += [sdfg.symbols[name] for name in _tasklet_symbols(sdfg, node)]
     join: dace.dtypes.typeclass | None = None
-    for e in state.in_edges(node):
-        if e.dst_conn is None or e.data is None or e.data.data is None:
-            continue
-        dtype = sdfg.arrays[e.data.data].dtype
+    for dtype in in_types:
         if not _is_fp(dtype):
             continue
         try:
@@ -576,8 +546,8 @@ def _homogenize_tasklet_dtypes(
             if not isinstance(node, nodes.Tasklet):
                 continue
             join = _input_join(state, node, sdfg, rules)
-            # Literals / symbols of a wider constant type take part in the
-            # operation too (see _add_literal_source).
+            # The tasklet's literals take part in the operation at the
+            # constant type too (see _add_constant_sources).
             if join is not None and id(node) in constant_tasklets:
                 join = _promote(join, constant_type, rules)
             if join is None or _has_bulk_fp_connector(state, node, sdfg):
@@ -862,6 +832,17 @@ def _add_fusion_barrier(state: dace.SDFGState) -> None:
     state.add_node(FusionBarrier("fusion_barrier"))
 
 
+# The expression ``dace.<typename>(node)``.
+def _dace_cast(node: ast.expr, typename: str) -> ast.Call:
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id="dace", ctx=ast.Load()), attr=typename, ctx=ast.Load()
+        ),
+        args=[node],
+        keywords=[],
+    )
+
+
 # Wraps every float literal in ``expr = dace.<typename>(literal)``.
 class _FloatConstantCaster(ast.NodeTransformer):
     def __init__(self, typename: str) -> None:
@@ -870,21 +851,13 @@ class _FloatConstantCaster(ast.NodeTransformer):
     def visit_Constant(self, node: ast.Constant) -> ast.AST:
         if not isinstance(node.value, float):
             return node
-        return ast.Call(
-            func=ast.Attribute(
-                value=ast.Name(id="dace", ctx=ast.Load()),
-                attr=self._typename,
-                ctx=ast.Load(),
-            ),
-            args=[node],
-            keywords=[],
-        )
+        return _dace_cast(node, self._typename)
 
 
 # Casts all float literals in Python tasklet bodies to *dtype*.
-def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None:
+def _cast_float_constants(sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass) -> None:
     caster = _FloatConstantCaster(dtype.to_string())
-    for sd in sdfg.all_sdfgs_recursive():
+    for sd in sdfgs:
         for state in sd.all_states():
             for node in state.nodes():
                 if not (
@@ -896,17 +869,6 @@ def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None
                     caster.visit(ast.parse(node.code.as_string))
                 )
                 node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
-
-
-# The expression ``dace.<typename>(node)``.
-def _dace_cast(node: ast.expr, typename: str) -> ast.Call:
-    return ast.Call(
-        func=ast.Attribute(
-            value=ast.Name(id="dace", ctx=ast.Load()), attr=typename, ctx=ast.Load()
-        ),
-        args=[node],
-        keywords=[],
-    )
 
 
 # ``k ? half : double`` is ambiguous in C++ (a half converts to and from every
@@ -966,64 +928,39 @@ def _expr_names(expr: str) -> set[str]:
     return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} - called
 
 
-# For every SDFG the float symbols whose value comes from literals only
-def _literal_symbols(sdfgs: list[dace.SDFG]) -> dict[int, set[str]]:
-    result: dict[int, set[str]] = {}
+# Whether the parsed code contains a float literal.
+def _has_float_literal(tree: ast.AST) -> bool:
+    return any(
+        isinstance(n, ast.Constant) and isinstance(n.value, float)
+        for n in ast.walk(tree)
+    )
 
-    def visit(sd: dace.SDFG, inherited: set[str]) -> None:
-        definitions: dict[str, list[str]] = defaultdict(list)
+
+def _defines_literal(expr: str) -> bool:
+    return not _expr_names(expr) or _has_float_literal(ast.parse(str(expr)))
+
+
+# Whether the control flow holds a constant the constant type lowers.
+def _has_control_flow_constants(sdfgs: list[dace.SDFG]) -> bool:
+    for sd in sdfgs:
+        if any(
+            _is_fp(getattr(d, "dtype", None)) for d, _ in sd.constants_prop.values()
+        ):
+            return True
         for e in sd.all_interstate_edges():
+            inferred = e.data.new_symbols(sd, sd.symbols)
             for name, expr in e.data.assignments.items():
-                definitions[name].append(expr)
-        literal = set(inherited) - set(definitions)
-        candidates = set(definitions)
-        # Optimistic fixed point: start from every assigned symbol and drop
-        # each one with a definition that reads a non-literal name.
-        literal |= candidates
-        changed = True
-        while changed:
-            changed = False
-            for name in list(candidates & literal):
-                for expr in definitions[name]:
-                    if any(n not in literal for n in _expr_names(expr)):
-                        literal.discard(name)
-                        changed = True
-                        break
-        result[id(sd)] = {
-            n for n in literal if _is_fp(sd.symbols.get(n)) or n in definitions
-        }
+                stype = sd.symbols.get(name) or inferred.get(name)
+                if _is_fp(stype) and _defines_literal(expr):
+                    return True
         for state in sd.all_states():
             for node in state.nodes():
-                if isinstance(node, nodes.NestedSDFG):
-                    passed = {
-                        inner
-                        for inner, outer in node.symbol_mapping.items()
-                        if all(n in literal for n in _expr_names(outer))
-                    }
-                    visit(node.sdfg, passed)
-
-    visit(sdfgs[0], set())
-    return result
-
-
-# Retypes floating-point SDFG symbols and compile-time constants to *dtype*.
-# With *only_literal* (a constant type narrower than or equal to double) just the
-# symbols computed from literals are retyped.
-def _lower_symbols_and_constants(
-    sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass, only_literal: bool = True
-) -> None:
-    root = sdfgs[0]
-    abi_symbols = set(map(str, root.free_symbols))
-    literal = _literal_symbols(sdfgs) if only_literal else None
-    for sd in sdfgs:
-        for name, stype in list(sd.symbols.items()):
-            if not _is_fp(stype) or (sd is root and name in abi_symbols):
-                continue
-            if literal is None or name in literal[id(sd)]:
-                sd.symbols[name] = dtype
-        for desc, _value in sd.constants_prop.values():
-            if _is_fp(getattr(desc, "dtype", None)):
-                desc.dtype = dtype
+                if isinstance(node, nodes.NestedSDFG) and any(
+                    _is_fp(node.sdfg.symbols.get(name)) and _defines_literal(str(outer))
+                    for name, outer in node.symbol_mapping.items()
+                ):
+                    return True
+    return False
 
 
 # Declares every float symbol that is only assigned on interstate edges at the
@@ -1049,14 +986,10 @@ def _widens_double(
     return _types_equal(_promote(dace.float64, dtype, rules), dtype)
 
 
-# ids of the Python tasklets whose code contains a float literal or reads a
-# symbol of *constant_type* (after the constants were retyped).
-def _tasklets_using_constants(
-    sdfgs: list[dace.SDFG], constant_type: dace.dtypes.typeclass
-) -> set[int]:
+# ids of the Python tasklets whose code contains a float literal.
+def _tasklets_with_literals(sdfgs: list[dace.SDFG]) -> set[int]:
     found: set[int] = set()
     for sd in sdfgs:
-        typed = {n for n, t in sd.symbols.items() if _types_equal(t, constant_type)}
         for state in sd.all_states():
             for node in state.nodes():
                 if not (
@@ -1064,42 +997,125 @@ def _tasklets_using_constants(
                     and node.language == dace.Language.Python
                 ):
                     continue
-                tree = ast.parse(node.code.as_string)
-                if any(
-                    (isinstance(n, ast.Constant) and isinstance(n.value, float))
-                    or (isinstance(n, ast.Name) and n.id in typed)
-                    for n in ast.walk(tree)
-                ):
+                if _has_float_literal(ast.parse(node.code.as_string)):
                     found.add(id(node))
     return found
+
+
+# Whether *node* fills its output with a constant.
+def _is_constant_fill(state: dace.SDFGState, node: nodes.Node) -> bool:
+    return isinstance(node, FillLibraryNode) and state.in_degree(node) == 0
+
+
+# The float symbols a Python tasklet reads
+def _tasklet_symbols(sd: dace.SDFG, node: nodes.Node) -> set[str]:
+    if not (isinstance(node, nodes.Tasklet) and node.language == dace.Language.Python):
+        return set()
+    names = {
+        n.id
+        for n in ast.walk(ast.parse(node.code.as_string))
+        if isinstance(n, ast.Name)
+    }
+    names -= set(node.in_connectors) | set(node.out_connectors)
+    return {n for n in names if _is_fp(sd.symbols.get(n))}
+
+
+# The float symbols of the root's interface (its free symbols).
+def _interface_fp_symbols(sdfg: dace.SDFG) -> list[str]:
+    return sorted(
+        name for name in map(str, sdfg.free_symbols) if _is_fp(sdfg.symbols.get(name))
+    )
+
+
+# Constants of the computation passed in by the caller.
+def _constant_scalars(sdfg: dace.SDFG) -> list[str]:
+    reads, writes = sdfg.read_and_write_sets()
+    used = set(reads)
+    for e in sdfg.all_interstate_edges():
+        used |= set(map(str, e.data.free_symbols))
+    return sorted(
+        name
+        for name, desc in sdfg.arrays.items()
+        if isinstance(desc, dace.data.Scalar)
+        and not desc.transient
+        and _is_fp(desc.dtype)
+        and name in used
+        and name not in writes
+    )
+
+
+# Gives every float interface symbol of the root a copy of *dtype*, assigned on
+# entry, and makes the body read the copy; the signature keeps the original.
+# Returns the names of the copies.
+def _lower_interface_symbols(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> set[str]:
+    repl = {
+        name: sdfg.find_new_symbol(f"{name}_{dtype.to_string()}")
+        for name in _interface_fp_symbols(sdfg)
+    }
+    if not repl:
+        return set()
+    original = {name: sdfg.symbols[name] for name in repl}
+    sdfg.replace_dict(repl)
+    for name, new in repl.items():
+        sdfg.symbols[new] = dtype
+        sdfg.add_symbol(name, original[name])
+    sdfg.add_state_before(
+        sdfg.start_block,
+        label="lower_interface_symbols",
+        is_start_block=True,
+        assignments={new: name for name, new in repl.items()},
+    )
+    return set(repl.values())
+
+
+# Constant propagation (e.g. in a later simplify) replaces a symbol by its
+# defining expression, which drops the symbol's declared type: an uncast
+# ``x = 0.1`` turns ``a * x`` into a double operation. Wraps every float
+# assignment whose expression has another type in a cast to the declared type.
+def _cast_symbol_definitions(sdfgs: list[dace.SDFG]) -> None:
+    native = (dace.float16, dace.float32, dace.float64)
+    for sd in sdfgs:
+        for e in sd.all_interstate_edges():
+            if not e.data.assignments:
+                continue
+            inferred = e.data.new_symbols(sd, sd.symbols)
+            assignments = dict(e.data.assignments)
+            for name, expr in assignments.items():
+                declared = sd.symbols.get(name)
+                if declared not in native or _types_equal(inferred.get(name), declared):
+                    continue
+                assignments[name] = f"dace.{declared.to_string()}({expr})"
+            e.data.assignments = assignments
 
 
 #: Pseudo-class standing for "a float literal" in the dataflow graph.
 _LITERAL: QKey = (0, "__fp_literal__")
 
 
-# Adds the literals as one pinned source of *constant_type*, producing every
-# class a literal-bearing tasklet writes. Promotion then widens those classes
-# (a literal alone, or a literal combined with double data) to the constant type.
-def _add_literal_source(
+# The class of float symbol *name* of *sd*.
+def _sym(sd: dace.SDFG, name: str) -> QKey:
+    return (id(sd), f"sym:{name}")
+
+
+# Adds every class a constant is written into -- by a literal-bearing tasklet
+# or a constant Fill -- as a consumer of the literal pseudo-class, which is
+# pinned at the constant type. Promotion then gives those classes the constant
+# type (a literal alone), or the join with the data it is combined with.
+def _add_constant_sources(
     sdfgs: list[dace.SDFG],
     uf: _UnionFind,
     literal_tasklets: set[int],
-    constant_type: dace.dtypes.typeclass,
-    members: dict[QKey, list[tuple[dace.SDFG, str]]],
     original_types: dict[QKey, dace.dtypes.typeclass],
-    pins: dict[QKey, dace.dtypes.typeclass],
     producers: dict[QKey, set[QKey]],
     consumers: dict[QKey, set[QKey]],
 ) -> None:
-    members[_LITERAL] = []
-    original_types[_LITERAL] = constant_type
-    pins[_LITERAL] = constant_type
     for sd in sdfgs:
         sid = id(sd)
         for state in sd.all_states():
             for node in state.nodes():
-                if id(node) not in literal_tasklets:
+                if id(node) not in literal_tasklets and not _is_constant_fill(
+                    state, node
+                ):
                     continue
                 for e in state.out_edges(node):
                     if e.data is not None and e.data.data is not None:
@@ -1107,6 +1123,58 @@ def _add_literal_source(
                         if _is_fp(original_types.get(out)):
                             producers[out].add(_LITERAL)
                             consumers[_LITERAL].add(out)
+
+
+# Adds float symbols to the dataflow graph: a symbol gets the type of what it is
+# defined from, and passes it on to the tasklets that read it.
+def _add_symbol_classes(
+    sdfgs: list[dace.SDFG],
+    uf: _UnionFind,
+    members: dict[QKey, list[tuple[dace.SDFG, str]]],
+    original_types: dict[QKey, dace.dtypes.typeclass],
+    producers: dict[QKey, set[QKey]],
+    consumers: dict[QKey, set[QKey]],
+    literal: bool,
+) -> None:
+    def link(src: QKey, dst: QKey) -> None:
+        producers[dst].add(src)
+        consumers[src].add(dst)
+
+    def link_definition(sd: dace.SDFG, expr: str, dst: QKey) -> None:
+        for ref in _expr_names(expr):
+            if _is_fp(sd.symbols.get(ref)):
+                link(_sym(sd, ref), dst)
+            elif ref in sd.arrays and _is_fp(sd.arrays[ref].dtype):
+                link(uf.find((id(sd), ref)), dst)
+        if literal and _defines_literal(expr):
+            link(_LITERAL, dst)
+
+    for sd in sdfgs:
+        for name, stype in sd.symbols.items():
+            if _is_fp(stype):
+                members[_sym(sd, name)] = []
+                original_types[_sym(sd, name)] = stype
+
+    for sd in sdfgs:
+        sid = id(sd)
+        for e in sd.all_interstate_edges():
+            for name, expr in e.data.assignments.items():
+                if _is_fp(sd.symbols.get(name)):
+                    link_definition(sd, expr, _sym(sd, name))
+        for state in sd.all_states():
+            for node in state.nodes():
+                if isinstance(node, nodes.NestedSDFG):
+                    inner = node.sdfg
+                    for name, outer in node.symbol_mapping.items():
+                        if _is_fp(inner.symbols.get(name)):
+                            link_definition(sd, str(outer), _sym(inner, name))
+                for name in _tasklet_symbols(sd, node):
+                    for e in state.out_edges(node):
+                        if e.data is None or e.data.data is None:
+                            continue
+                        out = uf.find((sid, e.data.data))
+                        if _is_fp(original_types.get(out)):
+                            link(_sym(sd, name), out)
 
 
 # Main entry point to change and propagate fp types through an SDFG.
@@ -1126,17 +1194,22 @@ def change_and_propagate_fp_types(
 
     _declare_interstate_symbols(sdfgs)
 
-    # Optionally cast every float literal in the computation to a fixed precision.
+    # Optionally give the constants of the computation a fixed precision.
+    initial_types = dict(initial_types)
     literal_tasklets: set[int] = set()
+    widens = constant_type is not None and _widens_double(constant_type, rules)
+    constant_symbols: set[str] = set()
     if constant_type is not None:
-        _cast_float_constants(sdfg, constant_type)
-        _lower_symbols_and_constants(
-            sdfgs, constant_type, only_literal=not _widens_double(constant_type, rules)
-        )
-        # A constant type wider than double (MPFR) makes literals and the retyped symbols a source of that type
-        if _widens_double(constant_type, rules):
-            literal_tasklets = _tasklets_using_constants(sdfgs, constant_type)
-    _warn_unlowerable(sdfgs)
+        if not widens:
+            constant_symbols = _lower_interface_symbols(sdfg, constant_type)
+            for name in _constant_scalars(sdfg):
+                initial_types.setdefault(name, constant_type)
+        _cast_float_constants(sdfgs, constant_type)
+        literal_tasklets = _tasklets_with_literals(sdfgs)
+        for sd in sdfgs:
+            for desc, _value in sd.constants_prop.values():
+                if _is_fp(getattr(desc, "dtype", None)):
+                    desc.dtype = constant_type
 
     # Unify the two sides of every NestedSDFG boundary, then resolve classes.
     uf = _unify_nested_boundaries(sdfgs)
@@ -1171,18 +1244,34 @@ def change_and_propagate_fp_types(
 
     # Build the array-level dataflow graph and solve the precision fixed point.
     producers, consumers = _build_dataflow(sdfgs, uf)
-    if literal_tasklets:
-        _add_literal_source(
-            sdfgs,
-            uf,
-            literal_tasklets,
-            constant_type,
-            members,
-            original_types,
-            pins,
-            producers,
-            consumers,
+    if constant_type is not None:
+        members[_LITERAL] = []
+        original_types[_LITERAL] = constant_type
+        pins[_LITERAL] = constant_type
+        _add_constant_sources(
+            sdfgs, uf, literal_tasklets, original_types, producers, consumers
         )
+    _add_symbol_classes(
+        sdfgs,
+        uf,
+        members,
+        original_types,
+        producers,
+        consumers,
+        literal=constant_type is not None,
+    )
+    # Symbols with a fixed type: the interface (the caller passes it) and its
+    # copies at the constant type keep their declared type; with a constant type
+    # wider than double (a reference) every other float symbol takes it.
+    fixed = set(map(str, sdfg.free_symbols)) | constant_symbols
+    for sd in sdfgs:
+        for name, stype in sd.symbols.items():
+            if not _is_fp(stype):
+                continue
+            if sd is sdfg and name in fixed:
+                pins[_sym(sd, name)] = stype
+            elif widens:
+                pins[_sym(sd, name)] = constant_type
 
     inferred = _infer_types(
         members,
@@ -1202,9 +1291,19 @@ def change_and_propagate_fp_types(
             for name, desc in sd.arrays.items():
                 report_orig[prefix + name] = desc.dtype
                 report_final[prefix + name] = inferred[uf.find((id(sd), name))]
+            for name, stype in sd.symbols.items():
+                if _is_fp(stype):
+                    report_orig[f"{prefix}sym:{name}"] = stype
+                    report_final[f"{prefix}sym:{name}"] = inferred[_sym(sd, name)]
         _print_type_report(report_orig, report_final)
 
-    # Apply inferred dtypes to the arrays and connectors of every level.
+    # Apply inferred dtypes to the symbols, arrays and connectors of every level.
+    for sd in sdfgs:
+        for name, stype in list(sd.symbols.items()):
+            if _is_fp(stype):
+                sd.symbols[name] = inferred[_sym(sd, name)]
+    _cast_symbol_definitions(sdfgs)
+
     for sd in sdfgs:
         level_inferred = {name: inferred[uf.find((id(sd), name))] for name in sd.arrays}
         for name, dtype in level_inferred.items():

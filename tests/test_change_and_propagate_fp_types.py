@@ -4,6 +4,7 @@ import shutil
 import dace
 import numpy as np
 import pytest
+from dace.libraries.standard.nodes import FillLibraryNode
 from dace.libraries.standard.nodes.reduce import Reduce
 from dace.sdfg import nodes
 from dace.sdfg import utils as sdfg_utils
@@ -731,13 +732,26 @@ def test_wider_constant_type_widens_what_literals_flow_into(code, with_input):
     assert sdfg.arrays["B"].dtype == dace.float64
 
 
-@pytest.mark.parametrize(
-    "code, with_input", [("y = x * 0.5", True), ("y = 275.0", False)]
-)
-def test_narrower_constant_type_leaves_what_literals_flow_into(code, with_input):
-    """A float32 literal fits a double, so the data it flows into keeps its type."""
-    sdfg = _literal_flow_sdfg(code, with_input)
+def test_narrower_constant_type_leaves_what_literals_flow_into():
+    """A float32 literal fits a double, so double data it is combined with keeps its type."""
+    sdfg = _literal_flow_sdfg("y = x * 0.5", with_input=True)
     change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    assert sdfg.arrays["T"].dtype == dace.float64
+
+
+def test_literal_only_transient_takes_constant_type():
+    """A transient only a literal writes is a constant: it takes the constant type,
+    and the interface output is cast back."""
+    sdfg = _literal_flow_sdfg("y = 275.0", with_input=False)
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    assert sdfg.arrays["T"].dtype == dace.float32
+    assert sdfg.arrays["B"].dtype == dace.float64
+
+
+def test_literal_only_transient_stays_double_without_constant_type():
+    """Without the constants knob a literal is a double, and so is what it writes."""
+    sdfg = _literal_flow_sdfg("y = 275.0", with_input=False)
+    change_and_propagate_fp_types(sdfg, {"B": dace.float32})
     assert sdfg.arrays["T"].dtype == dace.float64
 
 
@@ -776,8 +790,324 @@ def test_wider_constant_type_retypes_every_float_symbol():
         assert sdfg.symbols[name] == mpfr128, name
 
 
+def _assigned_types(sdfg: dace.SDFG) -> dict[str, dace.dtypes.typeclass]:
+    """The type code generation gives each symbol assigned on an interstate edge."""
+    types = {}
+    for e in sdfg.all_interstate_edges():
+        types.update(e.data.new_symbols(sdfg, sdfg.symbols))
+    return types
+
+
+def test_literal_symbols_stay_double_without_constant_type():
+    """Without the constants knob, literal symbols are doubles; a symbol copying
+    an array element follows that array."""
+    sdfg = _symbol_sdfg()
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32, "B": dace.float32})
+    assert sdfg.symbols["c"] == dace.float64
+    assert sdfg.symbols["e"] == dace.float64
+    assert sdfg.symbols["d"] == dace.float32
+
+
+def test_symbols_end_to_end_float32():
+    """With the arrays and the constants at float32, every symbol is a float and
+    the tasklet computes in float32."""
+    sdfg = _symbol_sdfg()
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=dace.float32
+    )
+    assigned = _assigned_types(sdfg)
+    for name in ("c", "d", "e"):
+        assert sdfg.symbols[name] == dace.float32, name
+        assert assigned[name] == dace.float32, name
+
+    A = np.array([0.1], dtype=np.float64)
+    B = np.zeros(1, dtype=np.float64)
+    sdfg(A=A, B=B)
+    x = np.float32(0.1)
+    ref = x * np.float32(0.5) + x + np.float32(1.0)
+    np.testing.assert_array_equal(B, np.float64(ref))
+
+
+def _two_definition_sdfg() -> dace.SDFG:
+    """``d`` is assigned from A[0] and later from C[0]; the tasklet reads ``d``."""
+    sdfg = dace.SDFG("two_definitions")
+    for name in ("A", "B", "C"):
+        sdfg.add_array(name, [1], dace.float64, transient=False)
+    s0, s1, s2 = (sdfg.add_state(f"s{i}") for i in range(3))
+    sdfg.add_edge(s0, s1, dace.InterstateEdge(assignments={"d": "A[0]"}))
+    sdfg.add_edge(s1, s2, dace.InterstateEdge(assignments={"d": "C[0]"}))
+    t = s2.add_tasklet("t", {"x"}, {"y"}, "y = x * d")
+    s2.add_edge(s2.add_read("A"), None, t, "x", dace.Memlet("A[0]"))
+    s2.add_edge(t, "y", s2.add_write("B"), None, dace.Memlet("B[0]"))
+    return sdfg
+
+
+@pytest.mark.parametrize(
+    "c_type, expected", [(dace.float64, dace.float64), (dace.float32, dace.float32)]
+)
+def test_symbol_takes_join_of_its_definitions(c_type, expected):
+    """A symbol assigned in several places is the join of what each definition reads."""
+    sdfg = _two_definition_sdfg()
+    pins = {"A": dace.float32, "B": dace.float32}
+    if c_type == dace.float32:
+        pins["C"] = dace.float32
+    change_and_propagate_fp_types(sdfg, pins)
+    assert sdfg.symbols["d"] == expected
+
+
+def test_double_symbol_widens_the_tasklet_reading_it():
+    """A float32 input combined with a double symbol is computed in double; the
+    input is cast up and the result cast back down into the pinned output."""
+    sdfg = _two_definition_sdfg()
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32, "B": dace.float32})
+    assert sdfg.symbols["d"] == dace.float64
+    (t,) = [
+        n
+        for n, _ in sdfg.all_nodes_recursive()
+        if isinstance(n, nodes.Tasklet) and n.label == "t"
+    ]
+    assert t.in_connectors["x"] == dace.float64
+    assert t.out_connectors["y"] == dace.float64
+
+    A = np.array([0.1], dtype=np.float64)
+    B = np.zeros(1, dtype=np.float64)
+    C = np.array([3.0], dtype=np.float64)
+    sdfg(A=A, B=B, C=C)
+    np.testing.assert_array_equal(
+        B, np.float64(np.float32(np.float64(np.float32(0.1)) * 3.0))
+    )
+
+
+def _nested_symbol_sdfg(outer_value: str) -> dace.SDFG:
+    """Outer ``d = A[0]`` and interface symbol ``alpha``; a nested SDFG computes
+    ``Y = X * s`` with inner symbol ``s`` mapped from *outer_value*."""
+    inner = dace.SDFG("inner")
+    inner.add_symbol("s", dace.float64)
+    inner.add_array("X", [1], dace.float64, transient=False)
+    inner.add_array("Y", [1], dace.float64, transient=False)
+    ist = inner.add_state("compute")
+    t = ist.add_tasklet("t", {"x"}, {"y"}, "y = x * s")
+    ist.add_edge(ist.add_read("X"), None, t, "x", dace.Memlet("X[0]"))
+    ist.add_edge(t, "y", ist.add_write("Y"), None, dace.Memlet("Y[0]"))
+
+    sdfg = dace.SDFG("nested_symbol")
+    sdfg.add_symbol("alpha", dace.float64)
+    sdfg.add_array("A", [1], dace.float64, transient=False)
+    sdfg.add_array("B", [1], dace.float64, transient=False)
+    s0 = sdfg.add_state("s0")
+    s1 = sdfg.add_state("s1")
+    sdfg.add_edge(s0, s1, dace.InterstateEdge(assignments={"d": "A[0]"}))
+    nsdfg = s1.add_nested_sdfg(inner, {"X"}, {"Y"}, symbol_mapping={"s": outer_value})
+    s1.add_edge(s1.add_read("A"), None, nsdfg, "X", dace.Memlet("A[0]"))
+    s1.add_edge(nsdfg, "Y", s1.add_write("B"), None, dace.Memlet("B[0]"))
+    return sdfg
+
+
+def test_nested_symbol_follows_its_mapping():
+    """An inner symbol mapped from a symbol that copies a float32 array is float32."""
+    sdfg = _nested_symbol_sdfg("d")
+    inner = next(sd for sd in sdfg.all_sdfgs_recursive() if sd.name == "inner")
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32, "B": dace.float32})
+    assert sdfg.symbols["d"] == dace.float32
+    assert inner.symbols["s"] == dace.float32
+
+    A = np.array([0.1], dtype=np.float64)
+    B = np.zeros(1, dtype=np.float64)
+    sdfg(A=A, B=B, alpha=2.0)
+    x = np.float32(0.1)
+    np.testing.assert_array_equal(B, np.float64(x * x))
+
+
+def test_interface_symbol_lowered_through_a_copy():
+    """A float interface symbol keeps its type in the signature; the body reads a
+    copy at the constant type, also through a nested-SDFG mapping."""
+    sdfg = _nested_symbol_sdfg("alpha")
+    inner = next(sd for sd in sdfg.all_sdfgs_recursive() if sd.name == "inner")
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=dace.float32
+    )
+    assert sdfg.symbols["alpha"] == dace.float64
+    assert sdfg.arglist()["alpha"].dtype == dace.float64
+    assert sdfg.symbols["alpha_float32"] == dace.float32
+    assert _assigned_types(sdfg)["alpha_float32"] == dace.float32
+    (nsdfg,) = [
+        n for n, _ in sdfg.all_nodes_recursive() if isinstance(n, nodes.NestedSDFG)
+    ]
+    assert str(nsdfg.symbol_mapping["s"]) == "alpha_float32"
+    assert inner.symbols["s"] == dace.float32
+
+    A = np.array([0.1], dtype=np.float64)
+    B = np.zeros(1, dtype=np.float64)
+    sdfg(A=A, B=B, alpha=0.3)
+    np.testing.assert_array_equal(B, np.float64(np.float32(0.1) * np.float32(0.3)))
+
+
+def test_interface_symbol_stays_double_without_constant_type():
+    sdfg = _nested_symbol_sdfg("alpha")
+    inner = next(sd for sd in sdfg.all_sdfgs_recursive() if sd.name == "inner")
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32, "B": dace.float32})
+    assert "alpha_float32" not in sdfg.symbols
+    assert inner.symbols["s"] == dace.float64
+
+
+def test_literal_in_interstate_min_takes_constant_type():
+    """A symbol defined by min() of a literal and float32 data takes the constant
+    type."""
+    sdfg = dace.SDFG("interstate_min")
+    sdfg.add_array("A", [1], dace.float64, transient=False)
+    sdfg.add_array("B", [1], dace.float64, transient=False)
+    s0, s1 = sdfg.add_state("s0"), sdfg.add_state("s1")
+    sdfg.add_edge(s0, s1, dace.InterstateEdge(assignments={"m": "min(0.1, A[0])"}))
+    t = s1.add_tasklet("t", {"x"}, {"y"}, "y = x * m")
+    s1.add_edge(s1.add_read("A"), None, t, "x", dace.Memlet("A[0]"))
+    s1.add_edge(t, "y", s1.add_write("B"), None, dace.Memlet("B[0]"))
+
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=dace.float32
+    )
+    assert sdfg.symbols["m"] == dace.float32
+    assert _assigned_types(sdfg)["m"] == dace.float32
+
+    A = np.array([0.5])
+    B = np.zeros(1)
+    sdfg(A=A, B=B)
+    assert B[0] == np.float64(np.float32(0.5) * np.float32(0.1))
+
+
+def test_literal_in_nested_control_flow_takes_constant_type():
+    """A symbol defined from a literal on a nested SDFG's interstate edge takes the
+    constant type too."""
+    inner = dace.SDFG("inner_min")
+    inner.add_array("x", [1], dace.float64)
+    inner.add_array("y", [1], dace.float64)
+    s0, s1 = inner.add_state("s0"), inner.add_state("s1")
+    inner.add_edge(s0, s1, dace.InterstateEdge(assignments={"m": "min(x[0], 0.1)"}))
+    t = s1.add_tasklet("t", {}, {"o"}, "o = m")
+    s1.add_edge(t, "o", s1.add_write("y"), None, dace.Memlet("y[0]"))
+
+    sdfg = dace.SDFG("outer_min")
+    sdfg.add_array("A", [1], dace.float64)
+    sdfg.add_array("B", [1], dace.float64)
+    state = sdfg.add_state()
+    nsdfg = state.add_nested_sdfg(inner, {"x"}, {"y"})
+    state.add_edge(state.add_read("A"), None, nsdfg, "x", dace.Memlet("A[0]"))
+    state.add_edge(nsdfg, "y", state.add_write("B"), None, dace.Memlet("B[0]"))
+
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=dace.float32
+    )
+    sdfg.validate()
+    A = np.ones(1)
+    B = np.zeros(1)
+    sdfg(A=A, B=B)
+    assert B[0] == np.float64(np.float32(0.1))
+
+
+def _scalar_input_program():
+    n = 8
+
+    @dace.program
+    def prog(A: dace.float64[n], B: dace.float64[n], s: dace.float64):
+        B[:] = A * s
+
+    return prog.to_sdfg(simplify=True)
+
+
+def test_scalar_input_takes_constant_type():
+    """A read-only float scalar input is a constant: it is lowered through an
+    internal copy, and the interface keeps its type."""
+    sdfg = _scalar_input_program()
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=dace.float32
+    )
+    assert sdfg.arrays["s"].dtype == dace.float64
+    assert not sdfg.arrays["s"].transient
+    assert sdfg.arrays["fp_casted_s_float32"].dtype == dace.float32
+
+    rng = np.random.default_rng(0)
+    A = rng.random(8)
+    B = np.zeros(8)
+    sdfg(A=A, B=B, s=0.1)
+    ref = A.astype(np.float32) * np.float32(0.1)
+    np.testing.assert_array_equal(B, ref.astype(np.float64))
+
+
+def test_explicit_pin_beats_constant_type_for_scalars():
+    sdfg = _scalar_input_program()
+    change_and_propagate_fp_types(
+        sdfg,
+        {"A": dace.float32, "B": dace.float32, "s": dace.float64},
+        constant_type=dace.float32,
+    )
+    assert sdfg.arrays["s"].dtype == dace.float64
+    assert not any(name.startswith("fp_casted_s") for name in sdfg.arrays)
+
+
+def test_written_and_unread_scalars_are_not_constants():
+    """A scalar the program writes is an output, and an unread one is unused:
+    neither is lowered by the constant type."""
+    sdfg = dace.SDFG("scalar_kinds")
+    sdfg.add_array("A", [1], dace.float64, transient=False)
+    sdfg.add_scalar("out", dace.float64, transient=False)
+    sdfg.add_scalar("unused", dace.float64, transient=False)
+    st = sdfg.add_state("s")
+    t = st.add_tasklet("t", {"x"}, {"y"}, "y = x * 0.5")
+    st.add_edge(st.add_read("A"), None, t, "x", dace.Memlet("A[0]"))
+    st.add_edge(t, "y", st.add_write("out"), None, dace.Memlet("out[0]"))
+    change_and_propagate_fp_types(sdfg, {}, constant_type=dace.float32)
+    assert sdfg.arrays["out"].dtype == dace.float64
+    assert sdfg.arrays["unused"].dtype == dace.float64
+    assert not any(name.startswith("fp_casted_") for name in sdfg.arrays)
+
+
+def _fill_sdfg() -> dace.SDFG:
+    """``T`` is filled with a constant, then ``B = A + T``."""
+    sdfg = dace.SDFG("fill_constant")
+    sdfg.add_array("A", [4], dace.float64, transient=False)
+    sdfg.add_array("B", [4], dace.float64, transient=False)
+    sdfg.add_array("T", [4], dace.float64, transient=True)
+    s0 = sdfg.add_state("fill")
+    fill = FillLibraryNode("fill_T", value=2)
+    s0.add_node(fill)
+    s0.add_edge(
+        fill,
+        FillLibraryNode.OUTPUT_CONNECTOR_NAME,
+        s0.add_write("T"),
+        None,
+        dace.Memlet("T[0:4]"),
+    )
+    s1 = sdfg.add_state_after(s0, "add")
+    s1.add_mapped_tasklet(
+        "add",
+        {"i": "0:4"},
+        {"a": dace.Memlet("A[i]"), "t": dace.Memlet("T[i]")},
+        "b = a + t",
+        {"b": dace.Memlet("B[i]")},
+        external_edges=True,
+    )
+    return sdfg
+
+
+@pytest.mark.parametrize(
+    "constant_type, expected", [(None, dace.float64), (dace.float32, dace.float32)]
+)
+def test_constant_fill_takes_constant_type(constant_type, expected):
+    """A transient a constant Fill writes is a constant: double without the
+    constants knob, the constant type with it."""
+    sdfg = _fill_sdfg()
+    change_and_propagate_fp_types(
+        sdfg, {"A": dace.float32, "B": dace.float32}, constant_type=constant_type
+    )
+    assert sdfg.arrays["T"].dtype == expected
+
+    A = np.array([0.1, 0.2, 0.3, 0.4])
+    B = np.zeros(4)
+    sdfg(A=A, B=B)
+    np.testing.assert_allclose(B, A + 2.0, rtol=1e-6)
+
+
 def test_constant_type_end_to_end_float32_precision():
-    """The wrapped constant is evaluated in the requested precision at runtime."""
+    """The constant is evaluated in the requested precision at runtime."""
 
     n = 64
 
@@ -833,9 +1163,11 @@ def test_heat3d_no_fp64_in_generated_code():
 
 
 def test_direct_copy_cast_inserted():
-    """A direct AccessNode->AccessNode copy between differently-typed arrays
-    is replaced by an elementwise cast map (DaCe cannot lower a mixed-dtype
-    copy), including subset copies with different src/dst offsets."""
+    """
+    A direct AccessNode->AccessNode copy between differently-typed arrays
+    is replaced by an elementwise cast map, including subset copies with
+    different src/dst offsets.
+    """
 
     n = 6
     sdfg = dace.SDFG("copy_cast")
@@ -1154,6 +1486,7 @@ def test_nested_constant_type_reaches_inner_tasklets():
         if isinstance(n, nodes.Tasklet) and n.language == dace.Language.Python
     )
     assert "dace.float32(2.0)" in inner_code, inner_code
+    sdfg.validate()
 
 
 def test_shared_nested_sdfg_rejected():
@@ -1503,6 +1836,18 @@ if __name__ == "__main__":
     test_constant_type_leaves_int_literals()
     test_constant_type_only_touches_python_tasklets()
     test_constant_type_end_to_end_float32_precision()
+    test_narrower_constant_type_leaves_what_literals_flow_into()
+    test_literal_only_transient_takes_constant_type()
+    test_literal_only_transient_stays_double_without_constant_type()
+    test_literal_symbols_stay_double_without_constant_type()
+    test_symbols_end_to_end_float32()
+    test_double_symbol_widens_the_tasklet_reading_it()
+    test_nested_symbol_follows_its_mapping()
+    test_interface_symbol_lowered_through_a_copy()
+    test_interface_symbol_stays_double_without_constant_type()
+    test_scalar_input_takes_constant_type()
+    test_explicit_pin_beats_constant_type_for_scalars()
+    test_written_and_unread_scalars_are_not_constants()
     test_heat3d_no_fp64_in_generated_code()
     test_end_to_end_demoted_written_array_runs()
     test_direct_copy_cast_inserted()
