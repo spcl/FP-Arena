@@ -363,6 +363,7 @@ if __name__ == "__main__":
     test_sdfg_array_sum()
     test_sdfg_binary_ops()
     test_sdfg_copy()
+    test_sdfg_array_copy_in_loop_is_deep()
     test_cap_elementwise()
     test_cap_array_map()
     test_cap_chain_transient()

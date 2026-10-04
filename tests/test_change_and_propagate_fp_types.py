@@ -370,6 +370,19 @@ def test_interface_copy_in_also_for_outputs():
     np.testing.assert_allclose(B, [1.0, 0.5])
 
 
+def test_interface_copies_survive_simplify():
+    """The fusion barriers keep the copy-in and copy-out states apart from the
+    kernel through a later simplify (the timers time each phase by its state)."""
+    sdfg = _const_sdfg("y = x * 2.0", dtype=dace.float64)
+    change_and_propagate_fp_types(sdfg, {"A": dace.float32, "B": dace.float32})
+    sdfg.simplify()
+
+    labels = {st.label for st in sdfg.states()}
+    assert "copy_in" in labels
+    assert any(label.startswith("copy_out") for label in labels)
+    assert len(labels) == 3
+
+
 def test_requires_two_fixpoint_passes():
     """
     Verify that the fixpoint loop runs at least two passes. In the first pass, B is promoted to f32 due to the write from E; in the second pass, C is promoted to f32 due to the read from B.
@@ -1439,6 +1452,7 @@ if __name__ == "__main__":
     test_long_chain_convergence()
     test_unconnected_array_unchanged()
     test_interface_copy_in_also_for_outputs()
+    test_interface_copies_survive_simplify()
     test_requires_two_fixpoint_passes()
     test_three_level_lattice()
     test_cyclic_dependency_terminates()
