@@ -29,9 +29,18 @@ from fp_arena.environments import MPFR, FPArenaSR
 
 #: Fast-math flags removed when FP-Arena is enabled (incompatible with the
 #: exact IEEE rounding that stochastic rounding depends on). ``Config.get``
-#: returns the platform-resolved args, so this covers both the Linux/GCC
-#: defaults (``-ffast-math``) and the Windows/MSVC defaults (``/fp:fast``).
-_FAST_MATH_FLAGS = ("-ffast-math", "-ffinite-math-only", "--use_fast_math", "/fp:fast")
+#: returns the platform-resolved args, so this covers the GCC defaults
+#: (``-freciprocal-math``), the nvhpc defaults (``-Mfprelaxed=recip``) and the
+#: Windows/MSVC defaults (``/fp:fast``).
+_FAST_MATH_FLAGS = (
+    "-ffast-math",
+    "-ffinite-math-only",
+    "-freciprocal-math",
+    "-fno-signed-zeros",
+    "-Mfprelaxed=recip",
+    "--use_fast_math",
+    "/fp:fast",
+)
 
 #: DaCe compiler-argument config paths that may carry fast-math flags.
 _COMPILER_ARG_PATHS = (("compiler", "cpu", "args"), ("compiler", "cuda", "args"))
