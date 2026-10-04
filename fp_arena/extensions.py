@@ -145,6 +145,9 @@ def patch_memcpy_copies() -> bool:
     from dace.libraries.standard.nodes import copy as copy_lib
     from dace.libraries.standard.nodes.copy import select as copy_select
     from dace.libraries.standard.nodes.copy.expansions import auto as copy_auto
+    from dace.transformation.passes.cpu_specialization import (
+        specialize_cpu_transfers as cpu_transfers,
+    )
 
     original = copy_select.select_copy_implementation
 
@@ -165,6 +168,17 @@ def patch_memcpy_copies() -> bool:
     copy_select.select_copy_implementation = _select_copy_implementation
     copy_lib.select_copy_implementation = _select_copy_implementation
     copy_auto.select_copy_implementation = _select_copy_implementation
+
+    # SpecializeCpuTransfers pins MemcpyCPU on sequential copies itself, bypassing the selector.
+    original_one_memcpy = cpu_transfers.copy_is_one_memcpy
+
+    def _copy_is_one_memcpy(node, state) -> bool:
+        inp, _, _, _ = cpu_transfers.copy_endpoints(node, state)
+        if isinstance(inp.dtype, mpfr):
+            return False
+        return original_one_memcpy(node, state)
+
+    cpu_transfers.copy_is_one_memcpy = _copy_is_one_memcpy
 
     _copy_patch_installed = True
     return True

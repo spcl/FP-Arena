@@ -1,5 +1,6 @@
 import dace
 import numpy as np
+from dace.sdfg.state import LoopRegion
 
 from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
@@ -147,6 +148,55 @@ def test_sdfg_copy():
     out = np.zeros(1, dtype=np.float64)
     csdfg(out=out)
     assert abs(out[0] - 1.0 / 3.0) < 1e-15, f"Copy changed value: got {out[0]}"
+
+
+def test_sdfg_array_copy_in_loop_is_deep():
+    """An mpfr array copy inside a loop is element-wise, not a memcpy: DaCe's CPU
+    transfer specialization pins memcpy on re-entered copies itself, and a memcpy
+    would share mpfr's limb pointer between the two arrays."""
+    N = 4
+    sdfg = dace.SDFG("mpfr_loop_copy")
+    sdfg.add_symbol("K", dace.int64)
+    sdfg.add_array("src", [N], dace.mpfr(128), transient=True)
+    sdfg.add_array("dst", [N], dace.mpfr(128), transient=True)
+    sdfg.add_array("out", [N], dace.float64, transient=False)
+
+    init = sdfg.add_state("init", is_start_block=True)
+    fill = init.add_tasklet(
+        "fill",
+        {},
+        {"s"},
+        "\n".join(f"s[{i}] = 1.0 / {i + 3};" for i in range(N)),
+        language=dace.Language.CPP,
+    )
+    init.add_edge(fill, "s", init.add_write("src"), None, dace.Memlet(f"src[0:{N}]"))
+
+    loop = LoopRegion("loop", "k < K", "k", "k = 0", "k = k + 1")
+    sdfg.add_node(loop)
+    sdfg.add_edge(init, loop, dace.InterstateEdge())
+    body = loop.add_state("body", is_start_block=True)
+    body.add_nedge(
+        body.add_read("src"), body.add_write("dst"), dace.Memlet(f"src[0:{N}]")
+    )
+
+    done = sdfg.add_state("done")
+    sdfg.add_edge(loop, done, dace.InterstateEdge())
+    conv = done.add_tasklet(
+        "conv",
+        {"d"},
+        {"o"},
+        "\n".join(f"o[{i}] = (double)d[{i}];" for i in range(N)),
+        language=dace.Language.CPP,
+    )
+    done.add_edge(done.add_read("dst"), None, conv, "d", dace.Memlet(f"dst[0:{N}]"))
+    done.add_edge(conv, "o", done.add_write("out"), None, dace.Memlet(f"out[0:{N}]"))
+
+    code = "\n".join(obj.clean_code for obj in sdfg.generate_code())
+    assert "memcpy" not in code
+
+    out = np.zeros(N, dtype=np.float64)
+    sdfg.compile()(out=out, K=2)
+    np.testing.assert_allclose(out, [1.0 / (i + 3) for i in range(N)], rtol=1e-15)
 
 
 _MPFR128 = dace.mpfr(128)
