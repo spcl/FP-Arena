@@ -167,7 +167,8 @@ def find_knobs(
     return knobs
 
 
-# A candidate's identity: its inferred per-array typing plus the constants precision.
+# A candidate's identity: its inferred per-array (and per-scalar) typing plus the
+# constants precision.
 # Two pin-maps with the same key compile to the same program.
 CanonicalKey = tuple[tuple[tuple[str, str], ...], str | None]
 
@@ -182,7 +183,7 @@ def canonical_typing(
     apply_precision(sdfg, pin_map, experiment.promotion_rules)
     typing: list[tuple[str, str]] = []
     for name, desc in sdfg.arrays.items():
-        if not isinstance(desc, dace.data.Array):
+        if not isinstance(desc, (dace.data.Array, dace.data.Scalar)):
             continue
         try:
             typing.append((name, registry.key_of(desc.dtype)))

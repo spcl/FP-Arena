@@ -134,6 +134,14 @@ def test_scalar_input_is_a_knob_without_the_constants_knob():
     assert "s" in knobs
 
 
+def test_canonical_typing_tells_scalar_pins_apart():
+    """Lowering a scalar knob is a different program, so a different key."""
+    exp = _experiment(_SCALAR_SCALED)
+    root = canonical_typing(exp, {})
+    assert canonical_typing(exp, {"s": "fp32"}) != root
+    assert canonical_typing(exp, {"s": "fp16"}) != canonical_typing(exp, {"s": "fp32"})
+
+
 def test_domain_capped_at_original():
     @dace.program
     def half(a: dace.float32[N], c: dace.float32[N]):
