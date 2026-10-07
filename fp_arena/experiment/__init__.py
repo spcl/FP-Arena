@@ -34,6 +34,7 @@ from fp_arena.experiment.runner import run_error, run_performance, run_perturbat
 from fp_arena.experiment.screening import Screening, screen
 from fp_arena.experiment.search import (
     SearchCandidate,
+    SearchEvaluation,
     SearchFailure,
     SearchResult,
     SelectionSearchConfig,
@@ -65,6 +66,7 @@ __all__ = [
     "ResultStore",
     "Screening",
     "SearchCandidate",
+    "SearchEvaluation",
     "SearchFailure",
     "SearchResult",
     "SelectionAnalysisConfig",

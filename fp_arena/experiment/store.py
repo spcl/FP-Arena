@@ -18,6 +18,7 @@ from fp_arena.experiment.results import (
     ErrorResult,
     PerfResult,
     PerturbationResult,
+    SearchEvaluation,
     SearchResult,
     SelectionResult,
 )
@@ -31,12 +32,13 @@ _KIND_OF = {
     PerturbationResult: "perturbation",
     SelectionResult: "selection",
     SearchResult: "search",
+    SearchEvaluation: "search_evaluation",
 }
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind          TEXT NOT NULL,        -- 'performance' | 'error' | 'perturbation' | 'selection' | 'search'
+    kind          TEXT NOT NULL,        -- 'performance' | 'error' | 'perturbation' | 'selection' | 'search' | 'search_evaluation'
     experiment    TEXT NOT NULL,        -- ExperimentConfig.name
     created_at    TEXT NOT NULL,        -- ISO-8601 UTC
     precision     TEXT NOT NULL,        -- JSON: the precision map
@@ -95,7 +97,12 @@ class ResultStore:
     def add(
         self,
         experiment: str,
-        result: PerfResult | ErrorResult | PerturbationResult | SelectionResult | SearchResult,
+        result: PerfResult
+        | ErrorResult
+        | PerturbationResult
+        | SelectionResult
+        | SearchResult
+        | SearchEvaluation,
         symbols: dict[str, Any] | None = None,
         scalars: dict[str, Any] | None = None,
         vectorization: VectorizeConfig | None = None,

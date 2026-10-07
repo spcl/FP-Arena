@@ -8,7 +8,7 @@ error.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from scipy import stats
 
@@ -40,11 +40,13 @@ class Screening:
         inputs with no safe precision are absent.
     :param sensitivity: ``{input: worst fraction of any limit}``;
         ``>= 1`` means the probe is already over budget.
+    :param probes: what each probe measured, ``{format: {input: {output: stats}}}``.
     """
 
     limits: dict[str, dict[str, float]]
     safe_format: dict[str, str]
     sensitivity: dict[str, float]
+    probes: dict[str, dict[str, dict[str, ErrorStats]]] = field(default_factory=dict)
 
 
 def _severity(
@@ -123,7 +125,9 @@ def screen(
         sensitivity[name] = _severity(errors16, limits) if errors16 is not None else 1.0
 
     _report(source_knobs, limits, floor, probes, safe_format, sensitivity)
-    return Screening(limits=limits, safe_format=safe_format, sensitivity=sensitivity)
+    return Screening(
+        limits=limits, safe_format=safe_format, sensitivity=sensitivity, probes=probes
+    )
 
 
 def _report(

@@ -255,6 +255,52 @@ class SearchFailure:
     error: str
 
 
+#: The outcomes a :class:`SearchEvaluation` can have.
+SEARCH_OUTCOMES = ("feasible", "infeasible", "pruned", "covered", "failed")
+
+
+@dataclass
+class SearchEvaluation:
+    """
+    One config the search settled, in the order it was settled.
+
+    ``outcome`` is one of :data:`SEARCH_OUTCOMES`: ``feasible`` or ``infeasible``
+    after grading (its own program or, if ``cached``, an earlier config's
+    program of the same canonical key); ``pruned``, when it lowers an infeasible
+    config at least as far; ``covered``, when a feasible config lowers it at
+    least as far (only with ``prune_above_feasible``); or ``failed``, when its
+    program did not build. Pruned, covered and failed configs have no errors
+    and no timing.
+
+    The search stores each one as its own row as soon as it is settled, so the
+    log of a search that is killed before it finishes is kept.
+    """
+
+    #: The lowered pins (knobs left at their highest rung are omitted).
+    precision: PrecisionMap
+    outcome: str
+    #: The search run it belongs to, :attr:`SearchResult.run_id`.
+    run_id: str
+    #: What queued it first: ``root``, ``seed``, ``neighbor``,
+    #: ``chain:<label>`` or ``exhaustive``.
+    origin: str
+    #: Seconds since the search started.
+    time_s: float
+    #: A dedup hit: it took the result of an earlier config's program.
+    cached: bool = False
+    #: Per-output errors, if it was graded.
+    errors: dict[str, ErrorStats] | None = None
+    #: Median objective milliseconds, if it was timed.
+    objective_ms: float | None = None
+    #: Speedup over the all-highest root, if it was timed.
+    speedup: float | None = None
+    #: Every repetition of every phase, if it was timed.
+    perf: PerfResult | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class SearchResult:
     """The outcome of a selection search (``fp_arena.experiment.search``)."""
@@ -279,6 +325,23 @@ class SearchResult:
     unsatisfiable: bool = False
     #: Configs that failed to build and were skipped.
     failures: list[SearchFailure] = field(default_factory=list)
+    #: Every config the search settled, in order, root first.
+    evaluations: list[SearchEvaluation] = field(default_factory=list)
+    #: The whole lattice was enumerated without pruning, every config timed.
+    exhaustive: bool = False
+    #: Objective milliseconds of the all-highest root.
+    root_ms: float | None = None
+    #: The screening's probes, ``{format: {input: {output: stats}}}``.
+    probes: dict[str, dict[str, dict[str, ErrorStats]]] = field(default_factory=dict)
+    #: ``{input: lowest format whose probe stays within budget}``.
+    safe_format: dict[str, str] = field(default_factory=dict)
+    #: ``{input: worst fraction of any limit its fp16 probe consumes}``.
+    sensitivity: dict[str, float] = field(default_factory=dict)
+    #: Wall-clock seconds of the screening and of the whole search.
+    screening_s: float = 0.0
+    duration_s: float = 0.0
+    #: Identifies this run's ``search_evaluation`` rows in the database.
+    run_id: str = ""
 
     @property
     def precision(self) -> PrecisionMap:

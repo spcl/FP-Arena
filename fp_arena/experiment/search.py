@@ -12,7 +12,11 @@ Flow:
 4. Evaluate: error-check each candidate; infeasible prunes its down-set,
    feasible is timed and expands its one-step-lower neighbours. A candidate that
    fails to build is recorded in ``SearchResult.failures`` and skipped.
-5. Return the fastest measured feasible config.
+5. Return the fastest measured feasible config, with a log of every config the
+   search settled (``SearchResult.evaluations``).
+
+With ``exhaustive``, steps 2-4 are replaced by evaluating and timing every
+config of the lattice, the ground truth to compare a search against.
 
 Chains reach deep configs in big steps instead of one knob per round. A chain
 keeps a base (its last feasible config) and the knobs of its goal still open. It
@@ -31,6 +35,8 @@ import multiprocessing as mp
 import os
 import shutil
 import subprocess
+import time
+import uuid
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -61,6 +67,7 @@ from fp_arena.experiment.results import (
     ErrorStats,
     PerfResult,
     SearchCandidate,
+    SearchEvaluation,
     SearchFailure,
     SearchResult,
 )
@@ -119,6 +126,8 @@ class SelectionSearchConfig:
     :param prune_above_feasible: also skip configs a feasible config lowers at
         least as far (covered: known to pass, assumed no faster). Finds the
         most-lowered feasible configs and stops, instead of the fastest overall.
+    :param exhaustive: evaluate every config of the lattice, without seeds,
+        chains or pruning, and time every config, feasible or not.
     :param name: database/report name; defaults to the experiment's.
 
     """
@@ -141,6 +150,7 @@ class SelectionSearchConfig:
     grade_cpus_per_device: int = 8
     keep_builds: bool = False
     prune_above_feasible: bool = False
+    exhaustive: bool = False
     name: str | None = None
 
     def __post_init__(self) -> None:
@@ -148,6 +158,8 @@ class SelectionSearchConfig:
             raise ValueError(
                 f"Unknown objective {self.objective!r}; expected one of {list(OBJECTIVES)}"
             )
+        if self.exhaustive and self.prune_above_feasible:
+            raise ValueError("exhaustive and prune_above_feasible exclude each other")
 
 
 #: A config: every in-scope knob mapped to a ladder rung.
@@ -231,12 +243,14 @@ class _Slot:
         limits: dict[str, dict[str, float]],
         n_warmup: int,
         n_reps: int,
+        time_all: bool = False,
     ) -> None:
         self.experiment = experiment
         self.outputs = _checked_outputs(experiment)
         self.limits = limits
         self.n_warmup = n_warmup
         self.n_reps = n_reps
+        self.time_all = time_all
         reads, writes = experiment.program.read_and_write_sets()
         self._written = set(writes)
         ref = compile_reference(experiment, reference)
@@ -255,7 +269,7 @@ class _Slot:
     ) -> tuple[dict[str, ErrorStats], PerfResult | None]:
         """
         Grade the candidate compiled into ``build_folder`` against the reference
-        and, when it meets the numeric limits, time it.
+        and, when it meets the numeric limits (or ``time_all`` is set), time it.
         """
         csdfg = load_precompiled_sdfg(build_folder)
         sdfg = csdfg.sdfg
@@ -268,7 +282,7 @@ class _Slot:
                 _accumulate(accs[name], ref_out[name], cand_out[name])
         errors = {name: _finalize(a) for name, a in accs.items()}
         perf: PerfResult | None = None
-        if all(c.ok for c in check(errors, self.limits)):
+        if self.time_all or all(c.ok for c in check(errors, self.limits)):
             rng = _sample_rngs(self.experiment.seed, 1)[0]
             # The error samples already ran on this compiled object; measure()
             # resets the timer buffer up front, so only its own reps are timed.
@@ -312,6 +326,7 @@ def _init_slot(
     limits: dict[str, dict[str, float]],
     n_warmup: int,
     n_reps: int,
+    time_all: bool,
     device_queue,
 ) -> None:
     # Pin the device and the CPU cores
@@ -321,7 +336,9 @@ def _init_slot(
     if cpus:
         os.sched_setaffinity(0, cpus)
     _worker_dace_config(experiment)
-    _WORKER["slot"] = _Slot(experiment, reference, n_samples, limits, n_warmup, n_reps)
+    _WORKER["slot"] = _Slot(
+        experiment, reference, n_samples, limits, n_warmup, n_reps, time_all
+    )
 
 
 def _init_compiler(experiment: ExperimentConfig, cpus: set[int] | None) -> None:
@@ -453,6 +470,8 @@ def run_search(
 
     Prints :func:`format_search` of the outcome.
     """
+    t0 = time.monotonic()
+    run_id = uuid.uuid4().hex
     exp = cfg.experiment
     knobs = find_knobs(exp.program, cfg.knobs, cfg.ladder)
     if not knobs:
@@ -468,6 +487,7 @@ def run_search(
 
     source_knobs = [k for k in knobs if k.kind == "source"]
     screening = screen(exp, cfg.budget, cfg.noise, source_knobs, cfg.n_samples, store)
+    screening_s = time.monotonic() - t0
     limits = screening.limits
 
     root: Config = {name: highest[name] for name in names}
@@ -529,6 +549,35 @@ def run_search(
     # infeasible, covered ones as feasible) and the chains waiting on a queued one.
     outcome: dict[tuple[int, ...], bool] = {}
     waiters: dict[tuple[int, ...], list[tuple[_Chain, frozenset[str]]]] = {}
+    # What first queued each visited config, and every settled config in order.
+    origin: dict[tuple[int, ...], str] = {}
+    evaluations: list[SearchEvaluation] = []
+
+    def record(
+        config: Config,
+        result: str,
+        cached: bool = False,
+        errors: dict[str, ErrorStats] | None = None,
+        perf: PerfResult | None = None,
+    ) -> None:
+        """Log one settled config (see :class:`SearchEvaluation`) and store it
+        right away, so a search killed before the end keeps its log."""
+        ms = _objective_ms(perf, cfg.objective) if perf is not None else None
+        evaluation = SearchEvaluation(
+            precision=pin_map(config),
+            outcome=result,
+            run_id=run_id,
+            origin=origin.get(vec(config), "?"),
+            time_s=time.monotonic() - t0,
+            cached=cached,
+            errors=errors,
+            objective_ms=ms,
+            speedup=(root_ms / ms) if root_ms and ms else None,
+            perf=perf,
+        )
+        evaluations.append(evaluation)
+        if store is not None:
+            _persist(store, cfg, evaluation)
 
     def rank(config: Config) -> tuple[bool, float]:
         """Queue order: chain configs first, then highest score."""
@@ -538,29 +587,35 @@ def run_search(
         """Settle ``config`` without building it when its outcome is known: pruned
         (fails like an infeasible config it lowers at least as far) or covered
         (passes like a feasible config that lowers it at least as far). A covered
-        config is not expanded: everything above a feasible config is covered."""
+        config is not expanded: everything above a feasible config is covered.
+        An exhaustive search skips nothing."""
+        if cfg.exhaustive:
+            return False
         if dominated(config):
             stats["pruned"] += 1
+            record(config, "pruned")
             resolve(config, False)
             return True
         if covered(config):
             stats["covered"] += 1
+            record(config, "covered")
             resolve(config, True)
             return True
         return False
 
-    def push(config: Config) -> None:
+    def push(config: Config, source: str) -> None:
         v = vec(config)
         if v in visited:
             return
         visited.add(v)
+        origin[v] = source
         if skip(config):
             return
         queue.put(v, rank(config), config)
 
     def expand(config: Config) -> None:
         for nb in neighbors(config):
-            push(nb)
+            push(nb, "neighbor")
 
     def resolve(config: Config, ok: bool) -> None:
         """Record a config's outcome and hand it to the chains waiting on it."""
@@ -585,7 +640,7 @@ def run_search(
         if v in visited:
             promote(config)  # already queued or in flight: move it up
         else:
-            push(config)
+            push(config, f"chain:{chain.label}")
 
     def waiting(chain: _Chain) -> bool:
         """Whether ``chain`` waits on any config's result."""
@@ -719,15 +774,16 @@ def run_search(
         timing, if any, already sits in ``perf_cache``). ``cached``: a dedup hit,
         never built itself."""
         ok = _feasible(errors, limits, cfg.budget)
+        if key in perf_cache:
+            perf = perf_cache[key]  # dedup: reuse the timing
+        elif perf is not None:
+            perf_cache[key] = perf
+            stats["timed"] += 1
+        record(config, "feasible" if ok else "infeasible", cached, errors, perf)
         if ok:
             if cfg.prune_above_feasible:
                 feasible.append(vec(config))
-            if key in perf_cache:
-                # dedup: reuse the timing
-                update_best(config, perf_cache[key], cached)
-            elif perf is not None:
-                perf_cache[key] = perf
-                stats["timed"] += 1
+            if perf is not None:
                 update_best(config, perf, cached)
             # A chain's configs do not expand; its final base does when it ends.
             if vec(config) not in waiters:
@@ -777,6 +833,7 @@ def run_search(
             limits,
             cfg.n_warmup,
             cfg.n_reps,
+            cfg.exhaustive,
             device_queue,
         ),
     )
@@ -788,9 +845,25 @@ def run_search(
             cleaner.submit(shutil.rmtree, folder, ignore_errors=True)
 
     root_ms = None
+
+    def log_fields() -> dict:
+        """The :class:`SearchResult` fields that record how the search went."""
+        return {
+            "evaluations": evaluations,
+            "exhaustive": cfg.exhaustive,
+            "root_ms": root_ms,
+            "probes": screening.probes,
+            "safe_format": screening.safe_format,
+            "sensitivity": screening.sensitivity,
+            "screening_s": screening_s,
+            "duration_s": time.monotonic() - t0,
+            "run_id": run_id,
+        }
+
     try:
         # Root first: the feasibility floor and the speedup denominator.
         visited.add(vec(root))
+        origin[vec(root)] = "root"
         root_key = key_of(root)
         stats["evaluated"] += 1
         root_folder = compile_pool.submit(_compile_task, pin_map(root)).result()
@@ -802,6 +875,7 @@ def run_search(
         discard(root_folder)
         errors_cache[root_key] = root_errors
         if not _feasible(root_errors, limits, cfg.budget):
+            record(root, "infeasible", errors=root_errors, perf=root_perf)
             return _finish(
                 SearchResult(
                     best=None,
@@ -814,6 +888,7 @@ def run_search(
                     n_pruned=0,
                     n_timed=0,
                     unsatisfiable=True,
+                    **log_fields(),
                 ),
                 cfg,
                 exp,
@@ -824,24 +899,37 @@ def run_search(
         perf_cache[root_key] = root_perf
         stats["timed"] += 1
         root_ms = _objective_ms(root_perf, cfg.objective)
+        record(root, "feasible", errors=root_errors, perf=root_perf)
         update_best(root, root_perf, cached=False)
         outcome[vec(root)] = True
         if cfg.prune_above_feasible:
             feasible.append(vec(root))
 
-        # Seeds: per-input safe candidates, a chain per wide seed, then neighbours.
-        for name, fmt in screening.safe_format.items():
-            if name in root:
-                cand = dict(root)
-                cand[name] = fmt
-                push(cand)
-        goals = {"safe": {n: f for n, f in screening.safe_format.items() if n in root}}
-        for fmt in ("fp32", "fp16"):
-            goals[fmt] = {n: fmt for n in names if fmt in rung[n] and fmt != highest[n]}
-        chains = [_Chain(label, base=root, open=goal) for label, goal in goals.items()]
-        for chain in chains:
-            chain_try(chain, chain.open)
-        expand(root)
+        chains: list[_Chain] = []
+        if cfg.exhaustive:
+            # Every config of the lattice; the root is already visited.
+            for rungs in itertools.product(*(k.domain for k in knobs)):
+                push(dict(zip(names, rungs, strict=True)), "exhaustive")
+        else:
+            # Seeds: per-input safe candidates, a chain per wide seed, then neighbours.
+            for name, fmt in screening.safe_format.items():
+                if name in root:
+                    cand = dict(root)
+                    cand[name] = fmt
+                    push(cand, "seed")
+            goals = {
+                "safe": {n: f for n, f in screening.safe_format.items() if n in root}
+            }
+            for fmt in ("fp32", "fp16"):
+                goals[fmt] = {
+                    n: fmt for n in names if fmt in rung[n] and fmt != highest[n]
+                }
+            chains = [
+                _Chain(label, base=root, open=goal) for label, goal in goals.items()
+            ]
+            for chain in chains:
+                chain_try(chain, chain.open)
+            expand(root)
 
         def subscribe(config: Config, key: CanonicalKey) -> None:
             """Settle a keyed config: skipped, dedup hit, known build failure, or
@@ -854,6 +942,7 @@ def run_search(
                 return
             if key in failed_keys:  # same program, same build failure
                 stats["failed"] += 1
+                record(config, "failed", cached=True)
                 resolve(config, False)
                 return
             job = jobs.get(key)
@@ -950,8 +1039,9 @@ def run_search(
                             stacklevel=2,
                         )
                         finish(job)
-                        for config in job.configs:
+                        for i, config in enumerate(job.configs):
                             stats["failed"] += 1
+                            record(config, "failed", cached=i > 0)
                             resolve(config, False)
                         continue
                     stats["compiled"] += 1
@@ -994,6 +1084,7 @@ def run_search(
         n_timed=stats["timed"],
         candidates=sorted(candidates, key=lambda c: c.objective_ms),
         failures=failures,
+        **log_fields(),
     )
     return _finish(result, cfg, exp, store)
 
@@ -1006,17 +1097,27 @@ def _finish(
 ) -> SearchResult:
     """Persist (if a store is given), print, and return the result."""
     if store is not None:
-        store.add(
-            cfg.name or exp.name,
-            result,
-            symbols=exp.symbols,
-            scalars=exp.scalar_args,
-            vectorization=resolve_vectorize_config(
-                exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
-            ),
-        )
+        _persist(store, cfg, result)
     print(format_search(result, name=cfg.name or exp.name))
     return result
+
+
+def _persist(
+    store: ResultStore,
+    cfg: SelectionSearchConfig,
+    record: SearchResult | SearchEvaluation,
+) -> None:
+    """Append one row of the search under its name."""
+    exp = cfg.experiment
+    store.add(
+        cfg.name or exp.name,
+        record,
+        symbols=exp.symbols,
+        scalars=exp.scalar_args,
+        vectorization=resolve_vectorize_config(
+            exp.target, exp.gpu_vectorize, exp.gpu_vectorize_config
+        ),
+    )
 
 
 def format_search(result: SearchResult, name: str | None = None) -> str:
@@ -1026,7 +1127,8 @@ def format_search(result: SearchResult, name: str | None = None) -> str:
     out.append(
         f"knobs={len(result.knobs)}  evaluated={result.n_evaluated}  "
         f"pruned={result.n_pruned}  timed={result.n_timed}  "
-        f"failed={len(result.failures)}  objective={result.objective}"
+        f"failed={len(result.failures)}  objective={result.objective}  "
+        f"time={result.duration_s:.0f}s{'  (exhaustive)' if result.exhaustive else ''}"
     )
     if result.unsatisfiable:
         out.append(
