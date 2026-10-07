@@ -8,6 +8,7 @@ diffusion (hdiff) stencil that stays within budget, using the pruning selection
   * ``sources``   -- read inputs only (the default);
   * ``overrides`` -- also intermediates and outputs (many more knobs);
   * ``constants`` -- also the float literals in the kernel.
+``--exhaustive`` evaluates and times every config instead of searching.
 Results go to ``hdiff_search_<knobs>.db`` under experiment name ``hdiff_<knobs>``.
 """
 
@@ -49,6 +50,10 @@ def main() -> None:
         default=None,
         help="cap on distinct programs compiled (compute_budget); mainly for the "
         "'overrides' scope, which exposes many knobs. Default: run to exhaustion.",
+    )
+    parser.add_argument(
+        "--exhaustive",
+        help="evaluate and time every config of the lattice instead of searching ",
     )
     args = parser.parse_args()
     scopes = set(args.knobs)
@@ -94,6 +99,8 @@ def main() -> None:
         objective="kernel",
         compute_budget=args.max_configs,
         devices=[0, 1, 2, 3],
+        exhaustive=args.exhaustive,
+        name=f"{experiment.name}_exhaustive" if args.exhaustive else None,
     )
 
     store = ResultStore(f"hdiff_search_{tag}.db")
