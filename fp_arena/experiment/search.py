@@ -6,12 +6,20 @@ Flow:
 
 0. Enumerate and select the knobs; compile the reference once.
 1. Perturb each input at fp16/fp32 magnitude on the baseline SDFG.
-2. Seed a per-input candidate for each safe input (based on perturbation) plus one combined candidate.
+2. Seed a per-input candidate for each safe input (based on perturbation), and
+   start a chain for each wide seed (all safe inputs, all fp32, all fp16).
 3. Prioritise by benefit (big, low-sensitivity arrays lowered first) defined by the scoring function.
 4. Evaluate: error-check each candidate; infeasible prunes its down-set,
    feasible is timed and expands its one-step-lower neighbours. A candidate that
    fails to build is recorded in ``SearchResult.failures`` and skipped.
 5. Return the fastest measured feasible config.
+
+Chains reach deep configs in big steps instead of one knob per round. A chain
+keeps a base (its last feasible config) and the knobs of its goal still open. It
+tries base + all open knobs; a pass becomes the new base, a fail is split into
+halves tried on the base, and a single knob that fails is retried one rung
+higher, or kept at its original precision. A chain's configs do not expand
+their one-step neighbours. Only its final base does.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ import os
 import shutil
 import subprocess
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -103,10 +112,13 @@ class SelectionSearchConfig:
     :param compile_ahead: per measurement slot, how many configs may be keyed,
         compiling, or compiled and waiting for a slot. Bounds how far
         compilation runs ahead of measurement, so configs are picked from the
-        heap with recent results (pruning, best-first order) in hand.
+        queue with recent results (pruning, best-first order) in hand.
     :param grade_cpus_per_device: with ``devices``, each measurement worker is
         pinned to this many CPUs
     :param keep_builds: keep each candidate's build folder after it is graded.
+    :param prune_above_feasible: also skip configs a feasible config lowers at
+        least as far (covered: known to pass, assumed no faster). Finds the
+        most-lowered feasible configs and stops, instead of the fastest overall.
     :param name: database/report name; defaults to the experiment's.
 
     """
@@ -128,6 +140,7 @@ class SelectionSearchConfig:
     compile_ahead: int = 8
     grade_cpus_per_device: int = 8
     keep_builds: bool = False
+    prune_above_feasible: bool = False
     name: str | None = None
 
     def __post_init__(self) -> None:
@@ -139,6 +152,70 @@ class SelectionSearchConfig:
 
 #: A config: every in-scope knob mapped to a ladder rung.
 Config = dict[str, str]
+
+
+@dataclass(eq=False)
+class _Chain:
+    """
+    One wide seed, lowered in big steps.
+
+    :param label: the seed's name, for the log.
+    :param base: the chain's last feasible config.
+    :param open: the goal's knobs not lowered in ``base`` yet, with their target rung.
+    :param done: nothing is open any more; ``base`` is the chain's result.
+    """
+
+    label: str
+    base: Config
+    open: dict[str, str]
+    done: bool = False
+
+
+class _PriorityQueue:
+    """
+    Items by rank, lowest first, ties in insertion order. ``put`` inserts an
+    item or moves it up to a lower rank; its old entry is skipped when it comes up.
+    """
+
+    def __init__(self) -> None:
+        self._heap: list = []
+        self._rank: dict = {}
+        self._counter = itertools.count()
+
+    def put(self, ident, rank, item) -> None:
+        if ident in self._rank and self._rank[ident] <= rank:
+            return
+        self._rank[ident] = rank
+        heapq.heappush(self._heap, (rank, next(self._counter), ident, item))
+
+    def pop(self):
+        while True:
+            rank, _, ident, item = heapq.heappop(self._heap)
+            if self._rank.get(ident) == rank:
+                del self._rank[ident]
+                return item
+
+    def __contains__(self, ident) -> bool:
+        return ident in self._rank
+
+    def __len__(self) -> int:
+        return len(self._rank)
+
+
+@dataclass(eq=False)
+class _Job:
+    """
+    One program (canonical key) in flight and the configs waiting for its
+    result: the first is graded, the others take its result.
+
+    :param state: ``"compiling"``, ``"ready"`` (built, waiting for a slot) or
+        ``"grading"``.
+    """
+
+    key: CanonicalKey
+    configs: list[Config] = field(default_factory=list)
+    state: str = "compiling"
+    build_folder: str | None = None
 
 
 class _Slot:
@@ -410,10 +487,15 @@ def run_search(
         return total
 
     infeasible: list[tuple[int, ...]] = []
+    feasible: list[tuple[int, ...]] = []  # only kept with prune_above_feasible
 
     def dominated(config: Config) -> bool:
         v = vec(config)
         return any(all(a <= b for a, b in zip(v, iv, strict=True)) for iv in infeasible)
+
+    def covered(config: Config) -> bool:
+        v = vec(config)
+        return any(all(a >= b for a, b in zip(v, fv, strict=True)) for fv in feasible)
 
     def neighbors(config: Config) -> list[Config]:
         out: list[Config] = []
@@ -425,24 +507,130 @@ def run_search(
                 out.append(nb)
         return out
 
-    heap: list[tuple[float, int, Config]] = []
-    counter = itertools.count()
+    queue = _PriorityQueue()  # configs to key and build, by vec
     visited: set[tuple[int, ...]] = set()  # traversal dedup, over the config lattice
-    stats = {"evaluated": 0, "pruned": 0, "timed": 0}
+    # evaluated: builds started (the compute budget); compiled/graded: finished;
+    # cached: dedup hits, resolved by an earlier config's result; failed: configs
+    # whose program does not build (their own build or a known failing one);
+    # covered: skipped as known to pass (prune_above_feasible); pruned_built:
+    # builds thrown away because all their configs were pruned or covered after it.
+    stats = {
+        "evaluated": 0,
+        "compiled": 0,
+        "graded": 0,
+        "cached": 0,
+        "pruned": 0,
+        "pruned_built": 0,
+        "covered": 0,
+        "failed": 0,
+        "timed": 0,
+    }
+    # Every resolved config's outcome (pruned and failed builds count as
+    # infeasible, covered ones as feasible) and the chains waiting on a queued one.
+    outcome: dict[tuple[int, ...], bool] = {}
+    waiters: dict[tuple[int, ...], list[tuple[_Chain, frozenset[str]]]] = {}
+
+    def rank(config: Config) -> tuple[bool, float]:
+        """Queue order: chain configs first, then highest score."""
+        return (vec(config) not in waiters, -score(config))
+
+    def skip(config: Config) -> bool:
+        """Settle ``config`` without building it when its outcome is known: pruned
+        (fails like an infeasible config it lowers at least as far) or covered
+        (passes like a feasible config that lowers it at least as far). A covered
+        config is not expanded: everything above a feasible config is covered."""
+        if dominated(config):
+            stats["pruned"] += 1
+            resolve(config, False)
+            return True
+        if covered(config):
+            stats["covered"] += 1
+            resolve(config, True)
+            return True
+        return False
 
     def push(config: Config) -> None:
         v = vec(config)
         if v in visited:
             return
         visited.add(v)
-        if dominated(config):
-            stats["pruned"] += 1
+        if skip(config):
             return
-        heapq.heappush(heap, (-score(config), next(counter), config))
+        queue.put(v, rank(config), config)
 
     def expand(config: Config) -> None:
         for nb in neighbors(config):
             push(nb)
+
+    def resolve(config: Config, ok: bool) -> None:
+        """Record a config's outcome and hand it to the chains waiting on it."""
+        v = vec(config)
+        outcome[v] = ok
+        for chain, piece in waiters.pop(v, []):
+            chain_result(chain, config, piece, ok)
+
+    def chain_try(chain: _Chain, piece: Iterable[str]) -> None:
+        """Queue the chain's base with ``piece``'s open knobs at their target."""
+        add = {n: chain.open[n] for n in piece if n in chain.open}
+        if chain.done or not add:
+            return
+        config = {**chain.base, **add}
+        v = vec(config)
+        if v in outcome:
+            chain_result(chain, config, frozenset(add), outcome[v])
+            return
+        if any(c is chain for c, _ in waiters.get(v, [])):
+            return  # already waiting on it
+        waiters.setdefault(v, []).append((chain, frozenset(add)))
+        if v in visited:
+            promote(config)  # already queued or in flight: move it up
+        else:
+            push(config)
+
+    def waiting(chain: _Chain) -> bool:
+        """Whether ``chain`` waits on any config's result."""
+        return any(c is chain for ws in waiters.values() for c, _ in ws)
+
+    def chain_result(
+        chain: _Chain, config: Config, piece: frozenset[str], ok: bool
+    ) -> None:
+        """Advance ``chain`` by the outcome of ``config`` (base + ``piece``)."""
+        if chain.done:
+            return
+        # Only the knobs still open at the rung this config tried count.
+        tried = [n for n in piece if chain.open.get(n) == config[n]]
+        if ok:
+            # Adopt it unless it was built on an older, less lowered base.
+            if all(rung[n][config[n]] <= rung[n][chain.base[n]] for n in names):
+                chain.base = config
+                chain.open = {n: f for n, f in chain.open.items() if config[n] != f}
+            chain_try(chain, chain.open)
+        elif len(tried) < len(piece):
+            pass  # stale: some of its knobs changed since, so it tells nothing now
+        elif len(tried) > 1:
+            # Sensitive knobs land in the same half, so the other half can pass.
+            order = sorted(tried, key=lambda n: (screening.sensitivity.get(n, 0.0), n))
+            half = len(order) // 2
+            chain_try(chain, order[:half])
+            chain_try(chain, order[half:])
+        else:
+            (name,) = tried
+            failed = chain.open[name]
+            up = knob_of[name].domain[rung[name][failed] + 1]
+            if up == chain.base[name]:
+                del chain.open[name]
+                print(f"[chain {chain.label}] {name}={failed} fails, keeping {up}")
+            else:
+                chain.open[name] = up
+                print(f"[chain {chain.label}] {name}={failed} fails, trying {up}")
+            chain_try(chain, chain.open)
+        if not chain.open and not chain.done:
+            chain.done = True
+            print(
+                f"[chain {chain.label}] done: {_format_pins(pin_map(chain.base))}",
+                flush=True,
+            )
+            expand(chain.base)
 
     ctx = mp.get_context("spawn")
     # Measurement slots: one per device (each pinned + exclusive);
@@ -454,7 +642,7 @@ def run_search(
         if cfg.compile_workers is not None
         else max(1, (os.cpu_count() or 1) - n_slots)
     )
-    # Configs allowed between the heap and a measurement slot at once.
+    # Configs allowed between the queue and a measurement slot at once.
     lookahead = max(1, cfg.compile_ahead) * n_slots
 
     errors_cache: dict[
@@ -463,13 +651,30 @@ def run_search(
     perf_cache: dict[CanonicalKey, PerfResult] = {}
     failed_keys: set[CanonicalKey] = set()  # never recompile a config that failed
     failures: list[SearchFailure] = []
-    # Two-stage pipeline: configs compile on the compile pool, land in ``ready``,
-    # then go to a measurement slot as one frees.
+    # Pipeline: a config is keyed, then subscribes to the job of its program (one
+    # build and grading per canonical key). The job compiles on the compile pool,
+    # waits in ``ready`` for a measurement slot, and its result settles every
+    # subscriber. A job ranks as its best subscriber, so a chain waiting on any of
+    # them moves it up.
+    jobs: dict[CanonicalKey, _Job] = {}
+    job_of: dict[tuple[int, ...], _Job] = {}  # subscribed config -> its job
     key_futs: dict[cf.Future, Config] = {}
-    compile_futs: dict[cf.Future, tuple[Config, CanonicalKey]] = {}
-    # Compiled configs waiting for a slot, highest score first like ``heap``
-    ready: list[tuple[float, int, Config, CanonicalKey, str]] = []
-    grade_futs: dict[cf.Future, tuple[Config, CanonicalKey, str]] = {}
+    compile_futs: dict[cf.Future, _Job] = {}
+    ready = _PriorityQueue()  # built jobs, by key
+    grade_futs: dict[cf.Future, _Job] = {}
+
+    def job_rank(job: _Job) -> tuple[bool, float]:
+        return min(rank(c) for c in job.configs)
+
+    def promote(config: Config) -> None:
+        """Move an already visited config up after a chain started waiting on it."""
+        v = vec(config)
+        if v in queue:
+            queue.put(v, rank(config), config)
+        elif v in job_of and job_of[v].state == "ready":
+            job = job_of[v]
+            ready.put(job.key, job_rank(job), job)
+
     best: list[Config] = [root]
     best_ms: list[float | None] = [None]
     candidates: list[SearchCandidate] = []
@@ -477,7 +682,17 @@ def run_search(
     def key_of(config: Config) -> CanonicalKey:
         return canonical_typing(exp, pin_map(config))
 
-    def update_best(config: Config, perf: PerfResult) -> None:
+    def progress(outcome: str) -> str:
+        """A result line's head"""
+        return (
+            f"[{outcome:<10} | feasible {len(candidates)}, "
+            f"infeasible {len(infeasible)}, compiled {stats['compiled']}, "
+            f"graded {stats['graded']}, cached {stats['cached']}, "
+            f"pruned {stats['pruned']}, covered {stats['covered']} "
+            f"({stats['pruned_built']} skipped after build), failed {stats['failed']}]"
+        )
+
+    def update_best(config: Config, perf: PerfResult, cached: bool) -> None:
         ms = _objective_ms(perf, cfg.objective)
         pins = pin_map(config)
         speedup = (root_ms / ms) if root_ms and ms else 0.0
@@ -485,10 +700,10 @@ def run_search(
         improved = best_ms[0] is None or ms < best_ms[0]
         if improved:
             best_ms[0], best[0] = ms, config
+        mark = "<- new best" if improved else "(cached)" if cached else ""
         print(
-            f"[feasible {len(candidates)}/{stats['evaluated']}] {ms:>10.4g} ms "
-            f"{speedup:>5.2f}x{'  <- new best' if improved else '':<13}  "
-            f"{_format_pins(pins)}",
+            f"{progress('feasible')} {ms:>10.4g} ms "
+            f"{speedup:>5.2f}x  {mark:<11}  {_format_pins(pins)}",
             flush=True,
         )
 
@@ -497,18 +712,26 @@ def run_search(
         key: CanonicalKey,
         errors: dict[str, ErrorStats],
         perf: PerfResult | None,
+        cached: bool = False,
     ) -> None:
         """Fold one config's result in. ``perf`` is this config's own timing, or
         ``None`` when it was over the numeric budget or this is a dedup hit (its
-        timing, if any, already sits in ``perf_cache``)."""
-        if _feasible(errors, limits, cfg.budget):
+        timing, if any, already sits in ``perf_cache``). ``cached``: a dedup hit,
+        never built itself."""
+        ok = _feasible(errors, limits, cfg.budget)
+        if ok:
+            if cfg.prune_above_feasible:
+                feasible.append(vec(config))
             if key in perf_cache:
-                update_best(config, perf_cache[key])  # dedup: reuse the timing
+                # dedup: reuse the timing
+                update_best(config, perf_cache[key], cached)
             elif perf is not None:
                 perf_cache[key] = perf
                 stats["timed"] += 1
-                update_best(config, perf)
-            expand(config)
+                update_best(config, perf, cached)
+            # A chain's configs do not expand; its final base does when it ends.
+            if vec(config) not in waiters:
+                expand(config)
         else:
             infeasible.append(vec(config))
             over = [c for c in check(errors, limits) if not c.ok]
@@ -524,10 +747,12 @@ def run_search(
                 else "predicate failed"
             )
             print(
-                f"[infeasible {len(infeasible)}/{stats['evaluated']}] {detail}  "
+                f"{progress('infeasible')} "
+                f"{'(cached) ' if cached else ''}{detail}  "
                 f"{_format_pins(pin_map(config))}",
                 flush=True,
             )
+        resolve(config, ok)
 
     # Each measurement worker pops one (device, cores) pair from the queue at
     # init and pins to both; the compile pool runs on the remaining cores.
@@ -569,9 +794,11 @@ def run_search(
         root_key = key_of(root)
         stats["evaluated"] += 1
         root_folder = compile_pool.submit(_compile_task, pin_map(root)).result()
+        stats["compiled"] += 1
         root_errors, root_perf = grade_pool.submit(
             _grade_task, root_folder, pin_map(root)
         ).result()
+        stats["graded"] += 1
         discard(root_folder)
         errors_cache[root_key] = root_errors
         if not _feasible(root_errors, limits, cfg.budget):
@@ -597,63 +824,90 @@ def run_search(
         perf_cache[root_key] = root_perf
         stats["timed"] += 1
         root_ms = _objective_ms(root_perf, cfg.objective)
-        update_best(root, root_perf)
+        update_best(root, root_perf, cached=False)
+        outcome[vec(root)] = True
+        if cfg.prune_above_feasible:
+            feasible.append(vec(root))
 
-        # Seeds: per-input safe candidates and the combined candidate, then neighbours.
+        # Seeds: per-input safe candidates, a chain per wide seed, then neighbours.
         for name, fmt in screening.safe_format.items():
             if name in root:
                 cand = dict(root)
                 cand[name] = fmt
                 push(cand)
-        if screening.safe_format:
-            combined = dict(root)
-            for name, fmt in screening.safe_format.items():
-                if name in combined:
-                    combined[name] = fmt
-            push(combined)
+        goals = {"safe": {n: f for n, f in screening.safe_format.items() if n in root}}
         for fmt in ("fp32", "fp16"):
-            push({n: fmt if fmt in rung[n] else highest[n] for n in names})
+            goals[fmt] = {n: fmt for n in names if fmt in rung[n] and fmt != highest[n]}
+        chains = [_Chain(label, base=root, open=goal) for label, goal in goals.items()]
+        for chain in chains:
+            chain_try(chain, chain.open)
         expand(root)
 
-        def submit_compile(config: Config, key: CanonicalKey) -> None:
-            """Resolve a keyed config: dedup hit, known build failure, or compile."""
-            if dominated(config):
-                stats["pruned"] += 1
+        def subscribe(config: Config, key: CanonicalKey) -> None:
+            """Settle a keyed config: skipped, dedup hit, known build failure, or
+            subscribed to its program's job (started if none is in flight)."""
+            if skip(config):
                 return
             if key in errors_cache:
-                integrate(config, key, errors_cache[key], None)
+                stats["cached"] += 1
+                integrate(config, key, errors_cache[key], None, cached=True)
                 return
             if key in failed_keys:  # same program, same build failure
+                stats["failed"] += 1
+                resolve(config, False)
                 return
-            stats["evaluated"] += 1
-            compile_futs[compile_pool.submit(_compile_task, pin_map(config))] = (
-                config,
-                key,
-            )
+            job = jobs.get(key)
+            if job is None:
+                job = jobs[key] = _Job(key)
+                stats["evaluated"] += 1
+                compile_futs[compile_pool.submit(_compile_task, pin_map(config))] = job
+            job.configs.append(config)
+            job_of[vec(config)] = job
+            if job.state == "ready":  # the new subscriber may rank it higher
+                ready.put(key, job_rank(job), job)
+
+        def finish(job: _Job) -> None:
+            """Retire ``job``: nothing waits on it any more."""
+            del jobs[job.key]
+            for v in [v for v, j in job_of.items() if j is job]:
+                del job_of[v]
 
         budget_hit = False
-        while (
-            (heap and not budget_hit) or key_futs or compile_futs or ready or grade_futs
-        ):
-            # Hand compiled candidates to free measurement slots first, re-checking
-            # domination: results that landed while a config was building may
-            # have pruned it, sparing its measurement.
+        while True:
+            # A chain whose last results all came back stale waits on nothing:
+            # it goes on from its current state.
+            for chain in chains:
+                if not chain.done and not waiting(chain):
+                    chain_try(chain, chain.open)
+            if not (
+                (queue and not budget_hit)
+                or key_futs
+                or compile_futs
+                or ready
+                or grade_futs
+            ):
+                break
+            # Hand built jobs to free measurement slots first, re-checking their
+            # configs: results that landed while it was building may have pruned
+            # or covered them, sparing its measurement.
             while ready and len(grade_futs) < n_slots:
-                _, _, config, key, folder = heapq.heappop(ready)
-                if dominated(config):
-                    stats["pruned"] += 1
-                    discard(folder)
+                job = ready.pop()
+                job.configs = [c for c in job.configs if not skip(c)]
+                if not job.configs:  # all pruned or covered while it was built
+                    finish(job)
+                    stats["pruned_built"] += 1
+                    discard(job.build_folder)
                     continue
-                grade_futs[grade_pool.submit(_grade_task, folder, pin_map(config))] = (
-                    config,
-                    key,
-                    folder,
+                job.state = "grading"
+                graded = pin_map(job.configs[0])
+                grade_futs[grade_pool.submit(_grade_task, job.build_folder, graded)] = (
+                    job
                 )
 
-            # Feed the compile pool from the heap; each config is keyed first.
+            # Feed the compile pool from the queue; each config is keyed first.
             # Stop when the compile pool is full, the lookahead is reached, or the budget is hit.
             while (
-                heap
+                queue
                 and not budget_hit
                 and len(key_futs) + len(compile_futs) < n_compilers
                 and len(key_futs) + len(compile_futs) + len(ready) < lookahead
@@ -666,49 +920,66 @@ def run_search(
                     # budget (or turn out a dedup hit); wait for those first.
                     if stats["evaluated"] + len(key_futs) >= cfg.compute_budget:
                         break
-                _, _, config = heapq.heappop(heap)
-                if dominated(config):
-                    stats["pruned"] += 1
+                config = queue.pop()
+                if skip(config):
                     continue
                 key_futs[compile_pool.submit(_key_task, pin_map(config))] = config
 
             if not key_futs and not compile_futs and not grade_futs:
-                break
+                continue  # nothing in flight: back to the top, which may end the search
             done, _ = cf.wait(
                 list(key_futs) + list(compile_futs) + list(grade_futs),
                 return_when=cf.FIRST_COMPLETED,
             )
             for fut in done:
                 if fut in key_futs:
-                    submit_compile(key_futs.pop(fut), fut.result())
+                    subscribe(key_futs.pop(fut), fut.result())
                     continue
                 if fut in compile_futs:
-                    config, key = compile_futs.pop(fut)
+                    job = compile_futs.pop(fut)
                     try:
-                        folder = fut.result()
-                        entry = (-score(config), next(counter), config, key, folder)
-                        heapq.heappush(ready, entry)
+                        job.build_folder = fut.result()
                     except _CONFIG_FAILURES as exc:
                         # Never became a program: neither feasible nor infeasible.
                         text = _failure_text(exc)
-                        failed_keys.add(key)
-                        failures.append(SearchFailure(pin_map(config), text))
+                        failed_keys.add(job.key)
+                        built = pin_map(job.configs[0])
+                        failures.append(SearchFailure(built, text))
                         warnings.warn(
-                            f"Skipping config {pin_map(config)}: it failed to "
-                            f"build.\n{text}",
+                            f"Skipping config {built}: it failed to build.\n{text}",
                             stacklevel=2,
                         )
+                        finish(job)
+                        for config in job.configs:
+                            stats["failed"] += 1
+                            resolve(config, False)
+                        continue
+                    stats["compiled"] += 1
+                    job.state = "ready"
+                    ready.put(job.key, job_rank(job), job)
                     continue
-                config, key, folder = grade_futs.pop(fut)
+                job = grade_futs.pop(fut)
                 errors, perf = fut.result()
-                discard(folder)
-                errors_cache[key] = errors
-                integrate(config, key, errors, perf)
+                stats["graded"] += 1
+                discard(job.build_folder)
+                errors_cache[job.key] = errors
+                finish(job)
+                first, *rest = job.configs
+                integrate(first, job.key, errors, perf)
+                for config in rest:  # same program: a dedup hit on its result
+                    subscribe(config, job.key)
+        if queue:
+            print(
+                f"[budget] compute budget reached: {len(queue)} queued configs "
+                "left unexplored",
+                flush=True,
+            )
     finally:
         compile_pool.shutdown(wait=True)
         grade_pool.shutdown(wait=True)
-        for *_, folder in [*ready, *grade_futs.values()]:
-            discard(folder)
+        for job in jobs.values():
+            if job.build_folder is not None:
+                discard(job.build_folder)
         cleaner.shutdown(wait=True)
 
     result = SearchResult(
