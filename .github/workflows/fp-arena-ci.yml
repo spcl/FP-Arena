@@ -29,7 +29,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: spcl/dace
-        ref: extended
+        ref: 21f1ed0009098827eca7a8c1bc894ee03df81f8a
         submodules: recursive
         path: dace
 

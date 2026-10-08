@@ -1,0 +1,437 @@
+# Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
+"""Tests for the selection search (knobs, canonical typing, run_search)."""
+
+import concurrent.futures as cf
+import os
+
+import dace
+import pytest
+from dace.codegen.exceptions import CompilationError
+
+import fp_arena  # noqa: F401
+from fp_arena.experiment import (
+    CONSTANTS_KEY,
+    ErrorBudget,
+    ExperimentConfig,
+    KnobSelection,
+    ResultStore,
+    SelectionSearchConfig,
+    find_knobs,
+    run_search,
+    search,
+)
+from fp_arena.experiment.knobs import canonical_typing
+from fp_arena.experiment.search import format_search
+
+N = dace.symbol("N")
+
+
+@dace.program
+def _axpy(a: dace.float64[N], b: dace.float64[N], c: dace.float64[N]):
+    for i in dace.map[0:N]:
+        c[i] = a[i] * b[i] + c[i]
+
+
+@dace.program
+def _scaled(a: dace.float64[N], c: dace.float64[N]):
+    for i in dace.map[0:N]:
+        c[i] = a[i] * 2.5
+
+
+@dace.program
+def _pingpong(a: dace.float64[N], b: dace.float64[N]):
+    for t in range(2):
+        b[1:-1] = 0.5 * (a[2:] + a[:-2])
+        a[1:-1] = 0.5 * (b[2:] + b[:-2])
+
+
+_AXPY = _axpy.to_sdfg(simplify=True)
+_SCALED = _scaled.to_sdfg(simplify=True)
+_PINGPONG = _pingpong.to_sdfg(simplify=True)
+
+
+def _experiment(sdfg, name="prog", n=64, **inputs):
+    return ExperimentConfig(name=name, program=sdfg, symbols={"N": n}, inputs=inputs)
+
+
+@pytest.fixture(autouse=True)
+def _small_compile_pool(monkeypatch):
+    """Keep real-process tests from spawning one compile worker per CPU core."""
+    monkeypatch.setattr(search.os, "cpu_count", lambda: 2)
+
+
+# --------------------------------------------------------------------------- knobs
+
+
+def test_find_knobs_classifies_inputs_as_sources():
+    knobs = {k.name: k for k in find_knobs(_AXPY)}
+    # a, b, c are all read inputs (c is read-and-written): sources.
+    for name in ("a", "b", "c"):
+        assert knobs[name].kind == "source"
+        assert knobs[name].original == "fp64"
+        assert knobs[name].domain == ("fp16", "fp32", "fp64")
+    # No float literals -> no constants knob.
+    assert CONSTANTS_KEY not in knobs
+
+
+def test_find_knobs_detects_constants():
+    names = {k.name: k for k in find_knobs(_SCALED)}
+    assert CONSTANTS_KEY in names
+    assert names[CONSTANTS_KEY].kind == "constants"
+
+
+def _literal_symbol_sdfg(declare: bool) -> dace.SDFG:
+    """``b = a * x`` with ``x = 0.1`` assigned on an interstate edge; no tasklet literal."""
+    sdfg = dace.SDFG("literal_symbol")
+    sdfg.add_array("a", [N], dace.float64)
+    sdfg.add_array("b", [N], dace.float64)
+    if declare:
+        sdfg.add_symbol("x", dace.float64)
+    s0 = sdfg.add_state(is_start_block=True)
+    s1 = sdfg.add_state()
+    sdfg.add_edge(s0, s1, dace.InterstateEdge(assignments={"x": "0.1"}))
+    s1.add_mapped_tasklet(
+        "t",
+        {"i": "0:N"},
+        {"__a": dace.Memlet("a[i]")},
+        "__b = __a * x",
+        {"__b": dace.Memlet("b[i]")},
+        external_edges=True,
+    )
+    return sdfg
+
+
+@pytest.mark.parametrize("declare", [True, False], ids=["declared", "undeclared"])
+def test_find_knobs_detects_literal_symbols(declare):
+    """The constants knob also lowers float symbols defined from literals, so they
+    alone make it a knob."""
+    assert CONSTANTS_KEY in {k.name for k in find_knobs(_literal_symbol_sdfg(declare))}
+
+
+def test_knob_selection_toggles_and_overrides():
+    default = {k.name for k in find_knobs(_SCALED, KnobSelection())}
+    assert CONSTANTS_KEY not in default  # constants off by default
+    with_consts = {k.name for k in find_knobs(_SCALED, KnobSelection(constants=True))}
+    assert CONSTANTS_KEY in with_consts
+    excluded = {
+        k.name for k in find_knobs(_SCALED, KnobSelection(exclude=frozenset({"a"})))
+    }
+    assert "a" not in excluded
+
+
+@dace.program
+def _scalar_scaled(a: dace.float64[N], c: dace.float64[N], s: dace.float64):
+    for i in dace.map[0:N]:
+        c[i] = a[i] * s
+
+
+_SCALAR_SCALED = _scalar_scaled.to_sdfg(simplify=True)
+
+
+def test_constants_knob_covers_scalar_inputs():
+    """A read-only float scalar input is a constant: the constants knob exists
+    without any float literal, and the scalar is no knob of its own."""
+    knobs = {k.name for k in find_knobs(_SCALAR_SCALED)}
+    assert CONSTANTS_KEY in knobs
+    assert "s" not in knobs
+
+
+def test_scalar_input_is_a_knob_without_the_constants_knob():
+    knobs = {k.name for k in find_knobs(_SCALAR_SCALED, KnobSelection())}
+    assert CONSTANTS_KEY not in knobs
+    assert "s" in knobs
+
+
+def test_canonical_typing_tells_scalar_pins_apart():
+    """Lowering a scalar knob is a different program, so a different key."""
+    exp = _experiment(_SCALAR_SCALED)
+    root = canonical_typing(exp, {})
+    assert canonical_typing(exp, {"s": "fp32"}) != root
+    assert canonical_typing(exp, {"s": "fp16"}) != canonical_typing(exp, {"s": "fp32"})
+
+
+def test_domain_capped_at_original():
+    @dace.program
+    def half(a: dace.float32[N], c: dace.float32[N]):
+        for i in dace.map[0:N]:
+            c[i] = a[i]
+
+    knobs = {k.name: k for k in find_knobs(half.to_sdfg(simplify=True))}
+    assert knobs["a"].domain == ("fp16", "fp32")  # no fp64 rung above fp32
+
+
+# ------------------------------------------------------------------- canonical key
+
+
+def test_canonical_typing_dedups_redundant_pins():
+    exp = _experiment(_AXPY)
+    root = canonical_typing(exp, {})
+    # Pinning to the type propagation already gives is redundant -> same key.
+    assert canonical_typing(exp, {"a": "fp64"}) == root
+    # A genuine lowering is a different key.
+    assert canonical_typing(exp, {"a": "fp16"}) != root
+    # Constants are part of the key.
+    assert canonical_typing(exp, {CONSTANTS_KEY: "fp32"}) != root
+
+
+def test_unpinned_in_place_input_follows_a_lowered_one():
+    """In an in-place stencil, a's interior is computed from b: left unpinned, a
+    follows b down to fp32. Only a pin keeps it at fp64, which is why the
+    search pins every knob, also those at their highest rung."""
+    exp = _experiment(_PINGPONG)
+    both = canonical_typing(exp, {"a": "fp32", "b": "fp32"})
+    assert canonical_typing(exp, {"b": "fp32"}) == both
+    assert canonical_typing(exp, {"a": "fp64", "b": "fp32"}) != both
+    # Every knob pinned at its highest rung is still the unmodified program.
+    assert canonical_typing(exp, {"a": "fp64", "b": "fp64"}) == canonical_typing(exp, {})
+
+
+# --------------------------------------------------------------------- run_search
+
+
+def test_search_tight_budget_keeps_root():
+    """A budget only fp64 can meet -> the search returns the all-highest root."""
+    exp = _experiment(_AXPY)
+    # rel_max well below fp32's rounding but above fp64-vs-fp64 (which is exact).
+    budget = ErrorBudget(limits={"rel_max": 1e-10})
+    result = run_search(
+        SelectionSearchConfig(
+            experiment=exp,
+            budget=budget,
+            reference="fp64",
+            n_samples=2,
+            n_warmup=1,
+            n_reps=3,
+            objective="total",
+        )
+    )
+    assert not result.unsatisfiable
+    # Nothing lowered: every knob at its highest rung.
+    highest = {k.name: k.highest for k in result.knobs}
+    assert result.best == highest
+
+
+def test_search_reports_unsatisfiable_when_root_fails():
+    """A predicate no config can satisfy -> even the root fails -> unsatisfiable."""
+    exp = _experiment(_AXPY)
+    budget = ErrorBudget(limits={"rel_max": 1.0}, predicate=lambda errs: False)
+    result = run_search(
+        SelectionSearchConfig(
+            experiment=exp,
+            budget=budget,
+            reference="fp64",
+            n_samples=1,
+            n_warmup=1,
+            n_reps=2,
+        )
+    )
+    assert result.unsatisfiable
+    assert result.best is None
+
+
+def test_search_worker_count_does_not_change_result():
+    """The result is independent of measure_workers (1 pool worker vs several)."""
+    exp = _experiment(_AXPY)
+    budget = ErrorBudget(limits={"rel_max": 1e-10})  # only fp64 passes
+    kw = {
+        "experiment": exp,
+        "budget": budget,
+        "reference": "fp64",
+        "n_samples": 1,
+        "n_warmup": 1,
+        "n_reps": 2,
+        "objective": "total",
+    }
+    one = run_search(SelectionSearchConfig(measure_workers=1, **kw))
+    many = run_search(SelectionSearchConfig(measure_workers=4, **kw))
+    # One config between the heap and the slot at a time: fully sequential.
+    serial = run_search(SelectionSearchConfig(compile_ahead=1, **kw))
+    assert not many.unsatisfiable
+    assert many.best == one.best == serial.best  # nothing lowered, all three
+    assert many.n_pruned == one.n_pruned
+
+
+def test_search_records_candidates_and_persists(tmp_path):
+    """Feasible configs are recorded (root included) and the result is stored."""
+    exp = _experiment(_AXPY)
+    budget = ErrorBudget(limits={"rel_max": 1e-10})  # only the root passes
+    store = ResultStore(str(tmp_path / "r.db"))
+    try:
+        result = run_search(
+            SelectionSearchConfig(
+                experiment=exp,
+                budget=budget,
+                reference="fp64",
+                n_samples=1,
+                n_warmup=1,
+                n_reps=2,
+            ),
+            store=store,
+        )
+        # root is feasible -> at least one candidate, the root (nothing lowered, 1x).
+        assert result.candidates
+        assert result.candidates[0].precision == {}
+        assert result.candidates[0].speedup == 1.0
+        rows = store.query(kind="search")
+        assert len(rows) == 1
+        assert rows[0].payload["objective"] == "total"
+        assert len(rows[0].payload["candidates"]) == len(result.candidates)
+    finally:
+        store.close()
+
+
+class _InlinePool:
+    """A drop-in ``ProcessPoolExecutor`` that runs every task in this process."""
+
+    def __init__(self, max_workers, mp_context=None, initializer=None, initargs=()):
+        if initializer is not None:
+            initializer(*initargs)
+
+    def submit(self, fn, *args, **kwargs):
+        fut = cf.Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001
+            fut.set_exception(exc)
+        return fut
+
+    def shutdown(self, wait=True):
+        pass
+
+
+def test_search_skips_configs_that_fail_to_build(monkeypatch):
+    """A config DaCe cannot compile is recorded and skipped, not fatal."""
+    log = 'Compiler failure:\nerror: no instance of function template "ITE"'
+    original = search._compile_task
+
+    def _compile(pin_map):
+        if pin_map.get("a") == "fp32":
+            raise CompilationError(log)
+        return original(pin_map)
+
+    monkeypatch.setattr(search, "_compile_task", _compile)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+
+    result = run_search(
+        SelectionSearchConfig(
+            experiment=_experiment(_AXPY),
+            budget=ErrorBudget(limits={"rel_max": 1e-10}),  # only the root passes
+            reference="fp64",
+            n_samples=1,
+            n_warmup=1,
+            n_reps=2,
+        )
+    )
+
+    # The search survived and still returned the root as the best config.
+    highest = {k.name: k.highest for k in result.knobs}
+    assert result.best == highest
+    # Both failing configs are recorded (the all-fp32 seed, then the a=fp32
+    # neighbour), with the whole compiler log kept verbatim.
+    assert [f.precision for f in result.failures] == [
+        {"a": "fp32", "b": "fp32", "c": "fp32"},
+        {"a": "fp32"},
+    ]
+    assert all(f.error == f"CompilationError: {log}" for f in result.failures)
+    printed = format_search(result)  # indented, but every line is there
+    assert all(line in printed for line in log.splitlines())
+    assert "failed=2" in printed
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_search_deletes_graded_build_folders(monkeypatch, tmp_path, keep):
+    """Every graded candidate's build folder is deleted unless keep_builds is set."""
+    built: list[str] = []
+    original = search._compile_task
+
+    def _compile(pin_map):
+        built.append(original(pin_map))
+        return built[-1]
+
+    monkeypatch.setattr(search, "_compile_task", _compile)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+
+    with dace.config.set_temporary("default_build_folder", value=str(tmp_path)):
+        run_search(
+            SelectionSearchConfig(
+                experiment=_experiment(_AXPY),
+                budget=ErrorBudget(
+                    limits={"rel_max": 1e-3}
+                ),  # fp32 passes: several builds
+                reference="fp64",
+                n_samples=1,
+                n_warmup=1,
+                n_reps=2,
+                keep_builds=keep,
+            )
+        )
+
+    assert len(built) > 1
+    assert all(f.startswith(str(tmp_path)) for f in built)
+    assert [os.path.isdir(f) for f in built] == [keep] * len(built)
+
+
+def test_search_build_failure_of_the_root_is_fatal(monkeypatch):
+    """Without the root there is no baseline, so its build failure propagates."""
+
+    def _compile(pin_map):
+        raise CompilationError("boom")
+
+    monkeypatch.setattr(search, "_compile_task", _compile)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+
+    with pytest.raises(CompilationError, match="boom"):
+        run_search(
+            SelectionSearchConfig(
+                experiment=_experiment(_AXPY),
+                budget=ErrorBudget(limits={"rel_max": 1e-10}),
+                n_samples=1,
+                n_warmup=1,
+                n_reps=2,
+            )
+        )
+
+
+def test_search_no_knobs_raises():
+    exp = _experiment(_AXPY)
+    with pytest.raises(ValueError, match="No knobs in scope"):
+        run_search(
+            SelectionSearchConfig(
+                experiment=exp,
+                budget=ErrorBudget(limits={"rel_max": 1.0}),
+                knobs=KnobSelection(sources=False, constants=False, overrides=False),
+            )
+        )
+
+
+
+def test_search_pins_every_knob(monkeypatch):
+    """Every config is built with all knobs pinned, so lowering b alone is its
+    own program, not a dedup hit on lowering a and b."""
+    built: list[dict] = []
+    original = search._compile_task
+
+    def _compile(pin_map):
+        built.append(dict(pin_map))
+        return original(pin_map)
+
+    monkeypatch.setattr(search, "_compile_task", _compile)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+    result = run_search(
+        SelectionSearchConfig(
+            experiment=_experiment(_PINGPONG),
+            budget=ErrorBudget(limits={"rel_max": 1.0}),  # everything passes
+            n_samples=1,
+            n_warmup=1,
+            n_reps=2,
+            exhaustive=True,
+        )
+    )
+
+    names = {k.name for k in result.knobs}
+    assert built and all(set(pins) == names for pins in built)
+    by_pins = {tuple(sorted(e.precision.items())): e for e in result.evaluations}
+    alone = by_pins[(("b", "fp32"),)]
+    both = by_pins[(("a", "fp32"), ("b", "fp32"))]
+    assert not alone.cached and not both.cached
+    assert alone.errors["a"] != both.errors["a"]
