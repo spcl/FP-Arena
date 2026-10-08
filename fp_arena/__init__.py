@@ -34,7 +34,6 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
     DEFAULT_PROMOTION_RULES,
     change_and_propagate_fp_types,
 )
-from fp_arena.transformations.change_fp_types import change_fptype
 
 # Register the types and the SDFG convenience method on import (idempotent).
 register()
@@ -60,7 +59,6 @@ __all__ = [
     "Float64sr",
     "attach_environments",
     "change_and_propagate_fp_types",
-    "change_fptype",
     "disable_auto_extensions",
     "disable_fast_math",
     "enable_auto_extensions",
