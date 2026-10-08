@@ -33,6 +33,12 @@ from fp_arena.experiment import (
 I, J, K = 1024, 1024, 256
 
 
+INPUTS = {
+    "in_field": stats.norm(7.0, 1.0),
+    "coeff": stats.uniform(0.02, 0.01),
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="hdiff precision selection search")
     parser.add_argument(
@@ -71,10 +77,7 @@ def main() -> None:
         name=f"hdiff_{tag}",
         program=sdfg,
         symbols={"I": I, "J": J, "K": K},
-        inputs={
-            "in_field": stats.uniform(0, 1),
-            "coeff": stats.uniform(0, 1),
-        },
+        inputs=INPUTS,
         target="gpu",
         gpu_vectorize=True,
         gpu_block_size=(256, 1, 1),

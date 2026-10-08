@@ -12,12 +12,13 @@ Results go to ``heat3d_search_<knobs>.db`` under experiment name ``heat3d_<knobs
 """
 
 import argparse
+import zlib
 
 import dace as dc
+import numpy as np
 from dace.transformation.auto import auto_optimize as aopt
 from dace.transformation.dataflow import MapFusion, PruneConnectors
 from dace.transformation.interstate import LoopToMap
-from scipy import stats
 
 from corpus.heat3d import heat3d_kernel
 from fp_arena.experiment import (
@@ -31,6 +32,22 @@ from fp_arena.experiment import (
 
 GRID_N = 512
 TSTEPS = 20
+
+
+def _shared(rng: np.random.Generator, name: str) -> np.random.Generator:
+    """
+    A generator for values that several inputs of one sample share.
+    """
+    seed = rng.bit_generator.seed_seq
+    key = (*seed.spawn_key, zlib.crc32(name.encode()))
+    return np.random.default_rng(np.random.SeedSequence(seed.entropy, spawn_key=key))
+
+
+def _field(shape, rng):
+    return _shared(rng, "heat3d").normal(50.0, 10.0, shape)
+
+
+INPUTS = {"A": _field, "B": _field}
 
 
 def main() -> None:
@@ -72,10 +89,7 @@ def main() -> None:
         program=sdfg,
         symbols={"N": GRID_N},
         scalar_args={"TSTEPS": TSTEPS},
-        inputs={
-            "A": stats.uniform(0, 100),
-            "B": stats.uniform(0, 100),
-        },
+        inputs=INPUTS,
         target="gpu",
         gpu_vectorize=True,
         gpu_block_size=(256, 1, 1),

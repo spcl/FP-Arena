@@ -13,14 +13,16 @@ Results go to ``vadv_search_<knobs>.db`` under experiment name ``vadv_<knobs>``.
 """
 
 import argparse
+import zlib
 
 import dace as dc
+import numpy as np
 from dace.transformation.auto import auto_optimize as aopt
 from dace.transformation.dataflow import MapFusion, PruneConnectors
 from dace.transformation.interstate import LoopToMap
 from scipy import stats
 
-from corpus.vdav import vadv
+from corpus.vdav import dtr_stage, vadv
 from fp_arena.experiment import (
     ErrorBudget,
     ExperimentConfig,
@@ -31,6 +33,29 @@ from fp_arena.experiment import (
 )
 
 I, J, K = 128, 128, 64
+
+
+def _shared(rng: np.random.Generator, name: str) -> np.random.Generator:
+    """
+    A generator for values that several inputs of one sample share.
+    """
+    seed = rng.bit_generator.seed_seq
+    key = (*seed.spawn_key, zlib.crc32(name.encode()))
+    return np.random.default_rng(np.random.SeedSequence(seed.entropy, spawn_key=key))
+
+
+def _wind(shape, rng):
+    profile = np.linspace(20.0, 5.0, shape[2])
+    return profile + _shared(rng, "vadv wind").normal(0.0, 1.0, shape)
+
+
+INPUTS = {
+    "u_pos": _wind,
+    "u_stage": _wind,
+    "wcon": stats.norm(0.0, 0.05 * dtr_stage),
+    "utens": stats.norm(0.0, 1e-4),
+    "utens_stage": stats.norm(0.0, 1e-4),
+}
 
 
 def main() -> None:
@@ -71,13 +96,7 @@ def main() -> None:
         name=f"vadv_{tag}",
         program=sdfg,
         symbols={"I": I, "J": J, "K": K},
-        inputs={
-            "utens_stage": stats.uniform(0, 1),
-            "u_stage": stats.uniform(0, 1),
-            "wcon": stats.uniform(0, 1),
-            "u_pos": stats.uniform(0, 1),
-            "utens": stats.uniform(0, 1),
-        },
+        inputs=INPUTS,
         target="gpu",
         gpu_vectorize=True,
         gpu_block_size=(256, 1, 1),
