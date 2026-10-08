@@ -11,6 +11,7 @@ from collections.abc import Callable
 import dace
 from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
 from dace.transformation.passes.vectorization.config import VectorizeConfig
+from dace.transformation.passes.vectorization.enums import RemainderStrategy
 from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
 from fp_arena.experiment import registry
@@ -130,7 +131,7 @@ def _transfer_direction(sdfg: dace.SDFG, state) -> str | None:
 
 #: The vectorization config used when ``gpu_vectorize`` is on but no config is given.
 DEFAULT_GPU_VECTORIZE_CONFIG = VectorizeConfig(
-    widths=(2,), remainder_strategy="branched_tail"
+    widths=(2,), remainder_strategy=RemainderStrategy.BRANCHED_TAIL
 )
 
 
@@ -182,7 +183,7 @@ def apply_target(
             gpu_offload(sdfg)
         else:
             sdfg.apply_gpu_transformations(simplify=False)
-            for state in sdfg.all_states():
+            for state in sdfg.states():
                 if _transfer_direction(sdfg, state) is not None:
                     _add_fusion_barrier(state)
             sdfg.simplify()

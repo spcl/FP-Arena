@@ -48,7 +48,7 @@ def _homogeneous_category(sdfg: dace.SDFG, block) -> str | None:
     """The block's one phase, or ``None`` if it's a region spanning several."""
     if isinstance(block, dace.SDFGState):
         return _classify_state(sdfg, block)
-    cats = {_classify_state(sdfg, s) for s in block.all_states()}
+    cats = {_classify_state(sdfg, s) for s in block.states()}
     return next(iter(cats)) if len(cats) == 1 else None
 
 
@@ -129,7 +129,7 @@ def insert_timers(sdfg: dace.SDFG, target: str) -> list[str]:
 def timer_categories(sdfg: dace.SDFG) -> list[str]:
     """Recover the slot -> phase list from a timed ``sdfg``'s stop-state labels."""
     by_slot: dict[int, str] = {}
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         match = _STOP_RE.match(state.label)
         if match:
             by_slot[int(match.group(1))] = match.group(2)

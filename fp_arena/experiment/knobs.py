@@ -93,7 +93,7 @@ def _has_constants(sdfg: dace.SDFG, sdfgs: list[dace.SDFG]) -> bool:
         or any(
             _is_constant_fill(state, node)
             for sd in sdfgs
-            for state in sd.all_states()
+            for state in sd.states()
             for node in state.nodes()
         )
     )

@@ -142,7 +142,7 @@ def _unify_nested_boundaries(sdfgs: list[dace.SDFG]) -> _UnionFind:
     uf = _UnionFind()
     for sd in sdfgs:
         sid = id(sd)
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if not isinstance(node, nodes.NestedSDFG):
                     continue
@@ -160,7 +160,7 @@ def _unify_nested_boundaries(sdfgs: list[dace.SDFG]) -> _UnionFind:
 def _unify_views(sdfgs: list[dace.SDFG], uf: _UnionFind) -> None:
     for sd in sdfgs:
         sid = id(sd)
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.data_nodes():
                 if not isinstance(sd.arrays[node.data], dace.data.View):
                     continue
@@ -572,7 +572,7 @@ def _homogenize_tasklet_dtypes(
 # AccessNode -> AccessNode copies get an elementwise cast map over the
 # copied subset.
 def _insert_edge_casts(sdfg: dace.SDFG) -> None:
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for i, e in enumerate(list(state.edges())):
             if e.data is None or e.data.data is None:
                 continue
@@ -858,7 +858,7 @@ class _FloatConstantCaster(ast.NodeTransformer):
 def _cast_float_constants(sdfgs: list[dace.SDFG], dtype: dace.dtypes.typeclass) -> None:
     caster = _FloatConstantCaster(dtype.to_string())
     for sd in sdfgs:
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if not (
                     isinstance(node, nodes.Tasklet)
@@ -896,7 +896,7 @@ class _HalfTernaryCaster(ast.NodeTransformer):
 
 
 def _cast_mixed_half_ternaries(sdfg: dace.SDFG) -> None:
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for node in state.nodes():
             if not (
                 isinstance(node, nodes.Tasklet)
@@ -953,7 +953,7 @@ def _has_control_flow_constants(sdfgs: list[dace.SDFG]) -> bool:
                 stype = sd.symbols.get(name) or inferred.get(name)
                 if _is_fp(stype) and _defines_literal(expr):
                     return True
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if isinstance(node, nodes.NestedSDFG) and any(
                     _is_fp(node.sdfg.symbols.get(name)) and _defines_literal(str(outer))
@@ -990,7 +990,7 @@ def _widens_double(
 def _tasklets_with_literals(sdfgs: list[dace.SDFG]) -> set[int]:
     found: set[int] = set()
     for sd in sdfgs:
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if not (
                     isinstance(node, nodes.Tasklet)
@@ -1111,7 +1111,7 @@ def _add_constant_sources(
 ) -> None:
     for sd in sdfgs:
         sid = id(sd)
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if id(node) not in literal_tasklets and not _is_constant_fill(
                     state, node
@@ -1161,7 +1161,7 @@ def _add_symbol_classes(
             for name, expr in e.data.assignments.items():
                 if _is_fp(sd.symbols.get(name)):
                     link_definition(sd, expr, _sym(sd, name))
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if isinstance(node, nodes.NestedSDFG):
                     inner = node.sdfg

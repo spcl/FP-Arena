@@ -490,7 +490,7 @@ def test_timers_use_one_slot_per_phase_on_the_top_level():
     apply_target(sdfg, "cpu")
     cats = insert_timers(sdfg, "cpu")
     assert cats == ["cast_in", "kernel", "cast_out"]
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         if state.label.startswith(("__fp_timer_start", "__fp_timer_stop")):
             assert state.parent_graph is sdfg, state.label
 

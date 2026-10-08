@@ -24,7 +24,6 @@ from contextlib import contextmanager
 import dace
 from dace.config import Config
 
-from fp_arena.dtypes import mpfr
 from fp_arena.environments import MPFR, FPArenaSR
 
 #: Fast-math flags removed when FP-Arena is enabled (incompatible with the
@@ -106,91 +105,6 @@ def attach_environments(sdfg: dace.SDFG) -> dace.SDFG:
                 if isinstance(node, _dnodes.CodeNode):
                     node.environments = frozenset(node.environments) | envs
     return sdfg
-
-
-#: Whether the aligned-allocation patch is installed.
-_aligned_patch_installed = False
-
-
-def patch_aligned_heap_allocation() -> bool:
-    """Route mpfr heap arrays through plain ``new[]`` / ``delete[]``, which run destructors."""
-
-    global _aligned_patch_installed
-    if _aligned_patch_installed:
-        return False
-
-    from dace.codegen.targets import cpu, experimental_cpu
-
-    original = cpu.use_aligned_operator_new
-
-    def _use_aligned_operator_new(desc) -> bool:
-        if isinstance(desc.dtype, mpfr):
-            return False
-        return original(desc)
-
-    cpu.use_aligned_operator_new = _use_aligned_operator_new
-    experimental_cpu.use_aligned_operator_new = _use_aligned_operator_new
-
-    _aligned_patch_installed = True
-    return True
-
-
-#: Copy implementations that emit a raw ``memcpy``, which shallow-copies mpfr's limb pointer.
-_MEMCPY_IMPLEMENTATIONS = frozenset(
-    {"MemcpyCPU", "MemcpyCUDA1D", "MemcpyCUDA2D", "MemcpyCUDANDStrided"}
-)
-
-#: Whether the element-wise copy patch is installed.
-_copy_patch_installed = False
-
-
-def patch_memcpy_copies() -> bool:
-    """Route mpfr array copies through element-wise assignment, which deep-copies."""
-
-    global _copy_patch_installed
-    if _copy_patch_installed:
-        return False
-
-    from dace.libraries.standard.nodes import copy as copy_lib
-    from dace.libraries.standard.nodes.copy import select as copy_select
-    from dace.libraries.standard.nodes.copy.expansions import auto as copy_auto
-    from dace.transformation.passes.cpu_specialization import (
-        specialize_cpu_transfers as cpu_transfers,
-    )
-
-    original = copy_select.select_copy_implementation
-
-    def _select_copy_implementation(node, parent_state) -> str:
-        impl = original(node, parent_state)
-        if impl not in _MEMCPY_IMPLEMENTATIONS:
-            return impl
-        _, inp, in_subset, _, _, out_subset = node.validate(
-            parent_state.sdfg, parent_state, allow_cross_storage=True
-        )
-        if not isinstance(inp.dtype, mpfr):
-            return impl
-        single = (
-            in_subset.num_elements_exact() == 1 and out_subset.num_elements_exact() == 1
-        )
-        return "Tasklet" if single else "MappedTasklet"
-
-    copy_select.select_copy_implementation = _select_copy_implementation
-    copy_lib.select_copy_implementation = _select_copy_implementation
-    copy_auto.select_copy_implementation = _select_copy_implementation
-
-    # SpecializeCpuTransfers pins MemcpyCPU on sequential copies itself, bypassing the selector.
-    original_one_memcpy = cpu_transfers.copy_is_one_memcpy
-
-    def _copy_is_one_memcpy(node, state) -> bool:
-        inp, _, _, _ = cpu_transfers.copy_endpoints(node, state)
-        if isinstance(inp.dtype, mpfr):
-            return False
-        return original_one_memcpy(node, state)
-
-    cpu_transfers.copy_is_one_memcpy = _copy_is_one_memcpy
-
-    _copy_patch_installed = True
-    return True
 
 
 def _strip_fast_math(args: str) -> str:

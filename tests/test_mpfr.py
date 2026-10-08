@@ -151,9 +151,7 @@ def test_sdfg_copy():
 
 
 def test_sdfg_array_copy_in_loop_is_deep():
-    """An mpfr array copy inside a loop is element-wise, not a memcpy: DaCe's CPU
-    transfer specialization pins memcpy on re-entered copies itself, and a memcpy
-    would share mpfr's limb pointer between the two arrays."""
+    """An mpfr array copy inside a loop is element-wise."""
     N = 4
     sdfg = dace.SDFG("mpfr_loop_copy")
     sdfg.add_symbol("K", dace.int64)
