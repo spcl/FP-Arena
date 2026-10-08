@@ -38,8 +38,16 @@ def _scaled(a: dace.float64[N], c: dace.float64[N]):
         c[i] = a[i] * 2.5
 
 
+@dace.program
+def _pingpong(a: dace.float64[N], b: dace.float64[N]):
+    for t in range(2):
+        b[1:-1] = 0.5 * (a[2:] + a[:-2])
+        a[1:-1] = 0.5 * (b[2:] + b[:-2])
+
+
 _AXPY = _axpy.to_sdfg(simplify=True)
 _SCALED = _scaled.to_sdfg(simplify=True)
+_PINGPONG = _pingpong.to_sdfg(simplify=True)
 
 
 def _experiment(sdfg, name="prog", n=64, **inputs):
@@ -164,6 +172,18 @@ def test_canonical_typing_dedups_redundant_pins():
     assert canonical_typing(exp, {"a": "fp16"}) != root
     # Constants are part of the key.
     assert canonical_typing(exp, {CONSTANTS_KEY: "fp32"}) != root
+
+
+def test_unpinned_in_place_input_follows_a_lowered_one():
+    """In an in-place stencil, a's interior is computed from b: left unpinned, a
+    follows b down to fp32. Only a pin keeps it at fp64, which is why the
+    search pins every knob, also those at their highest rung."""
+    exp = _experiment(_PINGPONG)
+    both = canonical_typing(exp, {"a": "fp32", "b": "fp32"})
+    assert canonical_typing(exp, {"b": "fp32"}) == both
+    assert canonical_typing(exp, {"a": "fp64", "b": "fp32"}) != both
+    # Every knob pinned at its highest rung is still the unmodified program.
+    assert canonical_typing(exp, {"a": "fp64", "b": "fp64"}) == canonical_typing(exp, {})
 
 
 # --------------------------------------------------------------------- run_search
@@ -382,3 +402,36 @@ def test_search_no_knobs_raises():
                 knobs=KnobSelection(sources=False, constants=False, overrides=False),
             )
         )
+
+
+
+def test_search_pins_every_knob(monkeypatch):
+    """Every config is built with all knobs pinned, so lowering b alone is its
+    own program, not a dedup hit on lowering a and b."""
+    built: list[dict] = []
+    original = search._compile_task
+
+    def _compile(pin_map):
+        built.append(dict(pin_map))
+        return original(pin_map)
+
+    monkeypatch.setattr(search, "_compile_task", _compile)
+    monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
+    result = run_search(
+        SelectionSearchConfig(
+            experiment=_experiment(_PINGPONG),
+            budget=ErrorBudget(limits={"rel_max": 1.0}),  # everything passes
+            n_samples=1,
+            n_warmup=1,
+            n_reps=2,
+            exhaustive=True,
+        )
+    )
+
+    names = {k.name for k in result.knobs}
+    assert built and all(set(pins) == names for pins in built)
+    by_pins = {tuple(sorted(e.precision.items())): e for e in result.evaluations}
+    alone = by_pins[(("b", "fp32"),)]
+    both = by_pins[(("a", "fp32"), ("b", "fp32"))]
+    assert not alone.cached and not both.cached
+    assert alone.errors["a"] != both.errors["a"]

@@ -493,6 +493,11 @@ def run_search(
     root: Config = {name: highest[name] for name in names}
 
     def pin_map(config: Config) -> PrecisionMap:
+        """What a config builds"""
+        return dict(config)
+
+    def lowered(config: Config) -> PrecisionMap:
+        """What a config reports: only the knobs below their highest rung."""
         return {n: f for n, f in config.items() if f != highest[n]}
 
     def vec(config: Config) -> tuple[int, ...]:
@@ -564,7 +569,7 @@ def run_search(
         right away, so a search killed before the end keeps its log."""
         ms = _objective_ms(perf, cfg.objective) if perf is not None else None
         evaluation = SearchEvaluation(
-            precision=pin_map(config),
+            precision=lowered(config),
             outcome=result,
             run_id=run_id,
             origin=origin.get(vec(config), "?"),
@@ -682,7 +687,7 @@ def run_search(
         if not chain.open and not chain.done:
             chain.done = True
             print(
-                f"[chain {chain.label}] done: {_format_pins(pin_map(chain.base))}",
+                f"[chain {chain.label}] done: {_format_pins(lowered(chain.base))}",
                 flush=True,
             )
             expand(chain.base)
@@ -749,7 +754,7 @@ def run_search(
 
     def update_best(config: Config, perf: PerfResult, cached: bool) -> None:
         ms = _objective_ms(perf, cfg.objective)
-        pins = pin_map(config)
+        pins = lowered(config)
         speedup = (root_ms / ms) if root_ms and ms else 0.0
         candidates.append(SearchCandidate(pins, ms, speedup))
         improved = best_ms[0] is None or ms < best_ms[0]
@@ -805,7 +810,7 @@ def run_search(
             print(
                 f"{progress('infeasible')} "
                 f"{'(cached) ' if cached else ''}{detail}  "
-                f"{_format_pins(pin_map(config))}",
+                f"{_format_pins(lowered(config))}",
                 flush=True,
             )
         resolve(config, ok)
@@ -869,7 +874,7 @@ def run_search(
         root_folder = compile_pool.submit(_compile_task, pin_map(root)).result()
         stats["compiled"] += 1
         root_errors, root_perf = grade_pool.submit(
-            _grade_task, root_folder, pin_map(root)
+            _grade_task, root_folder, lowered(root)
         ).result()
         stats["graded"] += 1
         discard(root_folder)
@@ -988,7 +993,7 @@ def run_search(
                     discard(job.build_folder)
                     continue
                 job.state = "grading"
-                graded = pin_map(job.configs[0])
+                graded = lowered(job.configs[0])
                 grade_futs[grade_pool.submit(_grade_task, job.build_folder, graded)] = (
                     job
                 )
@@ -1032,7 +1037,7 @@ def run_search(
                         # Never became a program: neither feasible nor infeasible.
                         text = _failure_text(exc)
                         failed_keys.add(job.key)
-                        built = pin_map(job.configs[0])
+                        built = lowered(job.configs[0])
                         failures.append(SearchFailure(built, text))
                         warnings.warn(
                             f"Skipping config {built}: it failed to build.\n{text}",
