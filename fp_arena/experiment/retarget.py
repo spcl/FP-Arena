@@ -16,6 +16,7 @@ from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
 from fp_arena.experiment import registry
 from fp_arena.experiment.config import CONSTANTS_KEY, ExperimentConfig, PrecisionMap
+from fp_arena.experiment.instruction_mix import embed_ptx
 from fp_arena.transformations.change_and_propagate_fp_types import (
     _add_fusion_barrier,
     change_and_propagate_fp_types,
@@ -179,6 +180,7 @@ def apply_target(
     if target == "cpu":
         return
     if target == "gpu":
+        embed_ptx()  # the instruction mix is read from it
         if gpu_offload is not None:
             gpu_offload(sdfg)
         else:

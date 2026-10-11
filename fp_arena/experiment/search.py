@@ -55,6 +55,7 @@ from fp_arena.experiment.config import (
     PrecisionMap,
 )
 from fp_arena.experiment.inputs import Noise, make_call_args, materialize_shape
+from fp_arena.experiment.instruction_mix import format_mix, instruction_mix
 from fp_arena.experiment.knobs import (
     _BITS,
     DEFAULT_LADDER,
@@ -403,14 +404,16 @@ def _key_task(pin_map: PrecisionMap) -> CanonicalKey:
     return canonical_typing(_WORKER["experiment"], pin_map)
 
 
-def _compile_task(pin_map: PrecisionMap) -> str:
-    """Build and compile one candidate SDFG, timers inserted."""
+def _compile_task(pin_map: PrecisionMap) -> tuple[str, dict[str, int] | None]:
+    """Build and compile one candidate SDFG, timers inserted; its build folder
+    and, on GPU, its instruction mix."""
     exp = _WORKER["experiment"]
     sdfg = build_candidate_sdfg(exp, pin_map)
     insert_timers(sdfg, exp.target)
     sdfg.build_folder = os.path.abspath(sdfg.build_folder)
     sdfg.compile()
-    return sdfg.build_folder
+    mix = instruction_mix(sdfg.build_folder) if exp.target == "gpu" else None
+    return sdfg.build_folder, mix
 
 
 def _grade_task(
@@ -429,17 +432,29 @@ def _failure_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _format_pins(
-    precision: PrecisionMap, inferred: PrecisionMap | None = None
+def _format_pins(precision: PrecisionMap) -> str:
+    """One config's lowered knobs, sorted; ``(root)`` when nothing is lowered."""
+    return " ".join(f"{k}={v}" for k, v in sorted(precision.items())) or "(root)"
+
+
+def _format_inferred(inferred: PrecisionMap) -> str:
+    """The unpinned arrays' precisions, sorted."""
+    return " ".join(f"{k}={v}" for k, v in sorted(inferred.items()))
+
+
+def _describe(
+    precision: PrecisionMap,
+    inferred: PrecisionMap | None,
+    mix: dict[str, int] | None,
 ) -> str:
-    """One config's lowered knobs, sorted; ``(root)`` when nothing is lowered.
-    ``inferred``: the precision of each unpinned array, if any."""
-    text = " ".join(f"{k}={v}" for k, v in sorted(precision.items())) or "(root)"
+    """The indented lines under a result line: a config's lowered pins, the
+    precisions inferred from them and its program's instruction mix."""
+    lines = [f"    pinned:   {_format_pins(precision)}"]
     if inferred:
-        text += "  | inferred: " + " ".join(
-            f"{k}={v}" for k, v in sorted(inferred.items())
-        )
-    return text
+        lines.append(f"    inferred: {_format_inferred(inferred)}")
+    if mix is not None:
+        lines.append(f"    mix:      {format_mix(mix)}")
+    return "\n".join(lines)
 
 
 def _array_sizes(experiment: ExperimentConfig, names: list[str]) -> dict[str, int]:
@@ -566,12 +581,19 @@ def run_search(
     # What first queued each visited config, and every settled config in order.
     origin: dict[tuple[int, ...], str] = {}
     evaluations: list[SearchEvaluation] = []
-    # The precision of each unpinned array, per keyed config.
+    # The precision of each unpinned array and the canonical key, per keyed
+    # config, and the instruction mix of each built program.
     inferred_of: dict[tuple[int, ...], PrecisionMap] = {}
+    key_of_vec: dict[tuple[int, ...], CanonicalKey] = {}
+    mix_of: dict[CanonicalKey, dict[str, int] | None] = {}
+
+    def mix(config: Config) -> dict[str, int] | None:
+        key = key_of_vec.get(vec(config))
+        return mix_of.get(key) if key is not None else None
 
     def describe(config: Config) -> str:
-        """A config's lowered pins and the precisions inferred from them."""
-        return _format_pins(lowered(config), inferred_of.get(vec(config)))
+        """A config's lowered pins, the precisions inferred from them and its mix."""
+        return _describe(lowered(config), inferred_of.get(vec(config)), mix(config))
 
     def record(
         config: Config,
@@ -586,6 +608,7 @@ def run_search(
         evaluation = SearchEvaluation(
             precision=lowered(config),
             inferred=inferred_of.get(vec(config), {}),
+            instruction_mix=mix(config),
             outcome=result,
             run_id=run_id,
             origin=origin.get(vec(config), "?"),
@@ -702,10 +725,7 @@ def run_search(
             chain_try(chain, chain.open)
         if not chain.open and not chain.done:
             chain.done = True
-            print(
-                f"[chain {chain.label}] done: {describe(chain.base)}",
-                flush=True,
-            )
+            print(f"[chain {chain.label}] done\n{describe(chain.base)}", flush=True)
             expand(chain.base)
 
     ctx = mp.get_context("spawn")
@@ -760,6 +780,7 @@ def run_search(
 
     def note_inferred(config: Config, key: CanonicalKey) -> None:
         """Remember which arrays ``config``'s program retypes without a pin."""
+        key_of_vec[vec(config)] = key
         inferred_of[vec(config)] = inferred_precisions(
             exp.program, dict(key[0]), pin_map(config)
         )
@@ -779,14 +800,14 @@ def run_search(
         pins = lowered(config)
         speedup = (root_ms / ms) if root_ms and ms else 0.0
         inferred = inferred_of.get(vec(config), {})
-        candidates.append(SearchCandidate(pins, ms, speedup, inferred))
+        candidates.append(SearchCandidate(pins, ms, speedup, inferred, mix(config)))
         improved = best_ms[0] is None or ms < best_ms[0]
         if improved:
             best_ms[0], best[0] = ms, config
         mark = "<- new best" if improved else "(cached)" if cached else ""
         print(
-            f"{progress('feasible')} {ms:>10.4g} ms "
-            f"{speedup:>5.2f}x  {mark:<11}  {_format_pins(pins, inferred)}",
+            f"{progress('feasible')} {ms:>10.4g} ms {speedup:>5.2f}x  {mark}".rstrip()
+            + f"\n{describe(config)}",
             flush=True,
         )
 
@@ -831,8 +852,7 @@ def run_search(
                 else "predicate failed"
             )
             print(
-                f"{progress('infeasible')} "
-                f"{'(cached) ' if cached else ''}{detail}  "
+                f"{progress('infeasible')} {'(cached) ' if cached else ''}{detail}\n"
                 f"{describe(config)}",
                 flush=True,
             )
@@ -895,7 +915,9 @@ def run_search(
         root_key = key_of(root)
         note_inferred(root, root_key)
         stats["evaluated"] += 1
-        root_folder = compile_pool.submit(_compile_task, pin_map(root)).result()
+        root_folder, mix_of[root_key] = compile_pool.submit(
+            _compile_task, pin_map(root)
+        ).result()
         stats["compiled"] += 1
         root_errors, root_perf = grade_pool.submit(
             _grade_task, root_folder, lowered(root)
@@ -1057,7 +1079,7 @@ def run_search(
                 if fut in compile_futs:
                     job = compile_futs.pop(fut)
                     try:
-                        job.build_folder = fut.result()
+                        job.build_folder, mix_of[job.key] = fut.result()
                     except _CONFIG_FAILURES as exc:
                         # Never became a program: neither feasible nor infeasible.
                         text = _failure_text(exc)
@@ -1179,9 +1201,23 @@ def format_search(result: SearchResult, name: str | None = None) -> str:
     if result.candidates:
         out.append("")
         out.append("--- measured feasible (fastest first) ---")
-        for c in result.candidates:
-            pins = _format_pins(c.precision, c.inferred)
-            out.append(f"  {c.objective_ms:>10.4g} ms  {c.speedup:>5.2f}x  {pins}")
+        mixes = [c.instruction_mix for c in result.candidates if c.instruction_mix]
+        count_w = max((len(str(v)) for m in mixes for v in m.values()), default=1)
+        rows = [
+            [
+                f"{c.objective_ms:>10.4g} ms  {c.speedup:>5.2f}x",
+                _format_pins(c.precision),
+                f"| inferred: {_format_inferred(c.inferred)}" if c.inferred else "",
+                f"| mix: {format_mix(c.instruction_mix, count_w)}"
+                if c.instruction_mix is not None
+                else "",
+            ]
+            for c in result.candidates
+        ]
+        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+        for row in rows:
+            cells = [c.ljust(w) for c, w in zip(row, widths, strict=True)]
+            out.append(("  " + "  ".join(cells)).rstrip())
 
     if result.failures:
         out.append("")

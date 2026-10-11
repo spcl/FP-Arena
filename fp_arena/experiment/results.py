@@ -245,6 +245,8 @@ class SearchCandidate:
     speedup: float
     #: The precision the propagation left each unpinned array at.
     inferred: PrecisionMap = field(default_factory=dict)
+    #: Static fp instruction count per precision, from the PTX (GPU builds only).
+    instruction_mix: dict[str, int] | None = None
 
 
 @dataclass
@@ -300,6 +302,8 @@ class SearchEvaluation:
     speedup: float | None = None
     #: Every repetition of every phase, if it was timed.
     perf: PerfResult | None = None
+    #: Static fp instruction count per precision, from the PTX (GPU builds only).
+    instruction_mix: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

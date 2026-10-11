@@ -25,6 +25,7 @@ from fp_arena.experiment.config import (
     PrecisionMap,
 )
 from fp_arena.experiment.inputs import make_call_args
+from fp_arena.experiment.instruction_mix import format_mix, instruction_mix
 from fp_arena.experiment.knobs import inferred_precisions, precision_typing
 from fp_arena.experiment.results import (
     ErrorResult,
@@ -206,6 +207,14 @@ def _report_precision(experiment, sdfg: dace.SDFG, pin_map: PrecisionMap) -> Non
     )
 
 
+def _report_mix(experiment, sdfg: dace.SDFG) -> None:
+    """Print a compiled GPU point's instruction mix."""
+    if experiment.target == "gpu":
+        mix = instruction_mix(sdfg.build_folder)
+        if mix is not None:
+            tqdm.write(f"[precision] mix: {format_mix(mix)}")
+
+
 def _output_arrays(sdfg: dace.SDFG) -> list[str]:
     """Non-transient written array names -- the arrays error metrics are reduced over."""
     _, writes = sdfg.read_and_write_sets()
@@ -301,7 +310,10 @@ def build_candidate_sdfg(experiment, pin_map: PrecisionMap) -> dace.SDFG:
 
 def compile_candidate(experiment, pin_map: PrecisionMap):
     """Build and compile one precision point."""
-    return build_candidate_sdfg(experiment, pin_map).compile()
+    sdfg = build_candidate_sdfg(experiment, pin_map)
+    csdfg = sdfg.compile()
+    _report_mix(experiment, sdfg)
+    return csdfg
 
 
 def measure(
@@ -363,6 +375,7 @@ def run_performance(
             sdfg = build_candidate_sdfg(cfg.experiment, pin_map)
             categories = insert_timers(sdfg, target)
             csdfg = sdfg.compile()
+            _report_mix(cfg.experiment, sdfg)
             rng = _sample_rngs(cfg.experiment.seed, 1)[0]
             breakdown = measure(
                 sdfg,
@@ -430,6 +443,7 @@ def run_perturbation(
         )
         _distinguish(sdfg, _pin_tag(pin_map))
         csdfg = sdfg.compile()
+        _report_mix(exp, sdfg)
 
         reads, _ = sdfg.read_and_write_sets()
         for name in cfg.noise:
