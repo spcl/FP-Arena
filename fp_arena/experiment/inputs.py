@@ -154,6 +154,34 @@ def materialize_shape(shape, symbols: dict[str, int]) -> tuple:
     return tuple(out)
 
 
+def _in_layout(
+    arr: np.ndarray, desc: dace.data.Array, symbols: dict[str, int]
+) -> np.ndarray:
+    """
+    ``arr``'s values in the memory layout of ``desc.strides``: the SDFG indexes
+    the buffer it receives by those strides, so a C-ordered array passed for a
+    reordered descriptor would be read in the wrong order.
+    """
+    if arr.ndim < 2:
+        return arr
+    strides = materialize_shape(desc.strides, symbols)
+    order = sorted(range(arr.ndim), key=lambda d: strides[d], reverse=True)
+    if order == list(range(arr.ndim)):
+        return arr
+
+    view = np.empty([arr.shape[d] for d in order], arr.dtype).transpose(
+        np.argsort(order)
+    )
+    out = np.empty_like(view, order="K")
+    if tuple(s // arr.itemsize for s in out.strides) != strides:
+        raise ValueError(
+            f"Strides {strides} of an array of shape {arr.shape} are not a "
+            f"permutation of a dense layout"
+        )
+    out[...] = arr
+    return out
+
+
 def make_call_args(
     sdfg: dace.SDFG,
     experiment: ExperimentConfig,
@@ -164,6 +192,7 @@ def make_call_args(
     """
     Build the kwargs for one run: every non-transient array (read arrays sampled
     from their distribution then optionally perturbed by ``noise``) plus the symbol and scalar values.
+    Each array is laid out in memory as its descriptor's strides say.
     """
     noise = noise or {}
     if reads is None:
@@ -185,9 +214,9 @@ def make_call_args(
             n = noise.get(name)
             if n is not None:
                 arr = n.apply(arr, rng)
-            args[name] = arr
+            args[name] = _in_layout(arr, desc, experiment.symbols)
         else:
-            args[name] = np.zeros(shape, np_dtype)
+            args[name] = _in_layout(np.zeros(shape, np_dtype), desc, experiment.symbols)
     if defaulted:
         warnings.warn(
             f"No input distribution for arrays: {sorted(defaulted)}. "

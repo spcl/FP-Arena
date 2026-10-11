@@ -8,18 +8,27 @@ Search for the fastest per-array precision assignment for the vertical advection
   * ``sources``   -- read inputs only (the default);
   * ``overrides`` -- also intermediates and outputs (many more knobs);
   * ``constants`` -- also the float literals in the kernel.
+``--snr-db`` sets the error budget: every output must stay at least this close
+to the fp64 result, as a variance SNR in dB (default 60)
 ``--exhaustive`` evaluates and times every config instead of searching.
-Results go to ``vadv_search_<knobs>.db`` under experiment name ``vadv_<knobs>``.
+Results go to ``vadv_<knobs>_<level>dB-<job id>.db`` (``..._exhaustive-<job id>.db`` with
+``--exhaustive``), one database per run.
 """
 
 import argparse
+import os
 import zlib
 
 import dace as dc
 import numpy as np
 from dace.transformation.auto import auto_optimize as aopt
-from dace.transformation.dataflow import MapFusion, PruneConnectors
-from dace.transformation.interstate import LoopToMap
+from dace.transformation.dataflow import (
+    MapFusion,
+    PruneConnectors,
+    TrivialMapElimination,
+)
+from dace.transformation.interstate import LoopToMap, MoveLoopIntoMap
+from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
 from scipy import stats
 
 from corpus.vdav import dtr_stage, vadv
@@ -32,7 +41,7 @@ from fp_arena.experiment import (
     run_search,
 )
 
-I, J, K = 128, 128, 64
+I, J, K = 1024, 1024, 128
 
 
 def _shared(rng: np.random.Generator, name: str) -> np.random.Generator:
@@ -78,18 +87,32 @@ def main() -> None:
     )
     parser.add_argument(
         "--exhaustive",
+        action="store_true",
         help="evaluate and time every config of the lattice instead of searching ",
+    )
+    parser.add_argument(
+        "--snr-db",
+        type=float,
+        default=60.0,
     )
     args = parser.parse_args()
     scopes = set(args.knobs)
     tag = "_".join(s for s in ("overrides", "constants") if s in scopes) or "sources"
 
     sdfg = vadv.to_sdfg(simplify=True)
-    sdfg.specialize({"I": I, "J": J, "K": K})
+    for desc in sdfg.arrays.values():
+        if isinstance(desc, dc.data.Array) and len(desc.shape) == 3:
+            n0, n1, _ = desc.shape
+            desc.strides = (n1, 1, n0 * n1)
     sdfg = aopt.auto_optimize(sdfg, dc.DeviceType.CPU)
     sdfg.apply_transformations_repeated(LoopToMap)
+    sdfg.apply_transformations_repeated(TrivialMapElimination)
     sdfg.apply_transformations_repeated(MapFusion)
     sdfg.apply_transformations_repeated(PruneConnectors)
+    sdfg.simplify()
+    InsertExplicitCopies().apply_pass(sdfg, {})
+    sdfg.apply_transformations_repeated(MoveLoopIntoMap, options={"cfg_body": True})
+    sdfg.apply_transformations_repeated(MapFusion)
     sdfg.simplify()
 
     experiment = ExperimentConfig(
@@ -102,12 +125,18 @@ def main() -> None:
         gpu_block_size=(256, 1, 1),
     )
 
-    budget = ErrorBudget(limits={"l2_norm": 1e-4})
+    budget = ErrorBudget(limits={"snr_var": args.snr_db})
 
     knob_selection = KnobSelection(
         sources=True,
         overrides="overrides" in scopes,
         constants="constants" in scopes,
+    )
+
+    run_name = (
+        f"{experiment.name}_exhaustive"
+        if args.exhaustive
+        else f"{experiment.name}_{args.snr_db:g}dB"
     )
 
     cfg = SelectionSearchConfig(
@@ -122,10 +151,10 @@ def main() -> None:
         compute_budget=args.max_configs,
         devices=[0, 1, 2, 3],
         exhaustive=args.exhaustive,
-        name=f"{experiment.name}_exhaustive" if args.exhaustive else None,
+        name=run_name,
     )
 
-    store = ResultStore(f"vadv_search_{tag}.db")
+    store = ResultStore(f"{run_name}-{os.environ.get('SLURM_JOB_ID', 'local')}.db")
     try:
         run_search(cfg, store=store)
     finally:

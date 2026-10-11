@@ -895,7 +895,29 @@ class _HalfTernaryCaster(ast.NodeTransformer):
         return node
 
 
-def _cast_mixed_half_ternaries(sdfg: dace.SDFG) -> None:
+# ``pow(half, double)`` is ambiguous on the CPU
+class _HalfPowCaster(ast.NodeTransformer):
+    def __init__(self, symbols: dict) -> None:
+        self._symbols = symbols
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+        if not isinstance(node.op, ast.Pow):
+            return node
+        for side in ("left", "right"):
+            operand = getattr(node, side)
+            try:
+                dtype = type_inference.infer_expr_type(
+                    ast.unparse(operand), self._symbols
+                )
+            except Exception:
+                continue
+            if dtype == dace.float16:
+                setattr(node, side, _dace_cast(operand, "float32"))
+        return node
+
+
+def _cast_half_operands(sdfg: dace.SDFG, needle: str, make_caster) -> None:
     for state in sdfg.states():
         for node in state.nodes():
             if not (
@@ -904,7 +926,7 @@ def _cast_mixed_half_ternaries(sdfg: dace.SDFG) -> None:
             ):
                 continue
             code = node.code.as_string
-            if "if" not in code:
+            if needle not in code:
                 continue
             symbols = {**node.in_connectors, **node.out_connectors}
             try:
@@ -912,9 +934,17 @@ def _cast_mixed_half_ternaries(sdfg: dace.SDFG) -> None:
             except Exception:
                 continue
             tree = ast.fix_missing_locations(
-                _HalfTernaryCaster(symbols).visit(ast.parse(code))
+                make_caster(symbols).visit(ast.parse(code))
             )
             node.code = CodeBlock(ast.unparse(tree), dace.Language.Python)
+
+
+def _cast_mixed_half_ternaries(sdfg: dace.SDFG) -> None:
+    _cast_half_operands(sdfg, "if", _HalfTernaryCaster)
+
+
+def _cast_half_powers(sdfg: dace.SDFG) -> None:
+    _cast_half_operands(sdfg, "**", _HalfPowCaster)
 
 
 # Names an expression reads, minus the functions it calls.
@@ -1318,6 +1348,7 @@ def change_and_propagate_fp_types(
         _homogenize_tasklet_dtypes(sd, rules, literal_tasklets, constant_type)
         _insert_edge_casts(sd)
         _cast_mixed_half_ternaries(sd)
+        _cast_half_powers(sd)
 
     # Preserve the external interface: non-transient arrays of the *root* SDFG
     # that changed type are renamed to an internal transient. Nested levels

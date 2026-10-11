@@ -76,15 +76,26 @@ def _bracket(region, first, last, slot: int, category: str, target: str) -> None
     _timer_tasklet(post, f"fp_arena::timer::stop({slot});", target)
 
 
+def _touches_no_data(block) -> bool:
+    """Whether ``block`` reads and writes no data."""
+    states = [block] if isinstance(block, dace.SDFGState) else block.states()
+    return all(not s.data_nodes() for s in states)
+
+
 def _phase_sequence(sdfg: dace.SDFG) -> list[tuple[object, str]]:
-    """The top-level blocks in execution order, each with its phase."""
+    """The top-level blocks in execution order, each with its phase. Blocks that
+    touch no data do not end the leading or trailing run of copies and casts."""
     blocks = list(sdfg_utils.dfs_topological_sort(sdfg))
     cats = [_homogeneous_category(sdfg, b) or "kernel" for b in blocks]
     head = 0
-    while head < len(cats) and cats[head] in ("h2d", "cast_in"):
+    while head < len(cats) and (
+        cats[head] in ("h2d", "cast_in") or _touches_no_data(blocks[head])
+    ):
         head += 1
     tail = len(cats)
-    while tail > head and cats[tail - 1] in ("cast_out", "d2h"):
+    while tail > head and (
+        cats[tail - 1] in ("cast_out", "d2h") or _touches_no_data(blocks[tail - 1])
+    ):
         tail -= 1
     for i in range(head, tail):
         cats[i] = "kernel"
