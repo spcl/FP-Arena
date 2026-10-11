@@ -62,6 +62,7 @@ from fp_arena.experiment.knobs import (
     KnobSelection,
     canonical_typing,
     find_knobs,
+    inferred_precisions,
 )
 from fp_arena.experiment.results import (
     ErrorStats,
@@ -428,9 +429,17 @@ def _failure_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _format_pins(precision: PrecisionMap) -> str:
-    """One config's lowered knobs, sorted; ``(root)`` when nothing is lowered."""
-    return " ".join(f"{k}={v}" for k, v in sorted(precision.items())) or "(root)"
+def _format_pins(
+    precision: PrecisionMap, inferred: PrecisionMap | None = None
+) -> str:
+    """One config's lowered knobs, sorted; ``(root)`` when nothing is lowered.
+    ``inferred``: the precision of each unpinned array, if any."""
+    text = " ".join(f"{k}={v}" for k, v in sorted(precision.items())) or "(root)"
+    if inferred:
+        text += "  | inferred: " + " ".join(
+            f"{k}={v}" for k, v in sorted(inferred.items())
+        )
+    return text
 
 
 def _array_sizes(experiment: ExperimentConfig, names: list[str]) -> dict[str, int]:
@@ -557,6 +566,12 @@ def run_search(
     # What first queued each visited config, and every settled config in order.
     origin: dict[tuple[int, ...], str] = {}
     evaluations: list[SearchEvaluation] = []
+    # The precision of each unpinned array, per keyed config.
+    inferred_of: dict[tuple[int, ...], PrecisionMap] = {}
+
+    def describe(config: Config) -> str:
+        """A config's lowered pins and the precisions inferred from them."""
+        return _format_pins(lowered(config), inferred_of.get(vec(config)))
 
     def record(
         config: Config,
@@ -570,6 +585,7 @@ def run_search(
         ms = _objective_ms(perf, cfg.objective) if perf is not None else None
         evaluation = SearchEvaluation(
             precision=lowered(config),
+            inferred=inferred_of.get(vec(config), {}),
             outcome=result,
             run_id=run_id,
             origin=origin.get(vec(config), "?"),
@@ -687,7 +703,7 @@ def run_search(
         if not chain.open and not chain.done:
             chain.done = True
             print(
-                f"[chain {chain.label}] done: {_format_pins(lowered(chain.base))}",
+                f"[chain {chain.label}] done: {describe(chain.base)}",
                 flush=True,
             )
             expand(chain.base)
@@ -742,6 +758,12 @@ def run_search(
     def key_of(config: Config) -> CanonicalKey:
         return canonical_typing(exp, pin_map(config))
 
+    def note_inferred(config: Config, key: CanonicalKey) -> None:
+        """Remember which arrays ``config``'s program retypes without a pin."""
+        inferred_of[vec(config)] = inferred_precisions(
+            exp.program, dict(key[0]), pin_map(config)
+        )
+
     def progress(outcome: str) -> str:
         """A result line's head"""
         return (
@@ -756,14 +778,15 @@ def run_search(
         ms = _objective_ms(perf, cfg.objective)
         pins = lowered(config)
         speedup = (root_ms / ms) if root_ms and ms else 0.0
-        candidates.append(SearchCandidate(pins, ms, speedup))
+        inferred = inferred_of.get(vec(config), {})
+        candidates.append(SearchCandidate(pins, ms, speedup, inferred))
         improved = best_ms[0] is None or ms < best_ms[0]
         if improved:
             best_ms[0], best[0] = ms, config
         mark = "<- new best" if improved else "(cached)" if cached else ""
         print(
             f"{progress('feasible')} {ms:>10.4g} ms "
-            f"{speedup:>5.2f}x  {mark:<11}  {_format_pins(pins)}",
+            f"{speedup:>5.2f}x  {mark:<11}  {_format_pins(pins, inferred)}",
             flush=True,
         )
 
@@ -810,7 +833,7 @@ def run_search(
             print(
                 f"{progress('infeasible')} "
                 f"{'(cached) ' if cached else ''}{detail}  "
-                f"{_format_pins(lowered(config))}",
+                f"{describe(config)}",
                 flush=True,
             )
         resolve(config, ok)
@@ -870,6 +893,7 @@ def run_search(
         visited.add(vec(root))
         origin[vec(root)] = "root"
         root_key = key_of(root)
+        note_inferred(root, root_key)
         stats["evaluated"] += 1
         root_folder = compile_pool.submit(_compile_task, pin_map(root)).result()
         stats["compiled"] += 1
@@ -939,6 +963,7 @@ def run_search(
         def subscribe(config: Config, key: CanonicalKey) -> None:
             """Settle a keyed config: skipped, dedup hit, known build failure, or
             subscribed to its program's job (started if none is in flight)."""
+            note_inferred(config, key)
             if skip(config):
                 return
             if key in errors_cache:
@@ -1155,7 +1180,7 @@ def format_search(result: SearchResult, name: str | None = None) -> str:
         out.append("")
         out.append("--- measured feasible (fastest first) ---")
         for c in result.candidates:
-            pins = _format_pins(c.precision)
+            pins = _format_pins(c.precision, c.inferred)
             out.append(f"  {c.objective_ms:>10.4g} ms  {c.speedup:>5.2f}x  {pins}")
 
     if result.failures:

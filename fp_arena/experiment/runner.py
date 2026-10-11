@@ -25,6 +25,7 @@ from fp_arena.experiment.config import (
     PrecisionMap,
 )
 from fp_arena.experiment.inputs import make_call_args
+from fp_arena.experiment.knobs import inferred_precisions, precision_typing
 from fp_arena.experiment.results import (
     ErrorResult,
     ErrorStats,
@@ -196,6 +197,15 @@ def _fmt_pin(pin_map: PrecisionMap) -> str:
     return " ".join(f"{k}={v}" for k, v in pin_map.items())
 
 
+def _report_precision(experiment, sdfg: dace.SDFG, pin_map: PrecisionMap) -> None:
+    """Print a retargeted point's pins and the precision of every unpinned array."""
+    inferred = inferred_precisions(experiment.program, precision_typing(sdfg), pin_map)
+    tqdm.write(
+        f"[precision] pinned: {_fmt_pin(pin_map) or '(none)'}  "
+        f"| inferred: {_fmt_pin(dict(sorted(inferred.items()))) or '(none)'}"
+    )
+
+
 def _output_arrays(sdfg: dace.SDFG) -> list[str]:
     """Non-transient written array names -- the arrays error metrics are reduced over."""
     _, writes = sdfg.read_and_write_sets()
@@ -276,6 +286,7 @@ def build_candidate_sdfg(experiment, pin_map: PrecisionMap) -> dace.SDFG:
     """
     sdfg = fresh_sdfg(experiment)
     apply_precision(sdfg, pin_map, experiment.promotion_rules)
+    _report_precision(experiment, sdfg, pin_map)
     apply_target(
         sdfg,
         experiment.target,
@@ -408,6 +419,7 @@ def run_perturbation(
         points.set_postfix_str(_fmt_pin(pin_map))
         sdfg = fresh_sdfg(exp)
         apply_precision(sdfg, pin_map, exp.promotion_rules)
+        _report_precision(exp, sdfg, pin_map)
         apply_target(
             sdfg,
             exp.target,

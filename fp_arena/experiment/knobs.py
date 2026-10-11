@@ -181,13 +181,37 @@ def canonical_typing(
     """
     sdfg = fresh_sdfg(experiment)
     apply_precision(sdfg, pin_map, experiment.promotion_rules)
-    typing: list[tuple[str, str]] = []
+    typing = sorted(precision_typing(sdfg).items())
+    return (tuple(typing), pin_map.get(CONSTANTS_KEY))
+
+
+def precision_typing(sdfg: dace.SDFG) -> dict[str, str]:
+    """The precision key of each top-level fp array and scalar of ``sdfg``."""
+    typing: dict[str, str] = {}
     for name, desc in sdfg.arrays.items():
         if not isinstance(desc, (dace.data.Array, dace.data.Scalar)):
             continue
         try:
-            typing.append((name, registry.key_of(desc.dtype)))
+            typing[name] = registry.key_of(desc.dtype)
         except ValueError:
             continue  # non-fp array
-    typing.sort()
-    return (tuple(typing), pin_map.get(CONSTANTS_KEY))
+    return typing
+
+
+def inferred_precisions(
+    program: dace.SDFG, typing: dict[str, str], pin_map: PrecisionMap
+) -> PrecisionMap:
+    """The precision of each unpinned array."""
+    pinned = set(pin_map)
+    if CONSTANTS_KEY in pin_map:
+        pinned |= set(_constant_scalars(program))
+    original = precision_typing(program)
+    inferred = {name: typing[name] for name in original if name in typing}
+    for name, fmt in typing.items():
+        if name in original:
+            continue
+        for orig in original:  # else a container the retarget added (a cast temporary)
+            if name == f"fp_casted_{orig}_{registry.to_typeclass(fmt).to_string()}":
+                inferred[orig] = fmt
+                break
+    return {name: fmt for name, fmt in inferred.items() if name not in pinned}

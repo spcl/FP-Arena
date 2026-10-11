@@ -243,6 +243,8 @@ class SearchCandidate:
     objective_ms: float
     #: Speedup over the all-highest root.
     speedup: float
+    #: The precision the propagation left each unpinned array at.
+    inferred: PrecisionMap = field(default_factory=dict)
 
 
 @dataclass
@@ -278,6 +280,8 @@ class SearchEvaluation:
 
     #: The lowered pins (knobs left at their highest rung are omitted).
     precision: PrecisionMap
+    #: The precision the propagation left each unpinned array at (empty if not keyed).
+    inferred: PrecisionMap
     outcome: str
     #: The search run it belongs to, :attr:`SearchResult.run_id`.
     run_id: str
