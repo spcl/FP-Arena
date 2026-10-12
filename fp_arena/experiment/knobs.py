@@ -22,6 +22,7 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
     _is_fp,
     _tasklets_with_literals,
     _unify_nested_boundaries,
+    _unify_views,
 )
 
 #: Bit width of each precisio, low precision to high; the cap and ordering.
@@ -121,6 +122,7 @@ def find_knobs(
     """
     sdfgs = _collect_sdfgs(sdfg)
     uf = _unify_nested_boundaries(sdfgs)
+    _unify_views(sdfgs, uf)
     members, original = _class_types(sdfgs, uf)
     reads, _ = sdfg.read_and_write_sets()
 
