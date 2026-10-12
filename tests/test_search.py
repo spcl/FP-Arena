@@ -345,8 +345,9 @@ def test_search_deletes_graded_build_folders(monkeypatch, tmp_path, keep):
     original = search._compile_task
 
     def _compile(pin_map):
-        built.append(original(pin_map))
-        return built[-1]
+        folder, mix = original(pin_map)
+        built.append(folder)
+        return folder, mix
 
     monkeypatch.setattr(search, "_compile_task", _compile)
     monkeypatch.setattr(search.cf, "ProcessPoolExecutor", _InlinePool)
