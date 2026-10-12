@@ -41,7 +41,7 @@ from fp_arena.experiment import (
     run_search,
 )
 
-I, J, K = 1024, 1024, 128
+I, J, K = 1024, 1024, 256
 
 
 def _shared(rng: np.random.Generator, name: str) -> np.random.Generator:
@@ -144,7 +144,7 @@ def main() -> None:
         budget=budget,
         knobs=knob_selection,
         reference="fp64",
-        n_samples=10,
+        n_samples=5,
         n_warmup=3,
         n_reps=10,
         objective="kernel",
