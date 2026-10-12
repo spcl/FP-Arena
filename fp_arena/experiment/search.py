@@ -35,12 +35,14 @@ import multiprocessing as mp
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import dace
 import numpy as np
@@ -54,7 +56,12 @@ from fp_arena.experiment.config import (
     ExperimentConfig,
     PrecisionMap,
 )
-from fp_arena.experiment.inputs import Noise, make_call_args, materialize_shape
+from fp_arena.experiment.inputs import (
+    Noise,
+    make_call_args,
+    materialize_shape,
+    zero_call_args,
+)
 from fp_arena.experiment.instruction_mix import format_mix, instruction_mix
 from fp_arena.experiment.knobs import (
     _BITS,
@@ -78,7 +85,6 @@ from fp_arena.experiment.runner import (
     _accumulate,
     _checked_outputs,
     _collect_outputs,
-    _copy_args,
     _finalize,
     _new_acc,
     _sample_rngs,
@@ -232,15 +238,53 @@ class _Job:
     build_folder: str | None = None
 
 
+def _memory_order(arr: np.ndarray) -> np.ndarray:
+    """``arr`` with its axes sorted by stride: C-contiguous for any dense layout."""
+    return arr.transpose(np.argsort(arr.strides, kind="stable")[::-1])
+
+
+def _build_samples(
+    experiment: ExperimentConfig,
+    reference: str | dict[str, str],
+    n_samples: int,
+    folder: Path,
+) -> None:
+    """
+    Generate the error samples once and run the reference on each. Sample ``i``'s
+    read inputs (in memory order) and reference outputs go to ``folder/i``, for
+    all measurement workers to share.
+    """
+    reads, _ = experiment.program.read_and_write_sets()
+    outputs = _checked_outputs(experiment)
+    with dace.config.temporary_config():
+        _worker_dace_config(experiment)  # the codegen the workers used to build it with
+        ref = compile_reference(experiment, reference)
+    for i, rng in enumerate(_sample_rngs(experiment.seed, n_samples)):
+        args = make_call_args(experiment.program, experiment, rng, reads=reads)
+        sample = folder / str(i)
+        sample.mkdir()
+        for name, arr in args.items():
+            if name in reads and isinstance(arr, np.ndarray):
+                np.save(sample / f"in_{name}.npy", _memory_order(arr))
+        ref(**args)
+        for name, val in _collect_outputs(experiment, args, outputs).items():
+            np.save(sample / f"out_{name}.npy", val)
+    ref.finalize()
+
+
 class _Slot:
     """
     One evaluation slot, owning a single device (or a CPU slot).
+
+    The samples are the files :func:`_build_samples` wrote, mapped read-only and
+    shared by all slots. Each run gets its arguments in one working buffer
+    owned by the slot.
     """
 
     def __init__(
         self,
         experiment: ExperimentConfig,
-        reference: str | dict[str, str],
+        samples_dir: str,
         n_samples: int,
         limits: dict[str, dict[str, float]],
         n_warmup: int,
@@ -253,18 +297,29 @@ class _Slot:
         self.n_warmup = n_warmup
         self.n_reps = n_reps
         self.time_all = time_all
-        reads, writes = experiment.program.read_and_write_sets()
+        _, writes = experiment.program.read_and_write_sets()
         self._written = set(writes)
-        ref = compile_reference(experiment, reference)
-        self._samples: list[tuple[dict, dict[str, np.ndarray]]] = []
-        for rng in _sample_rngs(experiment.seed, n_samples):
-            args = make_call_args(experiment.program, experiment, rng, reads=reads)
-            ref_args = _copy_args(args)
-            ref(**ref_args)
-            self._samples.append(
-                (args, _collect_outputs(experiment, ref_args, self.outputs))
-            )
-        ref.finalize()
+        self._samples: list[tuple[dict[str, np.ndarray], dict[str, np.ndarray]]] = []
+        for i in range(n_samples):
+            sample = Path(samples_dir) / str(i)
+            inputs = {
+                p.stem.removeprefix("in_"): np.load(p, mmap_mode="r")
+                for p in sample.glob("in_*.npy")
+            }
+            ref_out = {
+                name: np.load(sample / f"out_{name}.npy", mmap_mode="r")
+                for name in self.outputs
+            }
+            self._samples.append((inputs, ref_out))
+        self._work = zero_call_args(experiment.program, experiment)
+
+    def _load(self, i: int) -> dict[str, Any]:
+        """The working arguments, set to sample ``i``: its inputs copied in, every other array zeroed."""
+        inputs = self._samples[i][0]
+        for name, buf in self._work.items():
+            if isinstance(buf, np.ndarray):
+                _memory_order(buf)[...] = inputs.get(name, 0)
+        return self._work
 
     def grade_and_time(
         self, build_folder: str, pin_map: PrecisionMap
@@ -276,8 +331,8 @@ class _Slot:
         csdfg = load_precompiled_sdfg(build_folder)
         sdfg = csdfg.sdfg
         accs = {name: _new_acc() for name in self.outputs}
-        for args, ref_out in self._samples:
-            cand_args = _copy_args(args)
+        for i, (_, ref_out) in enumerate(self._samples):
+            cand_args = self._load(i)
             csdfg(**cand_args)
             cand_out = _collect_outputs(self.experiment, cand_args, self.outputs)
             for name in self.outputs:
@@ -299,7 +354,7 @@ class _Slot:
                     self.n_warmup,
                     self.n_reps,
                     rng,
-                    initial_args=self._samples[0][0],
+                    initial_args=self._load(0),
                     written=self._written,
                 ),
             )
@@ -323,7 +378,7 @@ def _worker_dace_config(experiment: ExperimentConfig) -> None:
 
 def _init_slot(
     experiment: ExperimentConfig,
-    reference: str | dict[str, str],
+    samples_dir: str,
     n_samples: int,
     limits: dict[str, dict[str, float]],
     n_warmup: int,
@@ -339,7 +394,7 @@ def _init_slot(
         os.sched_setaffinity(0, cpus)
     _worker_dace_config(experiment)
     _WORKER["slot"] = _Slot(
-        experiment, reference, n_samples, limits, n_warmup, n_reps, time_all
+        experiment, samples_dir, n_samples, limits, n_warmup, n_reps, time_all
     )
 
 
@@ -870,13 +925,23 @@ def run_search(
         initializer=_init_compiler,
         initargs=(exp, compile_cpus),
     )
+    # The error samples and their reference outputs, built once here and shared by the measurement workers.
+    samples_dir = tempfile.mkdtemp(
+        prefix="fp_arena_samples_",
+        dir="/dev/shm" if os.path.isdir("/dev/shm") else None,
+    )
+    try:
+        _build_samples(exp, cfg.reference, cfg.n_samples, Path(samples_dir))
+    except BaseException:
+        shutil.rmtree(samples_dir, ignore_errors=True)
+        raise
     grade_pool = cf.ProcessPoolExecutor(
         n_slots,
         mp_context=ctx,
         initializer=_init_slot,
         initargs=(
             exp,
-            cfg.reference,
+            samples_dir,
             cfg.n_samples,
             limits,
             cfg.n_warmup,
@@ -1119,6 +1184,7 @@ def run_search(
     finally:
         compile_pool.shutdown(wait=True)
         grade_pool.shutdown(wait=True)
+        shutil.rmtree(samples_dir, ignore_errors=True)
         for job in jobs.values():
             if job.build_folder is not None:
                 discard(job.build_folder)

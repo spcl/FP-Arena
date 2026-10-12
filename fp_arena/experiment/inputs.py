@@ -225,3 +225,17 @@ def make_call_args(
     args.update(experiment.symbols)
     args.update(experiment.scalar_args)
     return args
+
+
+def zero_call_args(sdfg: dace.SDFG, experiment: ExperimentConfig) -> dict[str, Any]:
+    """Call arguments for ``sdfg`` with every array filled with zeros."""
+    args: dict[str, Any] = {}
+    for name, desc in sdfg.arrays.items():
+        if desc.transient or not isinstance(desc, dace.data.Array):
+            continue
+        shape = materialize_shape(desc.shape, experiment.symbols)
+        zeros = np.zeros(shape, desc.dtype.as_numpy_dtype())
+        args[name] = _in_layout(zeros, desc, experiment.symbols)
+    args.update(experiment.symbols)
+    args.update(experiment.scalar_args)
+    return args
