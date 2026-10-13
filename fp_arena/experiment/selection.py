@@ -27,6 +27,7 @@ from collections.abc import Sequence
 
 from fp_arena.experiment.config import (
     CONSTANTS_KEY,
+    SCALARS_KEY,
     ErrorAnalysisConfig,
     ErrorBudget,
     PerformanceAnalysisConfig,
@@ -159,7 +160,7 @@ def _objective_ms(perf: PerfResult, objective: str) -> float:
 
 def _label(key: str) -> str:
     """Column label for a precision-map key."""
-    return "consts" if key == CONSTANTS_KEY else key
+    return {CONSTANTS_KEY: "consts", SCALARS_KEY: "scalars"}.get(key, key)
 
 
 def _fmt_point(point: PrecisionMap) -> str:

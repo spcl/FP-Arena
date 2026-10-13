@@ -15,10 +15,19 @@ from dace.transformation.passes.vectorization.enums import RemainderStrategy
 from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
 from fp_arena.experiment import registry
-from fp_arena.experiment.config import CONSTANTS_KEY, ExperimentConfig, PrecisionMap
+from fp_arena.experiment.config import (
+    CONSTANTS_KEY,
+    SCALARS_KEY,
+    ExperimentConfig,
+    PrecisionMap,
+)
 from fp_arena.experiment.instruction_mix import embed_ptx
 from fp_arena.transformations.change_and_propagate_fp_types import (
     _add_fusion_barrier,
+    _class_types,
+    _collect_sdfgs,
+    _unify_nested_boundaries,
+    _unify_views,
     change_and_propagate_fp_types,
 )
 
@@ -54,6 +63,50 @@ def candidate_fp_arrays(sdfg: dace.SDFG) -> list[str]:
     )
 
 
+def _single_element(desc: dace.data.Data) -> bool:
+    return isinstance(desc, dace.data.Scalar) or all(s == 1 for s in desc.shape)
+
+
+def scalar_temporaries(sdfg: dace.SDFG) -> list[str]:
+    """
+    :returns: the top-level names of the float classes that hold one element in
+        every SDFG and are transient at the top level -- what :data:`SCALARS_KEY` pins.
+    """
+    sdfgs = _collect_sdfgs(sdfg)
+    uf = _unify_nested_boundaries(sdfgs)
+    _unify_views(sdfgs, uf)
+    members, original = _class_types(sdfgs, uf)
+    names: list[str] = []
+    for rep, mem in members.items():
+        if not _is_fp(original[rep]):
+            continue
+        top = [name for sd, name in mem if sd is sdfg]
+        if (
+            top
+            and all(sdfg.arrays[name].transient for name in top)
+            and all(_single_element(sd.arrays[name]) for sd, name in mem)
+        ):
+            names.extend(top)
+    return sorted(names)
+
+
+_CAPPED = ("fp16", "fp32", "fp64")
+
+
+def _expand_scalars(sdfg: dace.SDFG, pins: PrecisionMap, key: str) -> None:
+    """Pin every scalar temporary not pinned on its own to ``key``, capped at its original type"""
+    for name in scalar_temporaries(sdfg):
+        if name in pins:
+            continue
+        own = registry.key_of(sdfg.arrays[name].dtype)
+        capped = (
+            key in _CAPPED
+            and own in _CAPPED
+            and registry.to_typeclass(key).bytes > registry.to_typeclass(own).bytes
+        )
+        pins[name] = own if capped else key
+
+
 def _validate_pins(sdfg: dace.SDFG, pin_map: PrecisionMap) -> None:
     for name in pin_map:
         if name not in sdfg.arrays:
@@ -74,6 +127,9 @@ def apply_precision(
         return
     pins = dict(pin_map)
     constants_key = pins.pop(CONSTANTS_KEY, None)
+    scalars_key = pins.pop(SCALARS_KEY, None)
+    if scalars_key is not None:
+        _expand_scalars(sdfg, pins, scalars_key)
     _validate_pins(sdfg, pins)
     typed = {name: registry.to_typeclass(key) for name, key in pins.items()}
     change_and_propagate_fp_types(

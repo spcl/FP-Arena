@@ -24,6 +24,9 @@ PrecisionMap = dict[str, str]
 #: Reserved :data:`PrecisionMap` key that targets float literals; absent means literals stay fp64.
 CONSTANTS_KEY = "__constants__"
 
+#: Reserved :data:`PrecisionMap` key that targets every single-element float temporary at once.
+SCALARS_KEY = "__scalars__"
+
 
 def precision_grid(arrays: dict[str, Sequence[str]]) -> list[PrecisionMap]:
     """

@@ -7,6 +7,7 @@ from fp_arena.experiment import registry
 from fp_arena.experiment.config import (
     CONSTANTS_KEY,
     OBJECTIVES,
+    SCALARS_KEY,
     ErrorAnalysisConfig,
     ErrorBudget,
     ExperimentConfig,
@@ -48,6 +49,7 @@ __all__ = [
     "CONSTANTS_KEY",
     "METRICS",
     "OBJECTIVES",
+    "SCALARS_KEY",
     "ConstraintResult",
     "ErrorAnalysisConfig",
     "ErrorBudget",
