@@ -14,14 +14,14 @@ from dace.transformation.passes.vectorization.config import VectorizeConfig
 from dace.transformation.passes.vectorization.enums import RemainderStrategy
 from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
 
-from fp_arena.experiment import registry
-from fp_arena.experiment.config import (
+from fp_arena.search import registry
+from fp_arena.search.config import (
     CONSTANTS_KEY,
     SCALARS_KEY,
     ExperimentConfig,
     PrecisionMap,
 )
-from fp_arena.experiment.instruction_mix import embed_ptx
+from fp_arena.search.instruction_mix import embed_ptx
 from fp_arena.transformations.change_and_propagate_fp_types import (
     _add_fusion_barrier,
     _class_types,

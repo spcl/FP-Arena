@@ -3,8 +3,8 @@
 FP-Arena experiment framework: precision performance and error analysis.
 """
 
-from fp_arena.experiment import registry
-from fp_arena.experiment.config import (
+from fp_arena.search import registry
+from fp_arena.search.config import (
     CONSTANTS_KEY,
     OBJECTIVES,
     SCALARS_KEY,
@@ -17,9 +17,9 @@ from fp_arena.experiment.config import (
     SelectionAnalysisConfig,
     precision_grid,
 )
-from fp_arena.experiment.inputs import Noise
-from fp_arena.experiment.knobs import Knob, KnobSelection, find_knobs
-from fp_arena.experiment.results import (
+from fp_arena.search.inputs import Noise
+from fp_arena.search.knobs import Knob, KnobSelection, find_knobs
+from fp_arena.search.results import (
     METRICS,
     ConstraintResult,
     ErrorResult,
@@ -30,10 +30,10 @@ from fp_arena.experiment.results import (
     SelectionCandidate,
     SelectionResult,
 )
-from fp_arena.experiment.retarget import candidate_fp_arrays
-from fp_arena.experiment.runner import run_error, run_performance, run_perturbation
-from fp_arena.experiment.screening import Screening, screen
-from fp_arena.experiment.search import (
+from fp_arena.search.retarget import candidate_fp_arrays
+from fp_arena.search.runner import run_error, run_performance, run_perturbation
+from fp_arena.search.screening import Screening, screen
+from fp_arena.search.search import (
     SearchCandidate,
     SearchEvaluation,
     SearchFailure,
@@ -42,8 +42,8 @@ from fp_arena.experiment.search import (
     format_search,
     run_search,
 )
-from fp_arena.experiment.selection import format_selection, run_selection
-from fp_arena.experiment.store import ResultStore, StoredResult
+from fp_arena.search.selection import format_selection, run_selection
+from fp_arena.search.store import ResultStore, StoredResult
 
 __all__ = [
     "CONSTANTS_KEY",

@@ -33,7 +33,7 @@ from dace.transformation.interstate import LoopToMap
 from scipy import stats
 
 from corpus.hdiff import hdiff
-from fp_arena.experiment import (
+from fp_arena.search import (
     ErrorBudget,
     ExperimentConfig,
     KnobSelection,

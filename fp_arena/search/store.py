@@ -14,7 +14,7 @@ from typing import Any
 
 from dace.transformation.passes.vectorization.config import VectorizeConfig
 
-from fp_arena.experiment.results import (
+from fp_arena.search.results import (
     ErrorResult,
     PerfResult,
     PerturbationResult,

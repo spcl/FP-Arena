@@ -34,7 +34,7 @@ from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopi
 from scipy import stats
 
 from corpus.vdav import dtr_stage, vadv
-from fp_arena.experiment import (
+from fp_arena.search import (
     ErrorBudget,
     ExperimentConfig,
     KnobSelection,

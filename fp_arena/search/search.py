@@ -51,20 +51,20 @@ from dace.codegen.compiler import load_precompiled_sdfg
 from dace.codegen.exceptions import CodegenError, CompilationError
 from dace.sdfg.validation import InvalidSDFGError
 
-from fp_arena.experiment.config import (
+from fp_arena.search.config import (
     OBJECTIVES,
     ErrorBudget,
     ExperimentConfig,
     PrecisionMap,
 )
-from fp_arena.experiment.inputs import (
+from fp_arena.search.inputs import (
     Noise,
     make_call_args,
     materialize_shape,
     zero_call_args,
 )
-from fp_arena.experiment.instruction_mix import format_mix, instruction_mix
-from fp_arena.experiment.knobs import (
+from fp_arena.search.instruction_mix import format_mix, instruction_mix
+from fp_arena.search.knobs import (
     _BITS,
     DEFAULT_LADDER,
     CanonicalKey,
@@ -73,7 +73,7 @@ from fp_arena.experiment.knobs import (
     find_knobs,
     inferred_precisions,
 )
-from fp_arena.experiment.results import (
+from fp_arena.search.results import (
     ErrorStats,
     PerfResult,
     SearchCandidate,
@@ -81,8 +81,8 @@ from fp_arena.experiment.results import (
     SearchFailure,
     SearchResult,
 )
-from fp_arena.experiment.retarget import resolve_vectorize_config
-from fp_arena.experiment.runner import (
+from fp_arena.search.retarget import resolve_vectorize_config
+from fp_arena.search.runner import (
     _accumulate,
     _checked_outputs,
     _collect_outputs,
@@ -93,10 +93,10 @@ from fp_arena.experiment.runner import (
     compile_reference,
     measure,
 )
-from fp_arena.experiment.screening import screen
-from fp_arena.experiment.selection import _objective_ms, check
-from fp_arena.experiment.store import ResultStore
-from fp_arena.experiment.timers import insert_timers, timer_categories
+from fp_arena.search.screening import screen
+from fp_arena.search.selection import _objective_ms, check
+from fp_arena.search.store import ResultStore
+from fp_arena.search.timers import insert_timers, timer_categories
 
 
 @dataclass

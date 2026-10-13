@@ -12,17 +12,17 @@ from dataclasses import dataclass, field
 
 from scipy import stats
 
-from fp_arena.experiment.config import (
+from fp_arena.search.config import (
     ErrorBudget,
     ExperimentConfig,
     PerturbationAnalysisConfig,
 )
-from fp_arena.experiment.inputs import Noise
-from fp_arena.experiment.knobs import Knob
-from fp_arena.experiment.results import METRICS, ErrorStats
-from fp_arena.experiment.runner import _checked_outputs, run_perturbation
-from fp_arena.experiment.selection import check, noise_floor, resolve_limits
-from fp_arena.experiment.store import ResultStore
+from fp_arena.search.inputs import Noise
+from fp_arena.search.knobs import Knob
+from fp_arena.search.results import METRICS, ErrorStats
+from fp_arena.search.runner import _checked_outputs, run_perturbation
+from fp_arena.search.selection import check, noise_floor, resolve_limits
+from fp_arena.search.store import ResultStore
 
 #: Unit roundoff of fp16 / fp32 (half an ulp at 1.0).
 FP16_ULP = 2.0**-11

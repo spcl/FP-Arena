@@ -11,7 +11,7 @@ import pytest
 from scipy import stats
 
 import fp_arena  # noqa: F401
-from fp_arena.experiment import (
+from fp_arena.search import (
     CONSTANTS_KEY,
     METRICS,
     ConstraintResult,
@@ -36,19 +36,19 @@ from fp_arena.experiment import (
     run_perturbation,
     run_selection,
 )
-from fp_arena.experiment.inputs import make_call_args
-from fp_arena.experiment.retarget import apply_precision, apply_target, fresh_sdfg
-from fp_arena.experiment.runner import (
+from fp_arena.search.inputs import make_call_args
+from fp_arena.search.retarget import apply_precision, apply_target, fresh_sdfg
+from fp_arena.search.runner import (
     _accumulate,
     _finalize,
     _new_acc,
 )
-from fp_arena.experiment.selection import (
+from fp_arena.search.selection import (
     check,
     noise_floor,
     resolve_limits,
 )
-from fp_arena.experiment.timers import (
+from fp_arena.search.timers import (
     PHASES,
     insert_timers,
     phase_breakdown,
@@ -1105,7 +1105,7 @@ def test_callable_init_function_covers_constant_and_fixed_data():
 
 
 def test_severity_of_a_decibel_metric_is_an_amplitude_ratio():
-    from fp_arena.experiment.screening import _severity
+    from fp_arena.search.screening import _severity
 
     limits = {"snr_var": {"c": 60.0}}
     # 20 dB above the limit is a 10x smaller error amplitude.
@@ -1118,7 +1118,7 @@ def test_severity_of_a_decibel_metric_is_an_amplitude_ratio():
 
 
 def test_severity_of_a_non_finite_linear_error_is_infinite():
-    from fp_arena.experiment.screening import _severity
+    from fp_arena.search.screening import _severity
 
     limits = {"l2_norm": {"c": 1e-2}}
     assert _severity({"c": _stats(l2_norm=5e-3)}, limits) == pytest.approx(0.5)

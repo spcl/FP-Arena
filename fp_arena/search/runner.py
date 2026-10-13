@@ -18,28 +18,28 @@ import dace
 import numpy as np
 from tqdm.auto import tqdm
 
-from fp_arena.experiment.config import (
+from fp_arena.search.config import (
     ErrorAnalysisConfig,
     PerformanceAnalysisConfig,
     PerturbationAnalysisConfig,
     PrecisionMap,
 )
-from fp_arena.experiment.inputs import make_call_args
-from fp_arena.experiment.results import (
+from fp_arena.search.inputs import make_call_args
+from fp_arena.search.results import (
     ErrorResult,
     ErrorStats,
     PerfResult,
     PerturbationResult,
 )
-from fp_arena.experiment.retarget import (
+from fp_arena.search.retarget import (
     apply_precision,
     apply_reference,
     apply_target,
     fresh_sdfg,
     resolve_vectorize_config,
 )
-from fp_arena.experiment.store import ResultStore
-from fp_arena.experiment.timers import (
+from fp_arena.search.store import ResultStore
+from fp_arena.search.timers import (
     insert_timers,
     phase_breakdown,
     read_timers,
@@ -272,7 +272,7 @@ def build_candidate_sdfg(experiment, pin_map: PrecisionMap) -> dace.SDFG:
     Retarget one precision point into its own SDFG (unique build folder).
 
     Returns the SDFG, not the compiled handle, so the caller can insert timers
-    (:func:`fp_arena.experiment.timers.insert_timers`) before ``.compile()``.
+    (:func:`fp_arena.search.timers.insert_timers`) before ``.compile()``.
     """
     sdfg = fresh_sdfg(experiment)
     apply_precision(sdfg, pin_map, experiment.promotion_rules)

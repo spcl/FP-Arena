@@ -13,10 +13,10 @@ from typing import TYPE_CHECKING, Any
 import dace
 from dace.transformation.passes.vectorization.config import VectorizeConfig
 
-from fp_arena.experiment.inputs import DistributionLike, Noise
+from fp_arena.search.inputs import DistributionLike, Noise
 
 if TYPE_CHECKING:
-    from fp_arena.experiment.results import ErrorStats
+    from fp_arena.search.results import ErrorStats
 
 #: ``{array_name: precision_key}`` -- pins a subset of arrays to a target format.
 PrecisionMap = dict[str, str]
@@ -167,7 +167,7 @@ class ErrorBudget:
         ErrorBudget(from_perturbation={"rel_max": 1.0})
 
     :param limits: ``{metric: limit}`` or ``{metric: {array: limit}}``; metrics
-        are :class:`~fp_arena.experiment.results.ErrorStats` field names.
+        are :class:`~fp_arena.search.results.ErrorStats` field names.
     :param from_perturbation: ``{metric: factor}`` scaling the noise floor.
     :param arrays: restrict the checked output arrays; ``None`` checks all.
     :param predicate: extra feasibility test on the point's per-array stats,
@@ -186,7 +186,7 @@ class ErrorBudget:
                 "and/or a predicate (otherwise every point is trivially feasible)"
             )
         # Local import: results imports PrecisionMap from this module.
-        from fp_arena.experiment.results import METRICS
+        from fp_arena.search.results import METRICS
 
         for metric in (*self.limits, *(self.from_perturbation or {})):
             if metric not in METRICS:

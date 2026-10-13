@@ -5,15 +5,15 @@ Selection: the fastest per-array precision assignment that stays inside an error
 A meta-analysis -- it executes nothing itself, it drives the other three over an
 enumerated search space and takes an argmin subject to a constraint:
 
-* :func:`~fp_arena.experiment.runner.run_perturbation` at the baseline point
+* :func:`~fp_arena.search.runner.run_perturbation` at the baseline point
   measures how far input uncertainty alone moves each output. That *noise floor*
   is a property of the problem's conditioning, which is why it is measured once,
   at ``speedup_baseline``, rather than per candidate -- measured at a
   candidate it would conflate the problem's sensitivity with that candidate's
   rounding, and a budget derived from it would vary with the point it is judging.
-* :func:`~fp_arena.experiment.runner.run_error` measures every candidate against
+* :func:`~fp_arena.search.runner.run_error` measures every candidate against
   the reference; the budget turns those into a feasible set.
-* :func:`~fp_arena.experiment.runner.run_performance` times only the survivors.
+* :func:`~fp_arena.search.runner.run_performance` times only the survivors.
 
 Error runs at every point because error *is* the constraint; performance runs
 only at the feasible ones because timing a rejected point buys nothing.
@@ -25,7 +25,7 @@ import math
 import statistics
 from collections.abc import Sequence
 
-from fp_arena.experiment.config import (
+from fp_arena.search.config import (
     CONSTANTS_KEY,
     SCALARS_KEY,
     ErrorAnalysisConfig,
@@ -35,7 +35,7 @@ from fp_arena.experiment.config import (
     PrecisionMap,
     SelectionAnalysisConfig,
 )
-from fp_arena.experiment.results import (
+from fp_arena.search.results import (
     METRICS,
     ConstraintResult,
     ErrorStats,
@@ -44,9 +44,9 @@ from fp_arena.experiment.results import (
     SelectionCandidate,
     SelectionResult,
 )
-from fp_arena.experiment.retarget import resolve_vectorize_config
-from fp_arena.experiment.runner import run_error, run_performance, run_perturbation
-from fp_arena.experiment.store import ResultStore
+from fp_arena.search.retarget import resolve_vectorize_config
+from fp_arena.search.runner import run_error, run_performance, run_perturbation
+from fp_arena.search.store import ResultStore
 
 #: A precision point's identity, for matching it across the three analyses.
 #: Positional matching would misalign -- the timed list is a subset.

@@ -11,10 +11,10 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from fp_arena.experiment.config import PrecisionMap
+from fp_arena.search.config import PrecisionMap
 
 if TYPE_CHECKING:
-    from fp_arena.experiment.knobs import Knob
+    from fp_arena.search.knobs import Knob
 
 
 @dataclass
@@ -311,7 +311,7 @@ class SearchEvaluation:
 
 @dataclass
 class SearchResult:
-    """The outcome of a selection search (``fp_arena.experiment.search``)."""
+    """The outcome of a selection search (``fp_arena.search.search``)."""
 
     #: The fastest feasible config, or ``None`` if none was feasible.
     best: dict[str, str] | None

@@ -31,7 +31,7 @@ import numpy as np
 from scipy import stats as _stats
 
 if TYPE_CHECKING:
-    from fp_arena.experiment.config import ExperimentConfig
+    from fp_arena.search.config import ExperimentConfig
 
 #: Default generator for unspecified read arrays (uniform on [0, 1]).
 _DEFAULT_INPUT = _stats.uniform(0.0, 1.0)

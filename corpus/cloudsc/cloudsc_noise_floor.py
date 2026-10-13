@@ -11,17 +11,17 @@ from typing import Any
 
 import dace
 import numpy as np
-
-from corpus.cloudsc_reference_data import (
+from corpus.cloudsc.cloudsc_reference_data import (
     REFERENCE_KLEV,
     REFERENCE_KLON,
     reference_free_symbols,
     reference_input_distributions,
     reference_scalar_args,
 )
-from fp_arena.experiment import ExperimentConfig
-from fp_arena.experiment.inputs import make_call_args
-from fp_arena.experiment.runner import (
+
+from fp_arena.search import ExperimentConfig
+from fp_arena.search.inputs import make_call_args
+from fp_arena.search.runner import (
     _accumulate,
     _copy_args,
     _finalize,

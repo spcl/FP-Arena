@@ -13,15 +13,15 @@ from pathlib import Path
 
 import dace as dc
 
-from corpus.cloudsc_noise_floor import CLOUDSC_STATES, timestep_snr_floor
-from corpus.cloudsc_reference_data import (
+from corpus.cloudsc.cloudsc_noise_floor import CLOUDSC_STATES, timestep_snr_floor
+from corpus.cloudsc.cloudsc_reference_data import (
     REFERENCE_KLEV,
     reference_free_symbols,
     reference_input_distributions,
     reference_scalar_args,
 )
-from corpus.offload_cloudsc_to_gpu import offload_cloudsc_to_gpu
-from fp_arena.experiment import (
+from corpus.cloudsc.offload_cloudsc_to_gpu import offload_cloudsc_to_gpu
+from fp_arena.search import (
     ErrorBudget,
     ExperimentConfig,
     KnobSelection,
@@ -37,7 +37,7 @@ KLEV = REFERENCE_KLEV
 PTSPHY: float | None = None
 
 # canon_cpu from the dace extended branch (tests/corpus/cloudsc/reproduce.py).
-SDFG_PATH = Path(__file__).resolve().parent.parent / "corpus" / "CLOUDSC-CPU.sdfg"
+SDFG_PATH = Path(__file__).resolve().parent.parent / "corpus" / "cloudsc" / "CLOUDSC-CPU.sdfg"
 
 
 def main() -> None:

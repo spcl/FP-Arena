@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 
 import dace
 
-from fp_arena.experiment import registry
-from fp_arena.experiment.config import (
+from fp_arena.search import registry
+from fp_arena.search.config import (
     CONSTANTS_KEY,
     SCALARS_KEY,
     ExperimentConfig,
     PrecisionMap,
 )
-from fp_arena.experiment.retarget import (
+from fp_arena.search.retarget import (
     apply_precision,
     fresh_sdfg,
     scalar_temporaries,

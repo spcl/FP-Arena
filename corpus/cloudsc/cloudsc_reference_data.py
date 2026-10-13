@@ -23,7 +23,7 @@ CLOUDSC_SPECIES: dict[str, int] = {
 REFERENCE_KLEV: int = 137
 REFERENCE_KLON: int = 100
 
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "cloudsc"
+_DATA_DIR = Path(__file__).resolve().parent
 
 #: YDTHF constant names in ``input.h5``; every other bare name is YDCST.
 _YDTHF_NAMES: frozenset[str] = frozenset(
@@ -53,7 +53,7 @@ _YDTHF_NAMES: frozenset[str] = frozenset(
 
 @lru_cache(maxsize=2)
 def _load(kind: str) -> dict[str, np.ndarray]:
-    """``data/cloudsc/{kind}.h5`` as ``{lowercase name: array}``, booleans widened to int32."""
+    """``corpus/cloudsc/{kind}.h5`` as ``{lowercase name: array}``, booleans widened to int32."""
     state: dict[str, np.ndarray] = {}
     with h5py.File(_DATA_DIR / f"{kind}.h5", "r") as handle:
         for name, dataset in handle.items():

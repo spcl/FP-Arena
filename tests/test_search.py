@@ -9,7 +9,7 @@ import pytest
 from dace.codegen.exceptions import CompilationError
 
 import fp_arena  # noqa: F401
-from fp_arena.experiment import (
+from fp_arena.search import (
     CONSTANTS_KEY,
     ErrorBudget,
     ExperimentConfig,
@@ -20,8 +20,8 @@ from fp_arena.experiment import (
     run_search,
     search,
 )
-from fp_arena.experiment.knobs import canonical_typing
-from fp_arena.experiment.search import format_search
+from fp_arena.search.knobs import canonical_typing
+from fp_arena.search.search import format_search
 
 N = dace.symbol("N")
 

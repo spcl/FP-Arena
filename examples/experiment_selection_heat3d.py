@@ -10,7 +10,7 @@ from dace.transformation.interstate import LoopToMap
 from scipy import stats
 
 from corpus.heat3d import heat3d_kernel
-from fp_arena.experiment import (
+from fp_arena.search import (
     CONSTANTS_KEY,
     ErrorBudget,
     ExperimentConfig,

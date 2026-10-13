@@ -14,7 +14,7 @@ import numpy as np
 from dace.sdfg import utils as sdfg_utils
 
 from fp_arena.environments import Timers, TimersGPU
-from fp_arena.experiment.retarget import _transfer_direction
+from fp_arena.search.retarget import _transfer_direction
 
 #: Phases in pipeline order; each maps to a ``<phase>_times`` field of PerfResult.
 PHASES = ("h2d", "cast_in", "kernel", "cast_out", "d2h")

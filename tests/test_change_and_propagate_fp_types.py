@@ -12,7 +12,7 @@ from dace.transformation.dataflow import MapFusion
 
 from corpus.heat3d import heat3d_kernel
 from fp_arena.dtypes import mpfr
-from fp_arena.experiment.retarget import apply_target
+from fp_arena.search.retarget import apply_target
 from fp_arena.transformations.change_and_propagate_fp_types import (
     DEFAULT_PROMOTION_RULES,
     change_and_propagate_fp_types,
