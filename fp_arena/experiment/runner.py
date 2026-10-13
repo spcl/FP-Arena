@@ -221,7 +221,7 @@ def _phase_breakdown(
     report = sdfg.get_latest_report()
     # Map each state's report name -> phase category.
     cat_of: Dict[str, str] = {}
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         cat_of.setdefault(f"State {state.label}", _classify_state(sdfg, state))
 
     def series(category: str) -> List[float]:
@@ -360,7 +360,7 @@ def run_performance(
             apply_target(sdfg, target, gpu_block_size=cfg.experiment.gpu_block_size)
             _distinguish(sdfg, _pin_tag(pin_map))
             # Time every state; classified into a phase at readout.
-            for state in sdfg.all_states():
+            for state in sdfg.states():
                 state.instrument = provider
             csdfg = sdfg.compile()
             sdfg.clear_instrumentation_reports()

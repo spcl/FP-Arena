@@ -136,7 +136,7 @@ def _collect_sdfgs(sdfg: dace.SDFG) -> List[dace.SDFG]:
 def _warn_unlowerable(sdfgs: List[dace.SDFG]) -> None:
     fp_symbols: Set[str] = set()
     for sd in sdfgs:
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if not isinstance(node, nodes.NestedSDFG):
                     continue
@@ -167,7 +167,7 @@ def _unify_nested_boundaries(sdfgs: List[dace.SDFG]) -> _UnionFind:
     uf = _UnionFind()
     for sd in sdfgs:
         sid = id(sd)
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if not isinstance(node, nodes.NestedSDFG):
                     continue
@@ -434,7 +434,7 @@ def _cast_tasklet(
 # AccessNode -> AccessNode copies get an elementwise cast map over the
 # copied subset.
 def _insert_edge_casts(sdfg: dace.SDFG) -> None:
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for i, e in enumerate(list(state.edges())):
             if e.data is None or e.data.data is None:
                 continue
@@ -717,7 +717,7 @@ class _FloatConstantCaster(ast.NodeTransformer):
 def _cast_float_constants(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> None:
     caster = _FloatConstantCaster(dtype.to_string())
     for sd in sdfg.all_sdfgs_recursive():
-        for state in sd.all_states():
+        for state in sd.states():
             for node in state.nodes():
                 if not (
                     isinstance(node, nodes.Tasklet)

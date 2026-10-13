@@ -29,7 +29,7 @@ def _repl_recursive_with_connectors(sdfg: dace.SDFG, repl_dict: Dict[str, str]):
     """
     sdfg.replace_dict(repl_dict)
 
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for node in state.nodes():
             if isinstance(node, dace.nodes.NestedSDFG):
                 in_conns = copy.deepcopy(node.in_connectors)
@@ -64,7 +64,7 @@ def _get_array_view_paths(sdfg: dace.SDFG, arrays_to_replace: Set[str]) -> Dict[
     """
     # TODO: Inefficient implementation, improve it later.
     view_sets = {name: set() for name in arrays_to_replace}
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for node in state.nodes():
             for node2 in state.nodes():
                 if node == node2:
@@ -109,7 +109,7 @@ def _change_fp_type_recursive(sdfg: dace.SDFG, src_fptype: dace.dtypes.typeclass
     # example if an input is kept fp64, output fp32, and an access node connects
     # to both, the generated copy will cause problems -- though that pattern is
     # rare, as it makes no sense.
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for node in state.data_nodes():
             ietypes = {sdfg.arrays[ie.data.data].dtype for ie in state.in_edges(node) if ie.data is not None}
             oetypes = {sdfg.arrays[oe.data.data].dtype for oe in state.out_edges(node) if oe.data is not None}
@@ -118,7 +118,7 @@ def _change_fp_type_recursive(sdfg: dace.SDFG, src_fptype: dace.dtypes.typeclass
             if any(etype == dst_fptype for etype in etypes):
                 sdfg.arrays[node.data].dtype = dst_fptype
 
-    for state in sdfg.all_states():
+    for state in sdfg.states():
         for node in state.nodes():
             if isinstance(node, dace.nodes.NestedSDFG):
                 # Continue changing FP-types depending on the connectors.

@@ -564,7 +564,7 @@ def test_boundary_cast_inserted_for_fusion():
     sdfg.validate()
     casts = [
         n.label
-        for s in sdfg.all_states()
+        for s in sdfg.states()
         for n in s.nodes()
         if isinstance(n, nodes.Tasklet) and "map_fusion_B_to_B" in n.label
     ]
@@ -754,7 +754,7 @@ def test_boundary_cast_inserted_for_fusion():
     sdfg.validate()
     casts = [
         n.label
-        for s in sdfg.all_states()
+        for s in sdfg.states()
         for n in s.nodes()
         if isinstance(n, nodes.Tasklet) and "map_fusion_B_to_B" in n.label
     ]
@@ -795,7 +795,7 @@ def test_direct_copy_cast_inserted():
 
     casts = [
         node.label
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         for node in st.nodes()
         if isinstance(node, nodes.Tasklet) and node.label.startswith("cast_copy_")
     ]
@@ -891,7 +891,7 @@ def test_nested_uniform_pin_no_boundary_casts():
     sdfg = prog.to_sdfg(simplify=False)
     nsdfg = next(
         n
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         for n in st.nodes()
         if isinstance(n, nodes.NestedSDFG)
     )
@@ -911,14 +911,14 @@ def test_nested_uniform_pin_no_boundary_casts():
         n.label
         for sd in sdfg.all_sdfgs_recursive()
         if sd is not sdfg
-        for st in sd.all_states()
+        for st in sd.states()
         for n in st.nodes()
         if isinstance(n, nodes.Tasklet) and n.label.startswith("cast_")
     ]
     assert not inner_casts, inner_casts
     outer_casts_elsewhere = [
         n.label
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         if not st.label.startswith(("copy_in", "copy_out"))
         for n in st.nodes()
         if isinstance(n, nodes.Tasklet) and n.label.startswith("cast_")
@@ -949,7 +949,7 @@ def test_nested_pin_propagates_through_boundary():
     sdfg = prog.to_sdfg(simplify=False)
     nsdfg = next(
         n
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         for n in st.nodes()
         if isinstance(n, nodes.NestedSDFG)
     )
@@ -986,7 +986,7 @@ def test_nested_inout_connector():
     sdfg = prog.to_sdfg(simplify=False)
     nsdfg = next(
         n
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         for n in st.nodes()
         if isinstance(n, nodes.NestedSDFG)
     )
@@ -1020,7 +1020,7 @@ def test_nested_mixed_precision_promotes():
     sdfg = prog.to_sdfg(simplify=False)
     nsdfg = next(
         n
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         for n in st.nodes()
         if isinstance(n, nodes.NestedSDFG)
     )
@@ -1090,7 +1090,7 @@ def test_nested_constant_type_reaches_inner_tasklets():
     sdfg = prog.to_sdfg(simplify=False)
     nsdfg = next(
         n
-        for st in sdfg.all_states()
+        for st in sdfg.states()
         for n in st.nodes()
         if isinstance(n, nodes.NestedSDFG)
     )
@@ -1105,7 +1105,7 @@ def test_nested_constant_type_reaches_inner_tasklets():
         n.code.as_string
         for sd in sdfg.all_sdfgs_recursive()
         if sd is not sdfg
-        for st in sd.all_states()
+        for st in sd.states()
         for n in st.nodes()
         if isinstance(n, nodes.Tasklet) and n.language == dace.Language.Python
     )
