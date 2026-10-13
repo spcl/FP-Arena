@@ -19,38 +19,16 @@ from typing import Dict, Set, Union
 import dace
 
 
-def _repl_recursive_with_connectors(sdfg: dace.SDFG, repl_dict: Dict[str, str]):
-    """
-    Rename data containers throughout ``sdfg``, propagating the renames across
-    nested-SDFG connectors and inner data descriptors.
+def _is_read(sdfg: dace.SDFG, name: str) -> bool:
+    """Whether ``sdfg`` reads ``name``: an access node it leaves, or a reduction (``wcr``) into it."""
+    return any(
+        (node.data == name and state.out_degree(node) > 0) for state in sdfg.states() for node in state.data_nodes()
+    ) or any(edge.data.data == name and edge.data.wcr is not None for state in sdfg.states() for edge in state.edges())
 
-    :param sdfg: the SDFG whose data containers are renamed.
-    :param repl_dict: mapping from old data name to new data name.
-    """
-    sdfg.replace_dict(repl_dict)
 
-    for state in sdfg.states():
-        for node in state.nodes():
-            if isinstance(node, dace.nodes.NestedSDFG):
-                in_conns = copy.deepcopy(node.in_connectors)
-                out_conns = copy.deepcopy(node.out_connectors)
-                for in_conn in in_conns:
-                    if in_conn in repl_dict:
-                        node.remove_in_connector(in_conn)
-                        node.add_in_connector(repl_dict[in_conn], force=True)
-                for out_conn in out_conns:
-                    if out_conn in repl_dict:
-                        node.remove_out_connector(out_conn)
-                        node.add_out_connector(repl_dict[out_conn], force=True)
-
-                inner_sdfg = node.sdfg
-                for name, arr in inner_sdfg.arrays.items():
-                    if name in repl_dict:
-                        inner_sdfg.remove_data(name, validate=False)
-                        new_arr = copy.deepcopy(arr)
-                        inner_sdfg.add_datadesc(name, new_arr)
-
-                _repl_recursive_with_connectors(node.sdfg, repl_dict)
+def _is_written(sdfg: dace.SDFG, name: str) -> bool:
+    """Whether ``sdfg`` writes ``name``: an access node entered by an edge."""
+    return any(node.data == name and state.in_degree(node) > 0 for state in sdfg.states() for node in state.data_nodes())
 
 
 def _get_array_view_paths(sdfg: dace.SDFG, arrays_to_replace: Set[str]) -> Dict[str, Set[str]]:
@@ -79,7 +57,7 @@ def _get_array_view_paths(sdfg: dace.SDFG, arrays_to_replace: Set[str]) -> Dict[
 
 
 def _change_fp_type_recursive(sdfg: dace.SDFG, src_fptype: dace.dtypes.typeclass, dst_fptype: dace.dtypes.typeclass,
-                              arrays_to_replace: Union[Set[str], None]):
+                              arrays_to_replace: Union[Set[str], None]) -> Set[str]:
     """
     Recursively change the FP type of the selected arrays (or all arrays of
     ``src_fptype`` when ``arrays_to_replace`` is ``None``), descending into
@@ -89,6 +67,7 @@ def _change_fp_type_recursive(sdfg: dace.SDFG, src_fptype: dace.dtypes.typeclass
     :param src_fptype: the source floating-point type to replace.
     :param dst_fptype: the destination floating-point type.
     :param arrays_to_replace: array names to replace, or ``None`` for all.
+    :returns: the names of ``sdfg``'s containers whose type changed (the views and copies they reach included).
     """
     # Collect all views that depend on the arrays and add them to the set.
     if arrays_to_replace is not None:
@@ -103,20 +82,24 @@ def _change_fp_type_recursive(sdfg: dace.SDFG, src_fptype: dace.dtypes.typeclass
     for name in cur_arrays_to_replace:
         sdfg.arrays[name].dtype = dst_fptype
 
-    # For all non-transients that read from or write to these arrays, change
-    # their FP type accordingly.
-    # TODO: this is not fail-safe, and some casts might need to be inserted. For
-    # example if an input is kept fp64, output fp32, and an access node connects
-    # to both, the generated copy will cause problems -- though that pattern is
-    # rare, as it makes no sense.
-    for state in sdfg.states():
-        for node in state.data_nodes():
-            ietypes = {sdfg.arrays[ie.data.data].dtype for ie in state.in_edges(node) if ie.data is not None}
-            oetypes = {sdfg.arrays[oe.data.data].dtype for oe in state.out_edges(node) if oe.data is not None}
-
-            etypes = ietypes.union(oetypes)
-            if any(etype == dst_fptype for etype in etypes):
-                sdfg.arrays[node.data].dtype = dst_fptype
+    # A container copied directly to or from a replaced one (an access node to an access node, no tasklet
+    # in between to cast) must take the new type too; follow such copies to a fixpoint. Only replaced
+    # arrays spread the type: an unrelated array that already had ``dst_fptype`` changes nothing.
+    changed = True
+    while changed:
+        changed = False
+        for state in sdfg.states():
+            for edge in state.edges():
+                ends = (edge.src, edge.dst)
+                if not all(isinstance(end, dace.nodes.AccessNode) for end in ends):
+                    continue
+                names = {end.data for end in ends}
+                if names & cur_arrays_to_replace and not names <= cur_arrays_to_replace:
+                    for name in names - cur_arrays_to_replace:
+                        if sdfg.arrays[name].dtype == src_fptype:
+                            sdfg.arrays[name].dtype = dst_fptype
+                    cur_arrays_to_replace = cur_arrays_to_replace | names
+                    changed = True
 
     for state in sdfg.states():
         for node in state.nodes():
@@ -135,6 +118,7 @@ def _change_fp_type_recursive(sdfg: dace.SDFG, src_fptype: dace.dtypes.typeclass
                     _change_fp_type_recursive(node.sdfg, src_fptype, dst_fptype, new_replacements)
                 else:
                     _change_fp_type_recursive(node.sdfg, src_fptype, dst_fptype, None)
+    return cur_arrays_to_replace
 
 
 def change_fptype(sdfg: dace.SDFG,
@@ -165,22 +149,23 @@ def change_fptype(sdfg: dace.SDFG,
                 raise ValueError(f"Array {name} from the passed inputs has fptype {arr.dtype} but function was "
                                  f"provided src fp type ({src_fptype})")
 
-    # Compute the affected set before changing FP types.
-    cur_arrays_to_replace = ({k for k, v in sdfg.arrays.items()
-                              if v.dtype == src_fptype} if arrays_to_replace is None else arrays_to_replace)
-
-    _change_fp_type_recursive(sdfg, src_fptype, dst_fptype, arrays_to_replace)
+    cur_arrays_to_replace = _change_fp_type_recursive(sdfg, src_fptype, dst_fptype, arrays_to_replace)
 
     # Replace all occurrences of the arrays in the SDFG with their replaced
     # counterparts, keeping the original interface via copy-in/copy-out.
     if cast_in_and_out_data is True:
         # If we cast in data, the interface stays the same, we add new arrays,
         # e.g. A -> A_<dst_fptype.to_string()>.
-        array_name_mapping = dict()
-        for name in cur_arrays_to_replace:
-            array_name_mapping[name] = f"{name}_{dst_fptype.to_string()}"
+        array_name_mapping = {name: f"{name}_{dst_fptype.to_string()}" for name in sorted(cur_arrays_to_replace)}
 
-        _repl_recursive_with_connectors(sdfg, array_name_mapping)
+        # Read / written before renaming: a read-only argument must not be copied back out (that would
+        # round the caller's data), a write-only one needs no copy in unless it is only written in part.
+        read = {name for name in array_name_mapping if _is_read(sdfg, name)}
+        written = {name for name in array_name_mapping if _is_written(sdfg, name)}
+
+        # Names are local to an SDFG: a nested SDFG keeps its connectors and inner arrays, only the
+        # outer containers are renamed.
+        sdfg.replace_dict(array_name_mapping)
 
         # Copy-in and copy-out extensions. For all arrays that we made
         # transient, ensure we add the appropriate copy-in and copy-out nodes.
@@ -191,14 +176,14 @@ def change_fptype(sdfg: dace.SDFG,
         copy_out_state = sdfg.add_state_after(state=last_block, label="copy_out")
 
         # Add a new array descriptor for each transient array, and add copy-in or copy-out.
-        src_dst_pairs = set()
+        src_dst_pairs = []
         for original_arr_name, casted_arr_name in array_name_mapping.items():
             arr = sdfg.arrays[casted_arr_name]
             original_arr_desc = copy.deepcopy(arr)  # Transientness does not change for this array
             arr.transient = True  # Always transient due to copy-in
             original_arr_desc.dtype = src_fptype  # Change back to the original fp type
             sdfg.add_datadesc(name=original_arr_name, datadesc=original_arr_desc, find_new_name=False)
-            src_dst_pairs.add(((casted_arr_name, arr), (original_arr_name, original_arr_desc)))
+            src_dst_pairs.append(((casted_arr_name, arr), (original_arr_name, original_arr_desc)))
 
         def _add_copy_map(state: dace.SDFGState, src_arr_name: str, src_arr: dace.data.Data, dst_arr_name: str,
                           dst_arr: dace.data.Data):
@@ -260,13 +245,16 @@ def change_fptype(sdfg: dace.SDFG,
             # No need to copy from transient to transient.
             if transient_arr.transient and nontransient_arr.transient:
                 continue
-            _add_copy_map(state=copy_in_state,
-                          src_arr_name=nontransient_arr_name,
-                          src_arr=nontransient_arr,
-                          dst_arr_name=transient_arr_name,
-                          dst_arr=transient_arr)
-            _add_copy_map(state=copy_out_state,
-                          src_arr_name=transient_arr_name,
-                          src_arr=transient_arr,
-                          dst_arr_name=nontransient_arr_name,
-                          dst_arr=nontransient_arr)
+            if nontransient_arr_name in read or nontransient_arr_name in written:
+                # A write-only array is copied in too: its writes may cover it only in part.
+                _add_copy_map(state=copy_in_state,
+                              src_arr_name=nontransient_arr_name,
+                              src_arr=nontransient_arr,
+                              dst_arr_name=transient_arr_name,
+                              dst_arr=transient_arr)
+            if nontransient_arr_name in written:
+                _add_copy_map(state=copy_out_state,
+                              src_arr_name=transient_arr_name,
+                              src_arr=transient_arr,
+                              dst_arr_name=nontransient_arr_name,
+                              dst_arr=nontransient_arr)

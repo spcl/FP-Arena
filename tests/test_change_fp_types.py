@@ -58,3 +58,34 @@ def test_retarget_to_float32sr_matches_reference():
     # Stochastic rounding is unbiased, so single-add results stay within a
     # couple of float32 ULPs of the float64 reference.
     assert np.allclose(C32, ref, atol=1e-6)
+
+
+def test_a_read_only_input_is_not_rounded_by_the_copy_back():
+    """cast_in_and_out_data copies an argument back out only if the program writes it: the read-only inputs
+    keep their float64 bits, and the result is the float32 computation widened back."""
+    rng = np.random.default_rng(1)
+    A, B = rng.random(64), rng.random(64)
+    A0, B0 = A.copy(), B.copy()
+    C = np.zeros(64)
+    sdfg = _axpy.to_sdfg()
+    change_fptype(sdfg, dace.float64, dace.float32, cast_in_and_out_data=True)
+    sdfg(A=A, B=B, C=C)
+    assert np.array_equal(A, A0) and np.array_equal(B, B0)
+    assert np.allclose(C, A0.astype(np.float32) + B0.astype(np.float32), rtol=1e-7)
+
+
+@dace.program
+def _mixed(A: dace.float64[64], B: dace.float32[64], C: dace.float32[64]):
+    for i in dace.map[0:64]:
+        C[i] = B[i] * 2.0
+    for i in dace.map[0:64]:
+        A[i] = A[i] + 1.0
+
+
+def test_only_the_named_arrays_and_their_copies_change_type():
+    """Retyping A to float32 leaves the arrays that already were float32, and the ones they touch, alone."""
+    sdfg = _mixed.to_sdfg()
+    change_fptype(sdfg, dace.float64, dace.float32, arrays_to_replace={"A"})
+    assert sdfg.arrays["A"].dtype == dace.float32
+    assert {name: str(sdfg.arrays[name].dtype) for name in ("B", "C")} == {"B": "float", "C": "float"}
+    sdfg.validate()
