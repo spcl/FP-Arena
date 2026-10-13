@@ -11,6 +11,8 @@ diffusion (hdiff) stencil that stays within budget, using the pruning selection
 ``--snr-db`` sets the error budget: every output must stay at least this close
 to the fp64 result, as a variance SNR in dB (default 60)
 ``--exhaustive`` evaluates and times every config instead of searching.
+``--prune-above-feasible`` also skips configs a feasible config lowers at least
+as far (assumes more lowering is never slower).
 Results go to ``hdiff_<knobs>_<level>dB-<job id>.db`` (``..._exhaustive-<job id>.db`` with
 ``--exhaustive``), one database per run.
 """
@@ -40,7 +42,7 @@ from fp_arena.experiment import (
     run_search,
 )
 
-I, J, K = 1024, 1024, 128
+I, J, K = 2048, 1024, 512
 
 
 INPUTS = {
@@ -71,6 +73,13 @@ def main() -> None:
         "--exhaustive",
         action="store_true",
         help="evaluate and time every config of the lattice instead of searching ",
+    )
+    parser.add_argument(
+        "--prune-above-feasible",
+        action="store_true",
+        help="skip configs a feasible config lowers at least as far (assumes more "
+        "lowering is never slower); the search then stops at the most-lowered "
+        "feasible configs instead of running to exhaustion.",
     )
     parser.add_argument(
         "--snr-db",
@@ -124,13 +133,14 @@ def main() -> None:
         budget=budget,
         knobs=knob_selection,
         reference="fp64",
-        n_samples=10,
+        n_samples=7,
         n_warmup=3,
         n_reps=10,
         objective="kernel",
         compute_budget=args.max_configs,
         devices=[0, 1, 2, 3],
         exhaustive=args.exhaustive,
+        prune_above_feasible=args.prune_above_feasible,
         name=run_name,
     )
 
