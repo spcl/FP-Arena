@@ -843,7 +843,7 @@ def _dace_cast(node: ast.expr, typename: str) -> ast.Call:
     )
 
 
-# Wraps every float literal in ``expr = dace.<typename>(literal)``.
+# Wraps every float literal as ``dace.<typename>(literal)``.
 class _FloatConstantCaster(ast.NodeTransformer):
     def __init__(self, typename: str) -> None:
         self._typename = typename
@@ -1384,7 +1384,6 @@ def change_and_propagate_fp_types(
 
         sdfg.add_datadesc(name=orig_name, datadesc=orig_desc)
 
-    # TODO: This is currently inefficient, copies all changed inputs for each sink state.
     for sink in sdfg.sink_nodes():
         copy_out_state = None
         for orig_name, casted_name in repl_dict.items():

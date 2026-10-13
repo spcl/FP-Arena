@@ -9,9 +9,10 @@ Flow:
 2. Seed a per-input candidate for each safe input (based on perturbation), and
    start a chain for each wide seed (all safe inputs, all fp32, all fp16).
 3. Prioritise by benefit (big, low-sensitivity arrays lowered first) defined by the scoring function.
-4. Evaluate: error-check each candidate; infeasible prunes its down-set,
-   feasible is timed and expands its one-step-lower neighbours. A candidate that
-   fails to build is recorded in ``SearchResult.failures`` and skipped.
+4. Evaluate: error-check each candidate and time it if it meets the numeric
+   limits; infeasible prunes its down-set, feasible expands its one-step-lower
+   neighbours. A candidate that fails to build is recorded in
+   ``SearchResult.failures`` and skipped.
 5. Return the fastest measured feasible config, with a log of every config the
    search settled (``SearchResult.evaluations``).
 
@@ -22,7 +23,7 @@ Chains reach deep configs in big steps instead of one knob per round. A chain
 keeps a base (its last feasible config) and the knobs of its goal still open. It
 tries base + all open knobs; a pass becomes the new base, a fail is split into
 halves tried on the base, and a single knob that fails is retried one rung
-higher, or kept at its original precision. A chain's configs do not expand
+higher, or kept at its highest rung. A chain's configs do not expand
 their one-step neighbours. Only its final base does.
 """
 
@@ -107,7 +108,7 @@ class SelectionSearchConfig:
     :param budget: the accuracy a config must deliver to be feasible.
     :param noise: inputs to perturb for the budget's noise floor (only needed
         when ``budget.from_perturbation`` is set).
-    :param knobs: which knobs are in scope (default sources + constants).
+    :param knobs: which knobs are in scope (default sources only).
     :param reference: the error analysis' high-precision reference.
     :param ladder: the precision ladder, low precision to high.
     :param n_samples: input realisations for error and screening.
@@ -124,8 +125,8 @@ class SelectionSearchConfig:
     :param compile_workers: size of the compile pool that builds and
         compiles candidates ahead of the measurement workers. ``None`` uses
         ``os.cpu_count() - <measurement workers>``.
-    :param compile_ahead: per measurement slot, how many configs may be keyed,
-        compiling, or compiled and waiting for a slot. Bounds how far
+    :param compile_ahead: per measurement slot, how many configs being keyed
+        plus programs compiling or waiting for a slot are allowed. Bounds how far
         compilation runs ahead of measurement, so configs are picked from the
         queue with recent results (pruning, best-first order) in hand.
     :param grade_cpus_per_device: with ``devices``, each measurement worker is
@@ -257,7 +258,7 @@ def _build_samples(
     reads, _ = experiment.program.read_and_write_sets()
     outputs = _checked_outputs(experiment)
     with dace.config.temporary_config():
-        _worker_dace_config(experiment)  # the codegen the workers used to build it with
+        _worker_dace_config(experiment)  # same codegen settings as the workers
         ref = compile_reference(experiment, reference)
     for i, rng in enumerate(_sample_rngs(experiment.seed, n_samples)):
         args = make_call_args(experiment.program, experiment, rng, reads=reads)
@@ -368,9 +369,8 @@ _WORKER: dict = {}
 
 
 def _worker_dace_config(experiment: ExperimentConfig) -> None:
-    """Config shared by both pools. ``use_cache`` lets a measurement worker
-    reload a compile worker's ``.so`` instead of rebuilding it; the CUDA stream
-    setting affects codegen, so it must match on the pool that generates code."""
+    """DaCe config shared by the compile pool, the measurement workers and the
+    reference build. The CUDA stream setting affects codegen, so all must match."""
     dace.Config.set("compiler", "use_cache", value=True)
     if experiment.target == "gpu":
         dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
@@ -686,7 +686,7 @@ def run_search(
         """Settle ``config`` without building it when its outcome is known: pruned
         (fails like an infeasible config it lowers at least as far) or covered
         (passes like a feasible config that lowers it at least as far). A covered
-        config is not expanded: everything above a feasible config is covered.
+        config is not expanded.
         An exhaustive search skips nothing."""
         if cfg.exhaustive:
             return False
@@ -784,8 +784,8 @@ def run_search(
             expand(chain.base)
 
     ctx = mp.get_context("spawn")
-    # Measurement slots: one per device (each pinned + exclusive);
-    # Compilation is split off onto a separate, larger pool of unpinned workers
+    # Measurement slots: one per device (pinned, exclusive). Compilation runs on a
+    # separate pool, pinned to the remaining cores when devices are given.
     devices = cfg.devices if cfg.devices else [None] * max(1, cfg.measure_workers)
     n_slots = len(devices)
     n_compilers = (

@@ -85,7 +85,7 @@ def _new_acc() -> dict[str, float]:
         "sq_ref_sum": 0.0,
         "ref_abs_sum": 0.0,
         "ref_abs_max": 0.0,
-        # Running count / mean / sum of squared deviations of r and of the for snr_var.
+        # Running count, mean and sum of squared deviations of r and of e, for snr_var.
         "var_n": 0,
         "ref_mean": 0.0,
         "ref_m2": 0.0,
@@ -339,8 +339,7 @@ def run_performance(
     vectorization = resolve_vectorize_config(
         target, cfg.experiment.gpu_vectorize, cfg.experiment.gpu_vectorize_config
     )
-    # All work on the default stream, so the GPU timers' per-phase syncs isolate
-    # real work rather than overlapping streams (see runtime/.../timers.h).
+    # Run all GPU work on the default stream, as the search does.
     prev_streams = dace.Config.get("compiler", "cuda", "max_concurrent_streams")
     if target == "gpu":
         dace.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)

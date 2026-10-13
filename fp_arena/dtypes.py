@@ -174,7 +174,7 @@ def _teach_dace_mpfr() -> None:
 
     ``mpfr`` maps to ``numpy.object_``, whose instances are plain Python ints:
     DaCe's type inference (``result_type_of``, used for interstate edge
-    expressions) and its ``Fill`` literals (``python_literal``) both call numpy
+    expressions) and its ``Fill`` literals (``numpy_scalar``) both call numpy
     scalar methods on them and fail. Both are wrapped so an ``mpfr`` operand is
     handled first and everything else keeps DaCe's own behaviour. Idempotent.
     """

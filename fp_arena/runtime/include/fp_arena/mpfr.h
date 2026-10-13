@@ -12,7 +12,7 @@ namespace dace {
 inline unsigned int mpfr_exponent_bits = 0;
 
 // Configure the exponent range for all dace::mpfr values.
-// Uses IEEE-style bias: emax = 2^(bits-1)-1, emin = 1-emax.
+// emax = 2^(bits-1)-1, emin = 1-emax.
 
 inline void set_mpfr_exponent_bits(unsigned int bits) {
   mpfr_exponent_bits = bits;

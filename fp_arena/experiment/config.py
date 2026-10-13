@@ -21,7 +21,8 @@ if TYPE_CHECKING:
 #: ``{array_name: precision_key}`` -- pins a subset of arrays to a target format.
 PrecisionMap = dict[str, str]
 
-#: Reserved :data:`PrecisionMap` key that targets float literals; absent means literals stay fp64.
+#: Reserved :data:`PrecisionMap` key for the program's constants (float literals, constant
+#: fills, read-only float scalars and symbols); absent leaves them unchanged.
 CONSTANTS_KEY = "__constants__"
 
 #: Reserved :data:`PrecisionMap` key that targets every single-element float temporary at once.

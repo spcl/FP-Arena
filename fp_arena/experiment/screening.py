@@ -24,7 +24,7 @@ from fp_arena.experiment.runner import _checked_outputs, run_perturbation
 from fp_arena.experiment.selection import check, noise_floor, resolve_limits
 from fp_arena.experiment.store import ResultStore
 
-#: Relative rounding magnitude of an fp16 / fp32 mantissa (its ulp).
+#: Unit roundoff of fp16 / fp32 (half an ulp at 1.0).
 FP16_ULP = 2.0**-11
 FP32_ULP = 2.0**-24
 
@@ -38,8 +38,8 @@ class Screening:
     :param limits: the resolved budget thresholds, ``{metric: {array: limit}}``.
     :param safe_format: ``{input: lowest format whose probe stays within budget}``;
         inputs with no safe precision are absent.
-    :param sensitivity: ``{input: worst fraction of any limit}``;
-        ``>= 1`` means the probe is already over budget.
+    :param sensitivity: ``{input: worst fraction of any limit its fp16 probe
+        consumes}``; ``> 1`` is over budget, 1.0 if there is no fp16 probe.
     :param probes: what each probe measured, ``{format: {input: {output: stats}}}``.
     """
 
@@ -116,7 +116,7 @@ def screen(
     sensitivity: dict[str, float] = {}
     for knob in source_knobs:
         name = knob.name
-        for fmt in knob.domain[:-1]:  # low precision to high, skipping the original
+        for fmt in knob.domain[:-1]:  # low precision to high, skipping the highest
             errors = probes.get(fmt, {}).get(name)
             if errors is not None and all(c.ok for c in check(errors, limits)):
                 safe_format[name] = fmt
@@ -163,6 +163,6 @@ def _report(
         )
     print(
         f"  {len(safe_format)}/{len(source_knobs)} inputs have a safe format; "
-        "each is seeded as a candidate, plus one with all of them lowered at once",
+        "each is seeded as a candidate; chains lower all safe, all fp32 and all fp16",
         flush=True,
     )

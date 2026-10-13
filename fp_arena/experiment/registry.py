@@ -1,6 +1,6 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """
-Mapping between precision keys and DaCe typeclasses, and the promotion rules for them.
+Mapping between precision keys and DaCe typeclasses.
 """
 
 import re

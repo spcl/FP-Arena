@@ -8,7 +8,7 @@ enumerated search space and takes an argmin subject to a constraint:
 * :func:`~fp_arena.experiment.runner.run_perturbation` at the baseline point
   measures how far input uncertainty alone moves each output. That *noise floor*
   is a property of the problem's conditioning, which is why it is measured once,
-  at the highest-precision point, rather than per candidate -- measured at a
+  at ``speedup_baseline``, rather than per candidate -- measured at a
   candidate it would conflate the problem's sensitivity with that candidate's
   rounding, and a budget derived from it would vary with the point it is judging.
 * :func:`~fp_arena.experiment.runner.run_error` measures every candidate against

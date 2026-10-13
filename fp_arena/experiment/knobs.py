@@ -34,7 +34,7 @@ from fp_arena.transformations.change_and_propagate_fp_types import (
     _unify_views,
 )
 
-#: Bit width of each precisio, low precision to high; the cap and ordering.
+#: Bit width of each precision, low precision to high; the cap and ordering.
 _BITS = {"fp16": 16, "fp32": 32, "fp64": 64}
 
 #: The default precision ladder, low precision to high.
@@ -113,7 +113,7 @@ def _has_constants(sdfg: dace.SDFG, sdfgs: list[dace.SDFG]) -> bool:
 
 
 def _domain(original_key: str, ladder: tuple[str, ...]) -> tuple[str, ...]:
-    """The precision at or below ``original_key``; empty if it is off-ladder."""
+    """The ladder rungs at or below ``original_key``; ``(original_key,)`` if it is off-ladder."""
     if original_key not in _BITS:
         return (original_key,)
     return tuple(f for f in ladder if _BITS[f] <= _BITS[original_key])
@@ -155,7 +155,7 @@ def find_knobs(
     :param sdfg: the program under test.
     :param selection: restrict to a subset; ``None`` keeps every knob.
     :param ladder: the precision ladder, low precision to high.
-    :returns: the knobs, sorted by name. A knob the program never is no knob.
+    :returns: the knobs, sorted by name. Classes the program never accesses are skipped.
     """
     sdfgs = _collect_sdfgs(sdfg)
     uf = _unify_nested_boundaries(sdfgs)
