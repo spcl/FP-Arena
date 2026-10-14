@@ -14,8 +14,6 @@ from fp_arena.search.config import (
     PerformanceAnalysisConfig,
     PerturbationAnalysisConfig,
     PrecisionMap,
-    SelectionAnalysisConfig,
-    precision_grid,
 )
 from fp_arena.search.inputs import Noise
 from fp_arena.search.knobs import Knob, KnobSelection, find_knobs
@@ -27,8 +25,6 @@ from fp_arena.search.results import (
     Metric,
     PerfResult,
     PerturbationResult,
-    SelectionCandidate,
-    SelectionResult,
 )
 from fp_arena.search.retarget import candidate_fp_arrays
 from fp_arena.search.runner import run_error, run_performance, run_perturbation
@@ -42,7 +38,6 @@ from fp_arena.search.search import (
     format_search,
     run_search,
 )
-from fp_arena.search.selection import format_selection, run_selection
 from fp_arena.search.store import ResultStore, StoredResult
 
 __all__ = [
@@ -71,21 +66,15 @@ __all__ = [
     "SearchEvaluation",
     "SearchFailure",
     "SearchResult",
-    "SelectionAnalysisConfig",
-    "SelectionCandidate",
-    "SelectionResult",
     "SelectionSearchConfig",
     "StoredResult",
     "candidate_fp_arrays",
     "find_knobs",
     "format_search",
-    "format_selection",
-    "precision_grid",
     "registry",
     "run_error",
     "run_performance",
     "run_perturbation",
     "run_search",
-    "run_selection",
     "screen",
 ]

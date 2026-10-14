@@ -35,6 +35,7 @@ import itertools
 import multiprocessing as mp
 import os
 import shutil
+import statistics
 import subprocess
 import tempfile
 import time
@@ -51,6 +52,7 @@ from dace.codegen.compiler import load_precompiled_sdfg
 from dace.codegen.exceptions import CodegenError, CompilationError
 from dace.sdfg.validation import InvalidSDFGError
 
+from fp_arena.search.budget import check
 from fp_arena.search.config import (
     OBJECTIVES,
     ErrorBudget,
@@ -94,7 +96,6 @@ from fp_arena.search.runner import (
     measure,
 )
 from fp_arena.search.screening import screen
-from fp_arena.search.selection import _objective_ms, check
 from fp_arena.search.store import ResultStore
 from fp_arena.search.timers import insert_timers, timer_categories
 
@@ -539,6 +540,19 @@ def _feasible(
     if budget.predicate is not None:
         return bool(budget.predicate(errors))
     return True
+
+
+def _objective_ms(perf: PerfResult, objective: str) -> float:
+    """Median milliseconds of the objective phase over the timed repetitions."""
+    series = getattr(perf, f"{objective}_times")
+    if not series:
+        raise ValueError(
+            f"Objective phase {objective!r} was not timed at precision point "
+            f"{perf.precision or '(baseline)'}; the phase does not exist for this "
+            f"program (CPU runs have no h2d/d2h, an uncast point has no cast_in/"
+            f"cast_out). Pick another objective."
+        )
+    return statistics.median(series)
 
 
 def run_search(

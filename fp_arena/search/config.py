@@ -5,8 +5,7 @@ Experiment config.
 
 from __future__ import annotations
 
-import itertools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -27,38 +26,6 @@ CONSTANTS_KEY = "__constants__"
 
 #: Reserved :data:`PrecisionMap` key that targets every single-element float temporary at once.
 SCALARS_KEY = "__scalars__"
-
-
-def precision_grid(arrays: dict[str, Sequence[str]]) -> list[PrecisionMap]:
-    """
-    Every combination of per-array precision choices, as a list of precision points.
-
-    ::
-
-        precision_grid({"A": ["fp16", "fp32"], CONSTANTS_KEY: ["fp32", "fp64"]})
-
-        # [{"A": "fp16", CONSTANTS_KEY: "fp32"},
-        #  {"A": "fp16", CONSTANTS_KEY: "fp64"},
-        #  {"A": "fp32", CONSTANTS_KEY: "fp32"},
-        #  {"A": "fp32", CONSTANTS_KEY: "fp64"}]
-
-    Arrays keep the caller's order, so the last one varies fastest.
-
-    :param arrays: ``{array: precision keys}`` -- the keys to try per array.
-    :returns: one :data:`PrecisionMap` per combination (the full product).
-    :raises ValueError: if ``arrays`` is empty or an array has no keys.
-    """
-    space = {name: list(choices) for name, choices in arrays.items()}
-    if not space:
-        raise ValueError("precision_grid needs at least one array")
-    for name, choices in space.items():
-        if not choices:
-            raise ValueError(f"No precision keys given for array {name!r}")
-    names = list(space)
-    return [
-        dict(zip(names, combo))
-        for combo in itertools.product(*(space[name] for name in names))
-    ]
 
 
 @dataclass
@@ -204,59 +171,3 @@ class ErrorBudget:
 #: The ``PerfResult`` timing phases usable as a selection objective.
 OBJECTIVES = ("total", "kernel", "h2d", "d2h", "cast_in", "cast_out")
 
-
-@dataclass
-class SelectionAnalysisConfig:
-    """
-    Search precision assignments for the fastest one that stays inside an error budget.
-
-    Composes the other three analyses over one shared :class:`ExperimentConfig`,
-    so feasibility and speed are always measured on the same program at the same
-    problem size: perturbation at ``speedup_baseline`` measures the noise floor,
-    error measures every point in ``precisions``, and performance times only the
-    points that met the budget.
-
-    :param experiment: the program under test, shared by all three sub-analyses.
-    :param precisions: the search space; see :func:`precision_grid`.
-    :param budget: the accuracy a point must deliver to be admissible.
-    :param noise: the inputs to perturb when measuring the noise floor (each
-        analysed separately, as in :class:`PerturbationAnalysisConfig`).
-    :param reference: the error analysis' high-precision reference.
-    :param n_samples: input realisations, shared by error and perturbation.
-    :param n_warmup: untimed warmup invocations per timed point.
-    :param n_reps: timed repetitions per timed point.
-    :param speedup_baseline: the point speedups are measured against, always
-        error-measured and timed; ``{}`` is the unmodified program.
-    :param objective: the timing phase to minimise, one of :data:`OBJECTIVES`.
-    :param time_all: also time infeasible points, for a full speed/error table.
-    :param perturb_all: also measure input sensitivity at every point; the
-        budget still derives from ``speedup_baseline``.
-    :param name: database name for the selection result; defaults to the
-        experiment's (the sub-analyses always store under the experiment's).
-    """
-
-    experiment: ExperimentConfig
-    precisions: list[PrecisionMap]
-    budget: ErrorBudget
-    noise: dict[str, Noise]
-    reference: str | dict[str, str] = "fp64"
-    n_samples: int = 1
-    n_warmup: int = 1
-    n_reps: int = 10
-    speedup_baseline: PrecisionMap = field(default_factory=dict)
-    objective: str = "total"
-    time_all: bool = False
-    perturb_all: bool = False
-    name: str | None = None
-
-    def __post_init__(self) -> None:
-        if not self.noise:
-            raise ValueError(
-                "SelectionAnalysisConfig.noise must name at least one input "
-                "array to perturb; the noise floor it measures is what the "
-                "budget is judged against"
-            )
-        if self.objective not in OBJECTIVES:
-            raise ValueError(
-                f"Unknown objective {self.objective!r}; expected one of {list(OBJECTIVES)}"
-            )

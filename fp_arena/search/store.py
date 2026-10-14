@@ -20,7 +20,6 @@ from fp_arena.search.results import (
     PerturbationResult,
     SearchEvaluation,
     SearchResult,
-    SelectionResult,
 )
 
 DEFAULT_DB_PATH = ".fp_arena_results.db"
@@ -30,7 +29,6 @@ _KIND_OF = {
     PerfResult: "performance",
     ErrorResult: "error",
     PerturbationResult: "perturbation",
-    SelectionResult: "selection",
     SearchResult: "search",
     SearchEvaluation: "search_evaluation",
 }
@@ -38,7 +36,7 @@ _KIND_OF = {
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind          TEXT NOT NULL,        -- 'performance' | 'error' | 'perturbation' | 'selection' | 'search' | 'search_evaluation'
+    kind          TEXT NOT NULL,        -- 'performance' | 'error' | 'perturbation' | 'search' | 'search_evaluation'
     experiment    TEXT NOT NULL,        -- ExperimentConfig.name
     created_at    TEXT NOT NULL,        -- ISO-8601 UTC
     precision     TEXT NOT NULL,        -- JSON: the precision map
@@ -100,7 +98,6 @@ class ResultStore:
         result: PerfResult
         | ErrorResult
         | PerturbationResult
-        | SelectionResult
         | SearchResult
         | SearchEvaluation,
         symbols: dict[str, Any] | None = None,

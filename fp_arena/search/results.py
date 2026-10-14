@@ -185,56 +185,6 @@ class ConstraintResult:
 
 
 @dataclass
-class SelectionCandidate:
-    """
-    One precision point as evaluated by the selection search.
-    """
-
-    precision: PrecisionMap
-    errors: dict[str, ErrorStats]
-    constraints: list[ConstraintResult]
-    feasible: bool
-    objective_ms: float | None = None
-    speedup: float | None = None
-    #: ``{perturbed_input: {output_array: stats}}``
-    sensitivity: dict[str, dict[str, ErrorStats]] | None = None
-
-
-@dataclass
-class SelectionResult:
-    """
-    The outcome of a selection search: the fastest precision point that met the
-    budget, plus every candidate that was evaluated.
-
-    ``best`` is ``None`` if nothing met the budget.
-
-    ``limits`` stores the resolved numeric thresholds.
-    """
-
-    best: PrecisionMap | None
-    speedup_baseline: PrecisionMap
-    objective: str
-    #: ``{metric: {array: limit}}`` -- the thresholds actually applied.
-    limits: dict[str, dict[str, float]]
-    #: ``{metric: {array: value}}`` -- input-noise-induced deviation at the baseline.
-    noise_floor: dict[str, dict[str, float]]
-    #: Feasible points first, fastest first; then the rest.
-    candidates: list[SelectionCandidate]
-    n_evaluated: int
-    n_feasible: int
-    n_samples: int = 1
-    seed: int = 0
-
-    @property
-    def precision(self) -> PrecisionMap:
-        """The winning assignment, or ``{}`` if none -- the store's precision column."""
-        return dict(self.best) if self.best is not None else {}
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
 class SearchCandidate:
     """One feasible config the selection *search* measured."""
 
@@ -259,16 +209,12 @@ class SearchFailure:
     error: str
 
 
-#: The outcomes a :class:`SearchEvaluation` can have.
-SEARCH_OUTCOMES = ("feasible", "infeasible", "pruned", "covered", "failed")
-
-
 @dataclass
 class SearchEvaluation:
     """
     One config the search settled, in the order it was settled.
 
-    ``outcome`` is one of :data:`SEARCH_OUTCOMES`: ``feasible`` or ``infeasible``
+    ``outcome`` is one of`: ``feasible`` or ``infeasible``
     after grading (its own program or, if ``cached``, an earlier config's
     program of the same canonical key); ``pruned``, when it lowers an infeasible
     config at least as far; ``covered``, when a feasible config lowers it at
