@@ -1,0 +1,276 @@
+# Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
+"""
+Knobs: the decision variables of the selection search.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import dace
+
+from fp_arena.search import registry
+from fp_arena.search.config import (
+    CONSTANTS_KEY,
+    SCALARS_KEY,
+    ExperimentConfig,
+    PrecisionMap,
+)
+from fp_arena.search.retarget import (
+    apply_precision,
+    fresh_sdfg,
+    scalar_temporaries,
+)
+from fp_arena.transformations.change_and_propagate_fp_types import (
+    _class_types,
+    _collect_sdfgs,
+    _constant_scalars,
+    _has_control_flow_constants,
+    _interface_fp_symbols,
+    _is_constant_fill,
+    _is_fp,
+    _tasklets_with_literals,
+    _unify_nested_boundaries,
+    _unify_views,
+)
+
+#: Bit width of each precision, low precision to high; the cap and ordering.
+_BITS = {"fp16": 16, "fp32": 32, "fp64": 64}
+
+#: The default precision ladder, low precision to high.
+DEFAULT_LADDER = ("fp16", "fp32", "fp64")
+
+
+@dataclass(frozen=True)
+class Knob:
+    """
+    One decision variable of the search.
+
+    :param name: the top-level pin name (an array name, :data:`CONSTANTS_KEY` or
+        :data:`SCALARS_KEY`).
+    :param kind: ``"source"`` (a read input -- what screening probes; may also be
+        written, as in an in-place kernel), ``"override"`` (an output or
+        intermediate, whose type otherwise follows propagation), ``"constants"``,
+        or ``"scalars"`` (every single-element temporary at once).
+    :param original: precision key of the class's original dtype.
+    :param domain: the precision this knob may take, low precision to high, capped at ``original``
+    """
+
+    name: str
+    kind: str
+    original: str
+    domain: tuple[str, ...]
+
+    @property
+    def highest(self) -> str:
+        """The highest precision this knob may take"""
+        return self.domain[-1]
+
+
+@dataclass
+class KnobSelection:
+    """
+    Which knobs are in scope for the search.
+    """
+
+    sources: bool = True
+    constants: bool = False
+    overrides: bool = False
+    merge_scalars: bool = True
+    include: frozenset[str] = field(default_factory=frozenset)
+    exclude: frozenset[str] = field(default_factory=frozenset)
+
+    def wants(self, knob: Knob) -> bool:
+        if knob.name in self.exclude:
+            return False
+        if knob.name in self.include:
+            return True
+        toggle = {
+            "source": self.sources,
+            "override": self.overrides,
+            "constants": self.constants,
+            "scalars": self.overrides,
+        }
+        return toggle[knob.kind]
+
+
+def _has_constants(sdfg: dace.SDFG, sdfgs: list[dace.SDFG]) -> bool:
+    """Whether the program has constants for the constants knob to lower: float
+    literals, constant Fills, read-only float scalar inputs, float interface
+    symbols or constants of the control flow."""
+    return bool(
+        _tasklets_with_literals(sdfgs)
+        or _has_control_flow_constants(sdfgs)
+        or _constant_scalars(sdfg)
+        or _interface_fp_symbols(sdfg)
+        or any(
+            _is_constant_fill(state, node)
+            for sd in sdfgs
+            for state in sd.states()
+            for node in state.nodes()
+        )
+    )
+
+
+def _domain(original_key: str, ladder: tuple[str, ...]) -> tuple[str, ...]:
+    """The ladder rungs at or below ``original_key``; ``(original_key,)`` if it is off-ladder."""
+    if original_key not in _BITS:
+        return (original_key,)
+    return tuple(f for f in ladder if _BITS[f] <= _BITS[original_key])
+
+
+def _used_containers(sdfgs: list[dace.SDFG]) -> set[tuple[int, str]]:
+    """``(id(sdfg), name)`` of every container some SDFG accesses or reads as a
+    symbol (conditions, interstate edges, symbol mappings)."""
+    used: set[tuple[int, str]] = set()
+    for sd in sdfgs:
+        names = {node.data for state in sd.states() for node in state.data_nodes()}
+        symbols: set[str] = set()
+        for edge in sd.all_interstate_edges(recursive=True):
+            symbols |= set(map(str, edge.data.used_symbols(all_symbols=True)))
+        for region in sd.all_control_flow_regions(recursive=True):
+            symbols |= set(
+                map(str, region.used_symbols(all_symbols=True, with_contents=False))
+            )
+        for state in sd.states():
+            for node in state.nodes():
+                if isinstance(node, dace.nodes.NestedSDFG):
+                    for value in node.symbol_mapping.values():
+                        symbols |= set(
+                            map(str, dace.symbolic.free_symbols_and_functions(value))
+                        )
+        names |= symbols & set(sd.arrays)
+        used |= {(id(sd), name) for name in names}
+    return used
+
+
+def find_knobs(
+    sdfg: dace.SDFG,
+    selection: KnobSelection | None = None,
+    ladder: tuple[str, ...] = DEFAULT_LADDER,
+) -> list[Knob]:
+    """
+    Enumerate the search's knobs from ``sdfg``'s propagation structures.
+
+    :param sdfg: the program under test.
+    :param selection: restrict to a subset; ``None`` keeps every knob.
+    :param ladder: the precision ladder, low precision to high.
+    :returns: the knobs, sorted by name. Classes the program never accesses are skipped.
+    """
+    sdfgs = _collect_sdfgs(sdfg)
+    uf = _unify_nested_boundaries(sdfgs)
+    _unify_views(sdfgs, uf)
+    members, original = _class_types(sdfgs, uf)
+    used = _used_containers(sdfgs)
+    reads, _ = sdfg.read_and_write_sets()
+
+    knobs: list[Knob] = []
+    for rep, mem in members.items():
+        if not _is_fp(original[rep]):
+            continue
+        if not any((id(sd), name) in used for sd, name in mem):
+            continue
+        top = sorted(name for sd, name in mem if sd is sdfg)
+        if not top:  # nested-only class: not pinnable
+            continue
+        name = top[0]
+        try:
+            orig_key = registry.key_of(original[rep])
+        except ValueError:
+            continue
+        domain = _domain(orig_key, ladder)
+        if len(domain) < 2:  # no lower precision available: decides nothing
+            continue
+        is_input = name in reads and not sdfg.arrays[name].transient
+        knobs.append(
+            Knob(
+                name=name,
+                kind="source" if is_input else "override",
+                original=orig_key,
+                domain=domain,
+            )
+        )
+
+    if _has_constants(sdfg, sdfgs):
+        constants = Knob(
+            name=CONSTANTS_KEY,
+            kind="constants",
+            original="fp64",
+            domain=tuple(ladder),
+        )
+        knobs.append(constants)
+        if selection is None or selection.wants(constants):
+            scalars = set(_constant_scalars(sdfg))
+            knobs = [k for k in knobs if k.name not in scalars]
+
+    if selection is None or selection.merge_scalars:
+        temporaries = set(scalar_temporaries(sdfg))
+        merged = [k for k in knobs if k.name in temporaries]
+        if merged:
+            knobs = [k for k in knobs if k.name not in temporaries]
+            orig_key = max(merged, key=lambda k: _BITS.get(k.original, 0)).original
+            knobs.append(
+                Knob(
+                    name=SCALARS_KEY,
+                    kind="scalars",
+                    original=orig_key,
+                    domain=_domain(orig_key, ladder),
+                )
+            )
+
+    knobs.sort(key=lambda k: k.name)
+    if selection is not None:
+        knobs = [k for k in knobs if selection.wants(k)]
+    return knobs
+
+
+# A candidate's identity: its inferred per-array (and per-scalar) typing plus the
+# constants precision.
+# Two pin-maps with the same key compile to the same program.
+CanonicalKey = tuple[tuple[tuple[str, str], ...], str | None]
+
+
+def canonical_typing(
+    experiment: ExperimentConfig, pin_map: PrecisionMap
+) -> CanonicalKey:
+    """
+    The canonical key of ``pin_map``: the inferred typing it produces.
+    """
+    sdfg = fresh_sdfg(experiment)
+    apply_precision(sdfg, pin_map, experiment.promotion_rules)
+    typing = sorted(precision_typing(sdfg).items())
+    return (tuple(typing), pin_map.get(CONSTANTS_KEY))
+
+
+def precision_typing(sdfg: dace.SDFG) -> dict[str, str]:
+    """The precision key of each top-level fp array and scalar of ``sdfg``."""
+    typing: dict[str, str] = {}
+    for name, desc in sdfg.arrays.items():
+        if not isinstance(desc, (dace.data.Array, dace.data.Scalar)):
+            continue
+        try:
+            typing[name] = registry.key_of(desc.dtype)
+        except ValueError:
+            continue  # non-fp array
+    return typing
+
+
+def inferred_precisions(
+    program: dace.SDFG, typing: dict[str, str], pin_map: PrecisionMap
+) -> PrecisionMap:
+    """The precision of each unpinned array."""
+    pinned = set(pin_map)
+    if CONSTANTS_KEY in pin_map:
+        pinned |= set(_constant_scalars(program))
+    if SCALARS_KEY in pin_map:
+        pinned |= set(scalar_temporaries(program))
+    original = precision_typing(program)
+    inferred = {name: typing[name] for name in original if name in typing}
+    for name, fmt in typing.items():
+        if name in original:
+            continue
+        for orig in original:  # else a container the retarget added (a cast temporary)
+            if name == f"fp_casted_{orig}_{registry.to_typeclass(fmt).to_string()}":
+                inferred[orig] = fmt
+                break
+    return {name: fmt for name, fmt in inferred.items() if name not in pinned}

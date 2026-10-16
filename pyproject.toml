@@ -37,6 +37,9 @@ testing = [
     "pytest",
     "pytest-xdist",
 ]
+corpus = [
+    "h5py",
+]
 dev = [
     "fp-arena[testing]",
 ]

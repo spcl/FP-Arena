@@ -1,16 +1,15 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 """
-Mapping between precision keys and DaCe typeclasses, and the promotion rules for them.
+Mapping between precision keys and DaCe typeclasses.
 """
 
 import re
-from typing import Dict
 
 import dace
 
 import fp_arena  # noqa: F401
 
-_FIXED: Dict[str, dace.dtypes.typeclass] = {
+_FIXED: dict[str, dace.dtypes.typeclass] = {
     "fp16": dace.float16,
     "fp32": dace.float32,
     "fp64": dace.float64,

@@ -69,7 +69,7 @@ def test_mpfr_environment_carries_the_link_flag():
     sdfg = dace.SDFG("mpfr_env")
     sdfg.add_array("A", [8], dace.mpfr(128))
     assert fp_arena.required_environments(sdfg) == {"fp_arena.environments.MPFR"}
-    assert "mpfr" in fp_arena.MPFR.cmake_libraries
+    assert fp_arena.MPFR.cmake_libraries == ["mpfr;gmp"]
 
 
 def test_uses_fp_arena_types_detection():

@@ -1,0 +1,254 @@
+# Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
+"""
+The bridge between an :class:`ExperimentConfig` and DaCe: build a fresh SDFG and retarget its precision using :func:`change_and_propagate_fp_types`.
+"""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import Callable
+
+import dace
+from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
+from dace.transformation.passes.vectorization.config import VectorizeConfig
+from dace.transformation.passes.vectorization.enums import RemainderStrategy
+from dace.transformation.passes.vectorization.vectorize_gpu import VectorizeGPU
+
+from fp_arena.search import registry
+from fp_arena.search.config import (
+    CONSTANTS_KEY,
+    SCALARS_KEY,
+    ExperimentConfig,
+    PrecisionMap,
+)
+from fp_arena.search.instruction_mix import embed_ptx
+from fp_arena.transformations.change_and_propagate_fp_types import (
+    _add_fusion_barrier,
+    _class_types,
+    _collect_sdfgs,
+    _unify_nested_boundaries,
+    _unify_views,
+    change_and_propagate_fp_types,
+)
+
+
+def _is_fp(tc: dace.dtypes.typeclass) -> bool:
+    """:returns: whether ``tc`` is a registry float (native, SR, or MPFR)."""
+    try:
+        registry.key_of(tc)
+        return True
+    except ValueError:
+        return False
+
+
+def fresh_sdfg(experiment: ExperimentConfig) -> dace.SDFG:
+    """
+    A deep copy of the experiment's SDFG -- lowering mutates in place, so every precision point needs its own.
+    """
+    if not isinstance(experiment.program, dace.SDFG):
+        raise TypeError(
+            f"program must be a dace.SDFG, got {type(experiment.program).__name__}"
+        )
+    return copy.deepcopy(experiment.program)
+
+
+def candidate_fp_arrays(sdfg: dace.SDFG) -> list[str]:
+    """:returns: non-transient floating-point array names (the boundary fp arrays)."""
+    return sorted(
+        name
+        for name, desc in sdfg.arrays.items()
+        if not desc.transient
+        and _is_fp(desc.dtype)
+        and isinstance(desc, dace.data.Array)
+    )
+
+
+def _single_element(desc: dace.data.Data) -> bool:
+    return isinstance(desc, dace.data.Scalar) or all(s == 1 for s in desc.shape)
+
+
+def scalar_temporaries(sdfg: dace.SDFG) -> list[str]:
+    """
+    :returns: the top-level names of the float classes that hold one element in
+        every SDFG and are transient at the top level -- what :data:`SCALARS_KEY` pins.
+    """
+    sdfgs = _collect_sdfgs(sdfg)
+    uf = _unify_nested_boundaries(sdfgs)
+    _unify_views(sdfgs, uf)
+    members, original = _class_types(sdfgs, uf)
+    names: list[str] = []
+    for rep, mem in members.items():
+        if not _is_fp(original[rep]):
+            continue
+        top = [name for sd, name in mem if sd is sdfg]
+        if (
+            top
+            and all(sdfg.arrays[name].transient for name in top)
+            and all(_single_element(sd.arrays[name]) for sd, name in mem)
+        ):
+            names.extend(top)
+    return sorted(names)
+
+
+_CAPPED = ("fp16", "fp32", "fp64")
+
+
+def _expand_scalars(sdfg: dace.SDFG, pins: PrecisionMap, key: str) -> None:
+    """Pin every scalar temporary not pinned on its own to ``key``, capped at its original type"""
+    for name in scalar_temporaries(sdfg):
+        if name in pins:
+            continue
+        own = registry.key_of(sdfg.arrays[name].dtype)
+        capped = (
+            key in _CAPPED
+            and own in _CAPPED
+            and registry.to_typeclass(key).bytes > registry.to_typeclass(own).bytes
+        )
+        pins[name] = own if capped else key
+
+
+def _validate_pins(sdfg: dace.SDFG, pin_map: PrecisionMap) -> None:
+    for name in pin_map:
+        if name not in sdfg.arrays:
+            raise ValueError(f"Pinned array {name!r} not found in SDFG {sdfg.name!r}")
+        if not _is_fp(sdfg.arrays[name].dtype):
+            raise ValueError(f"Pinned array {name!r} is not a floating-point array")
+
+
+def apply_precision(
+    sdfg: dace.SDFG,
+    pin_map: PrecisionMap,
+    promotion_rules,
+) -> None:
+    """
+    Retarget ``sdfg`` in place to the precisions in ``pin_map`` via :func:`change_and_propagate_fp_types`
+    """
+    if not pin_map:
+        return
+    pins = dict(pin_map)
+    constants_key = pins.pop(CONSTANTS_KEY, None)
+    scalars_key = pins.pop(SCALARS_KEY, None)
+    if scalars_key is not None:
+        _expand_scalars(sdfg, pins, scalars_key)
+    _validate_pins(sdfg, pins)
+    typed = {name: registry.to_typeclass(key) for name, key in pins.items()}
+    change_and_propagate_fp_types(
+        sdfg,
+        typed,
+        promotion_rules,
+        constant_type=(
+            None if constants_key is None else registry.to_typeclass(constants_key)
+        ),
+    )
+
+
+def apply_reference(sdfg: dace.SDFG, reference, promotion_rules) -> None:
+    """
+    Lower ``sdfg`` in place to the reference precision (a single key for every fp array, or a per-array ``{name: key}`` map).
+
+    A single MPFR key also retypes float literals and float symbols (the
+    constants knob), so the whole computation runs at that precision.
+    """
+    if isinstance(reference, str):
+        ref_map = {name: reference for name in candidate_fp_arrays(sdfg)}
+        if registry.is_mpfr(reference):
+            ref_map[CONSTANTS_KEY] = reference
+    else:
+        ref_map = dict(reference)
+    apply_precision(sdfg, ref_map, promotion_rules)
+
+
+#: Device storage types; an edge crossing this boundary is a host<->device copy.
+_GPU_STORAGE = (
+    dace.dtypes.StorageType.GPU_Global,
+    dace.dtypes.StorageType.GPU_Shared,
+)
+
+
+def _transfer_direction(sdfg: dace.SDFG, state) -> str | None:
+    """``"h2d"``/``"d2h"`` if ``state`` copies across the host/device boundary, else ``None``."""
+    has_host = has_dev = dev_written = host_written = False
+    for node in state.data_nodes():
+        dev = sdfg.arrays[node.data].storage in _GPU_STORAGE
+        written = state.in_degree(node) > 0
+        if dev:
+            has_dev = True
+            dev_written = dev_written or written
+        else:
+            has_host = True
+            host_written = host_written or written
+    if not (has_host and has_dev):
+        return None
+    if dev_written and not host_written:
+        return "h2d"
+    if host_written and not dev_written:
+        return "d2h"
+    return None
+
+
+#: The vectorization config used when ``gpu_vectorize`` is on but no config is given.
+DEFAULT_GPU_VECTORIZE_CONFIG = VectorizeConfig(
+    widths=(2,), remainder_strategy=RemainderStrategy.BRANCHED_TAIL
+)
+
+
+def resolve_vectorize_config(
+    target: str,
+    gpu_vectorize: bool,
+    gpu_vectorize_config: VectorizeConfig | None = None,
+) -> VectorizeConfig | None:
+    """:returns: the ``VectorizeConfig`` :func:`apply_target` applies, or ``None`` if nothing is vectorized."""
+    if target != "gpu" or not gpu_vectorize:
+        return None
+    return gpu_vectorize_config or DEFAULT_GPU_VECTORIZE_CONFIG
+
+
+def _set_gpu_block_size(sdfg: dace.SDFG, gpu_block_size: list[int]) -> None:
+    """
+    Set ``gpu_block_size`` on every GPU kernel map of ``sdfg``.
+    """
+
+    InsertExplicitCopies().apply_pass(sdfg, {})
+    sdfg.expand_library_nodes(recursive=True)
+
+    # Recursive: expansion puts the copy kernel inside a nested SDFG.
+    for node, _ in sdfg.all_nodes_recursive():
+        if (
+            isinstance(node, dace.nodes.MapEntry)
+            and node.map.schedule == dace.dtypes.ScheduleType.GPU_Device
+        ):
+            node.map.gpu_block_size = list(gpu_block_size)
+
+
+def apply_target(
+    sdfg: dace.SDFG,
+    target: str,
+    gpu_block_size: list[int] | None = None,
+    gpu_vectorize: bool = False,
+    gpu_vectorize_config: VectorizeConfig | None = None,
+    gpu_offload: Callable[[dace.SDFG], None] | None = None,
+) -> None:
+    """
+    Retarget ``sdfg`` in place for the execution target.
+
+    On GPU, ``gpu_offload`` (if given) replaces the generic offload.
+    """
+    if target == "cpu":
+        return
+    if target == "gpu":
+        embed_ptx()  # the instruction mix is read from it
+        if gpu_offload is not None:
+            gpu_offload(sdfg)
+        else:
+            sdfg.apply_gpu_transformations(simplify=False)
+            for state in sdfg.states():
+                if _transfer_direction(sdfg, state) is not None:
+                    _add_fusion_barrier(state)
+            sdfg.simplify()
+        config = resolve_vectorize_config(target, gpu_vectorize, gpu_vectorize_config)
+        if config is not None:
+            VectorizeGPU(config).apply_pass(sdfg, {})
+        if gpu_block_size is not None:
+            _set_gpu_block_size(sdfg, gpu_block_size)
+        return
+    raise ValueError(f"Unknown target {target!r}; expected 'cpu' or 'gpu'")

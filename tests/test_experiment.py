@@ -1,30 +1,50 @@
 # Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
 
+import dataclasses
+import logging
+import shutil
+import subprocess
+
 import dace
 import numpy as np
 import pytest
 from scipy import stats
-import fp_arena  # noqa: F401
 
-from fp_arena.experiment import (
+import fp_arena  # noqa: F401
+from fp_arena.search import (
+    METRICS,
     ErrorAnalysisConfig,
+    ErrorBudget,
+    ErrorStats,
     ExperimentConfig,
+    Metric,
     Noise,
     PerformanceAnalysisConfig,
     PerturbationAnalysisConfig,
+    PerturbationResult,
     ResultStore,
     registry,
     run_error,
     run_performance,
     run_perturbation,
 )
-from fp_arena.experiment.inputs import make_call_args
-from fp_arena.experiment.retarget import apply_target, fresh_sdfg
-from fp_arena.experiment.runner import (
+from fp_arena.search.budget import (
+    check,
+    noise_floor,
+    resolve_limits,
+)
+from fp_arena.search.inputs import make_call_args
+from fp_arena.search.retarget import apply_precision, apply_target, fresh_sdfg
+from fp_arena.search.runner import (
     _accumulate,
     _finalize,
-    _group_per_invocation,
     _new_acc,
+)
+from fp_arena.search.timers import (
+    PHASES,
+    insert_timers,
+    phase_breakdown,
+    timer_categories,
 )
 
 N = dace.symbol("N")
@@ -40,33 +60,34 @@ _AXPY_SDFG = _axpy.to_sdfg(simplify=True)
 
 
 def _exp(**kw):
-    base = dict(
-        name="axpy",
-        program=_AXPY_SDFG,
-        inputs={
+    base = {
+        "name": "axpy",
+        "program": _AXPY_SDFG,
+        "inputs": {
             "a": stats.uniform(0.5, 1.0),
             "b": stats.uniform(0.5, 1.0),
             "c": stats.uniform(0.5, 1.0),
         },
-        symbols={"N": 64},
-    )
+        "symbols": {"N": 64},
+    }
     base.update(kw)
     return ExperimentConfig(**base)
 
 
 def _has_gpu() -> bool:
     """Whether a runnable GPU device is present."""
-    import shutil
-    import subprocess
+
+    logger = logging.getLogger(__name__)
 
     for smi, args in (("nvidia-smi", ["-L"]), ("rocm-smi", ["--showid"])):
         if shutil.which(smi) is None:
             continue
         try:
             out = subprocess.run(
-                [smi, *args], capture_output=True, text=True, timeout=15
+                [smi, *args], capture_output=True, text=True, timeout=15, check=False
             )
         except Exception:
+            logger.exception("GPU detection failed for %s", smi)
             continue
         if out.returncode == 0 and out.stdout.strip():
             return True
@@ -126,6 +147,28 @@ def test_error_zero_when_candidate_equals_reference():
         ErrorAnalysisConfig(_exp(), precisions=[{"a": "fp64"}], reference="fp64")
     )
     assert errs[0].errors["c"].linf == 0.0
+
+
+def _c_minus_b(args):
+    """A derived output: the written ``c`` minus the input ``b``."""
+    return args["c"] - args["b"]
+
+
+def test_derived_outputs_are_graded_like_written_arrays():
+    exp = _exp(derived_outputs={"c_minus_b": _c_minus_b})
+    errs = run_error(
+        ErrorAnalysisConfig(exp, precisions=[{"a": "fp16"}, {}], reference="fp64")
+    )
+    lowered, same = errs[0].errors, errs[1].errors
+    assert set(lowered) == {"c", "c_minus_b"}
+    assert lowered["c_minus_b"].linf > 0.0
+    assert same["c_minus_b"].linf == 0.0
+
+
+def test_derived_output_may_not_shadow_a_written_array():
+    exp = _exp(derived_outputs={"c": _c_minus_b})
+    with pytest.raises(ValueError, match="shadow"):
+        run_error(ErrorAnalysisConfig(exp, precisions=[{}], reference="fp64"))
 
 
 def test_performance_runs():
@@ -393,15 +436,55 @@ def test_is_mpfr():
     assert not registry.is_mpfr("fp32")
 
 
-def test_group_per_invocation():
-    # k executions per invocation are summed into one value per invocation.
-    assert _group_per_invocation([1.0, 2.0, 3.0, 4.0], 2, "t") == [3.0, 7.0]
-    # One execution per invocation passes through.
-    assert _group_per_invocation([1.0, 2.0], 2, "t") == [1.0, 2.0]
-    assert _group_per_invocation([], 2, "t") == []
-    # A data-dependent execution count cannot be attributed to reps: fail loudly.
-    with pytest.raises(ValueError, match="static per-invocation"):
-        _group_per_invocation([1.0] * 7, 11, "State s7")
+def test_phase_breakdown_reduces_and_drops_warmup():
+    # Two warmup rows are dropped; same-phase slots sum; total is per-rep sum.
+    cats = ["cast_in", "kernel", "kernel", "cast_out"]
+    buf = np.array(
+        [
+            [9.0, 9.0, 9.0, 9.0],  # warmup, dropped
+            [8.0, 8.0, 8.0, 8.0],  # warmup, dropped
+            [1.0, 2.0, 3.0, 4.0],
+            [1.5, 2.5, 3.5, 4.5],
+        ]
+    )
+    out = phase_breakdown(cats, buf, n_reps=2)
+    assert out["cast_in_times"] == [1.0, 1.5]
+    assert out["kernel_times"] == [5.0, 6.0]  # two kernel slots summed per rep
+    assert out["cast_out_times"] == [4.0, 4.5]
+    assert out["h2d_times"] == [] and out["d2h_times"] == []
+    assert out["total_times"] == [10.0, 12.0]  # sum over the phases present
+
+
+def test_phase_breakdown_empty_buffer():
+    out = phase_breakdown([], np.zeros((0, 0)), n_reps=3)
+    assert out == {"total_times": [], **{f"{p}_times": [] for p in PHASES}}
+
+
+def test_timer_categories_recovered_from_sdfg():
+    # The slot -> phase list is recoverable from the timed SDFG alone (the search
+    # relies on this across the compile/grade process boundary).
+    exp = _exp()
+    sdfg = fresh_sdfg(exp)
+    apply_precision(sdfg, {"a": "fp32", "b": "fp32", "c": "fp32"}, exp.promotion_rules)
+    apply_target(sdfg, "cpu")
+    cats = insert_timers(sdfg, "cpu")
+    assert cats and set(cats) <= set(PHASES)
+    assert "kernel" in cats and "cast_in" in cats and "cast_out" in cats
+    assert timer_categories(sdfg) == cats
+
+
+def test_timers_use_one_slot_per_phase_on_the_top_level():
+    # At most one slot per phase, and no timer state inside a loop (each
+    # start/stop synchronizes, so a bracket per iteration distorts the timing).
+    exp = _exp(program=_AXPY_LOOP_SDFG, symbols={"N": 64, "T": 4})
+    sdfg = fresh_sdfg(exp)
+    apply_precision(sdfg, {"a": "fp32", "b": "fp32", "c": "fp32"}, exp.promotion_rules)
+    apply_target(sdfg, "cpu")
+    cats = insert_timers(sdfg, "cpu")
+    assert cats == ["cast_in", "kernel", "cast_out"]
+    for state in sdfg.states():
+        if state.label.startswith(("__fp_timer_start", "__fp_timer_stop")):
+            assert state.parent_graph is sdfg, state.label
 
 
 def test_overflowing_reference_yields_inf_error_not_nan():
@@ -444,8 +527,59 @@ def test_error_norms_concatenate_across_accumulate_calls():
     _accumulate(whole, np.concatenate([ref1, ref2]), np.concatenate([cand1, cand2]))
 
     a, b = _finalize(split), _finalize(whole)
-    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr"):
+    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr", "snr_var"):
         assert getattr(a, f) == pytest.approx(getattr(b, f))
+
+
+def test_snr_var_matches_hand_computed_value():
+    # r = [1, 2, 3, 4] -> Var(r) = 1.25; e = [0, 0, 0, 1] -> Var(e) = 0.1875
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0, 3.0, 4.0]), np.array([1.0, 2.0, 3.0, 5.0]))
+    s = _finalize(acc)
+    assert s.snr_var == pytest.approx(10.0 * np.log10(1.25 / 0.1875))
+
+
+def test_snr_var_ignores_a_constant_offset():
+    # A pure bias has no variability: perfect by snr_var, penalised by snr.
+    ref = np.array([1.0, 2.0, 3.0, 4.0])
+    acc = _new_acc()
+    _accumulate(acc, ref, ref + 0.5)
+    s = _finalize(acc)
+    assert s.snr_var == np.inf
+    assert np.isfinite(s.snr)
+
+    # Adding a bias on top of a varying error leaves snr_var unchanged.
+    noisy = ref + np.array([0.0, 0.0, 0.0, 1.0])
+    a, b = _new_acc(), _new_acc()
+    _accumulate(a, ref, noisy)
+    _accumulate(b, ref, noisy + 7.0)
+    assert _finalize(a).snr_var == pytest.approx(_finalize(b).snr_var)
+
+
+def test_snr_var_is_accurate_for_a_large_mean():
+    # Variance from running sums of squares would cancel catastrophically here.
+    rng = np.random.default_rng(0)
+    ref = 250.0 + 1e-3 * rng.standard_normal(100_000)
+    cand = ref + 1e-6 * rng.standard_normal(ref.size)
+    acc = _new_acc()
+    for chunk in np.array_split(np.arange(ref.size), 7):
+        _accumulate(acc, ref[chunk], cand[chunk])
+    expected = 10.0 * np.log10(ref.var() / (cand - ref).var())
+    assert _finalize(acc).snr_var == pytest.approx(expected, rel=1e-9)
+
+
+def test_snr_var_edge_cases():
+    acc = _new_acc()
+    _accumulate(acc, np.full(3, 2.0), np.array([2.0, 2.0, 3.0]))
+    assert _finalize(acc).snr_var == -np.inf  # constant reference, varying error
+
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0]), np.array([np.nan, 2.0]))
+    assert _finalize(acc).snr_var == -np.inf  # non-finite error
+
+    acc = _new_acc()
+    _accumulate(acc, np.array([1.0, 2.0]), np.array([1.0, 2.0]))
+    assert _finalize(acc).snr_var == np.inf  # exact match
 
 
 def test_error_norms_zero_on_exact_match():
@@ -482,13 +616,120 @@ def test_error_metrics_persist_to_store():
         store=db,
     )
     payload = db.query(kind="error")[0].payload["errors"]["c"]
-    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr"):
+    for f in ("l1", "l2", "linf", "l1_norm", "l2_norm", "linf_norm", "snr", "snr_var"):
         assert f in payload
 
 
 def test_unknown_target_raises():
     with pytest.raises(ValueError, match="Unknown target"):
         apply_target(fresh_sdfg(_exp()), "tpu")
+
+
+def _stats(**kw) -> ErrorStats:
+    """An ErrorStats with every metric zeroed except the ones named."""
+    base = dict.fromkeys(
+        (f.name for f in dataclasses.fields(ErrorStats)),
+        0.0,
+    )
+    base.update(kw)
+    return ErrorStats(**base)
+
+
+def test_error_budget_validation():
+    with pytest.raises(ValueError, match="constrains nothing"):
+        ErrorBudget()
+    with pytest.raises(ValueError, match="Unknown error metric"):
+        ErrorBudget(limits={"nonsense": 1.0})
+    with pytest.raises(ValueError, match="positive factor"):
+        ErrorBudget(from_perturbation={"rel_max": 0.0})
+
+
+def test_metrics_registry_covers_every_error_stat():
+    # A new ErrorStats field has to declare its direction and scale before a budget can name it.
+    assert set(METRICS) == {f.name for f in dataclasses.fields(ErrorStats)}
+
+
+def test_scale_treats_the_factor_as_an_error_multiple():
+    # An error magnitude scales directly...
+    assert METRICS["rel_max"].scale(1e-6, 2.0) == pytest.approx(2e-6)
+    # ...but snr is a dB ratio, where "2x the error" is a 6.02 dB shift down.
+    assert METRICS["snr"].scale(60.0, 2.0) == pytest.approx(60.0 - 20.0 * np.log10(2.0))
+    assert METRICS["snr"].scale(60.0, 1.0) == pytest.approx(60.0)
+
+
+def test_metric_direction_and_scale_are_independent():
+    # The dB scaling belongs to snr, not to "higher is better" in general: a
+    # linear higher-is-better metric keeps the proportional scale.
+    linear_up = Metric(higher_is_better=True)
+    assert linear_up.scale(1e-6, 2.0) == pytest.approx(2e-6)
+    assert linear_up.better(1.0, 2.0) == 2.0
+    assert linear_up.satisfies(2.0, 1.0)
+
+
+def test_noise_floor_keeps_the_least_accurate_perturbation():
+    results = [
+        PerturbationResult(
+            precision={},
+            perturbed=name,
+            errors={"c": _stats(rel_max=rel, snr=snr)},
+            n_samples=1,
+        )
+        for name, rel, snr in (("a", 1e-3, 40.0), ("b", 1e-6, 90.0))
+    ]
+    floor = noise_floor(results, ["rel_max", "snr"])
+    # Worst case: the largest error magnitude, but the *smallest* snr.
+    assert floor["rel_max"]["c"] == 1e-3
+    assert floor["snr"]["c"] == 40.0
+
+
+def test_resolve_limits_tighter_constraint_binds():
+    floor = {"rel_max": {"c": 1e-7}}
+    # Derived limit is tighter than the explicit one.
+    tight = resolve_limits(
+        ErrorBudget(limits={"rel_max": 1e-5}, from_perturbation={"rel_max": 1.0}),
+        floor,
+        ["c"],
+    )
+    assert tight["rel_max"]["c"] == 1e-7
+    # Explicit limit is tighter than the derived one.
+    loose = resolve_limits(
+        ErrorBudget(limits={"rel_max": 1e-9}, from_perturbation={"rel_max": 1.0}),
+        floor,
+        ["c"],
+    )
+    assert loose["rel_max"]["c"] == 1e-9
+
+
+def test_resolve_limits_per_array_and_unknown_array():
+    limits = resolve_limits(
+        ErrorBudget(limits={"l2_norm": {"c": 1e-8}, "rel_max": 1e-5}),
+        {},
+        ["b", "c"],
+    )
+    assert limits["l2_norm"] == {"c": 1e-8}
+    # A scalar limit fans out to every checked array.
+    assert limits["rel_max"] == {"b": 1e-5, "c": 1e-5}
+    with pytest.raises(ValueError, match="not a checked output array"):
+        resolve_limits(ErrorBudget(limits={"rel_max": {"zz": 1.0}}), {}, ["c"])
+
+
+def test_check_direction_depends_on_the_metric():
+    errors = {"c": _stats(rel_max=1e-6, snr=50.0)}
+    # rel_max: smaller is better.
+    (passed,) = check(errors, {"rel_max": {"c": 1e-5}})
+    assert passed.ok and passed.value == 1e-6 and passed.limit == 1e-5
+    (failed,) = check(errors, {"rel_max": {"c": 1e-7}})
+    assert not failed.ok
+    # snr: larger is better, so the comparison flips.
+    (passed,) = check(errors, {"snr": {"c": 40.0}})
+    assert passed.ok
+    (failed,) = check(errors, {"snr": {"c": 60.0}})
+    assert not failed.ok
+
+
+def test_check_treats_non_finite_error_as_infeasible():
+    (c,) = check({"c": _stats(rel_max=np.inf)}, {"rel_max": {"c": 1e-3}})
+    assert not c.ok
 
 
 def test_callable_init_function_covers_constant_and_fixed_data():
@@ -501,3 +742,25 @@ def test_callable_init_function_covers_constant_and_fixed_data():
     )
     args = make_call_args(fresh_sdfg(exp), exp, np.random.default_rng(0))
     assert np.allclose(args["a"], 2.0)
+
+
+def test_severity_of_a_decibel_metric_is_an_amplitude_ratio():
+    from fp_arena.search.screening import _severity
+
+    limits = {"snr_var": {"c": 60.0}}
+    # 20 dB above the limit is a 10x smaller error amplitude.
+    assert _severity({"c": _stats(snr_var=80.0)}, limits) == pytest.approx(0.1)
+    assert _severity({"c": _stats(snr_var=60.0)}, limits) == pytest.approx(1.0)
+    assert _severity({"c": _stats(snr_var=40.0)}, limits) == pytest.approx(10.0)
+    # Exact match consumes nothing; a broken (NaN) output is infinitely severe.
+    assert _severity({"c": _stats(snr_var=np.inf)}, limits) == 0.0
+    assert _severity({"c": _stats(snr_var=-np.inf)}, limits) == np.inf
+
+
+def test_severity_of_a_non_finite_linear_error_is_infinite():
+    from fp_arena.search.screening import _severity
+
+    limits = {"l2_norm": {"c": 1e-2}}
+    assert _severity({"c": _stats(l2_norm=5e-3)}, limits) == pytest.approx(0.5)
+    assert _severity({"c": _stats(l2_norm=np.inf)}, limits) == np.inf
+    assert _severity({"c": _stats(l2_norm=np.nan)}, limits) == np.inf
