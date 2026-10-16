@@ -103,6 +103,33 @@ def test_transient_intermediate_propagates():
     # sdfg.compile() TO
 
 
+def test_unpreserved_interface_takes_the_new_type():
+    """``preserve_interface=False``: the arguments themselves change type, no cast wrapper is added, and
+    the program computes on the caller's fp16 data."""
+    sdfg = dace.SDFG("unpreserved")
+    sdfg.add_array("A", [4], dace.float32)
+    sdfg.add_array("B", [4], dace.float32)
+    state = sdfg.add_state("s")
+    state.add_mapped_tasklet(
+        "twice",
+        {"i": "0:4"},
+        {"a": dace.Memlet("A[i]")},
+        "b = 2 * a",
+        {"b": dace.Memlet("B[i]")},
+        external_edges=True,
+    )
+
+    change_and_propagate_fp_types(sdfg, {"A": dace.float16}, preserve_interface=False)
+
+    assert sdfg.arrays["A"].dtype == dace.float16
+    assert sdfg.arrays["B"].dtype == dace.float16
+    assert not any(name.startswith("fp_casted_") for name in sdfg.arrays)
+    a = np.arange(4, dtype=np.float16)
+    b = np.zeros(4, dtype=np.float16)
+    sdfg(A=a, B=b)
+    np.testing.assert_array_equal(b, 2 * a)
+
+
 def test_all_nontransient_interface_preserved():
     """All non-transient: all arrays get cast wrappers, none change dtype externally."""
     sdfg = dace.SDFG("test_state_order")

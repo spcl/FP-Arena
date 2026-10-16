@@ -1077,6 +1077,16 @@ def _constant_scalars(sdfg: dace.SDFG) -> list[str]:
 # Gives every float interface symbol of the root a copy of *dtype*, assigned on
 # entry, and makes the body read the copy; the signature keeps the original.
 # Returns the names of the copies.
+def _set_symbol_type(sdfg: dace.SDFG, name: str, dtype: dace.dtypes.typeclass) -> None:
+    """Retype the declared symbol ``name`` of ``sdfg``. DaCe ``extended`` keeps symbols in a registry whose
+    ``symbols`` mapping is read-only; older DaCe exposes a plain dictionary."""
+    repo = getattr(sdfg, "symbol_repo", None)
+    if repo is not None:
+        repo.set_type(name, dtype)
+    else:
+        sdfg.symbols[name] = dtype
+
+
 def _lower_interface_symbols(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> set[str]:
     repl = {
         name: sdfg.find_new_symbol(f"{name}_{dtype.to_string()}")
@@ -1087,7 +1097,11 @@ def _lower_interface_symbols(sdfg: dace.SDFG, dtype: dace.dtypes.typeclass) -> s
     original = {name: sdfg.symbols[name] for name in repl}
     sdfg.replace_dict(repl)
     for name, new in repl.items():
-        sdfg.symbols[new] = dtype
+        # replace_dict renames the declaration too (DaCe extended's registry); retype it there.
+        if new in sdfg.symbols:
+            _set_symbol_type(sdfg, new, dtype)
+        else:
+            sdfg.add_symbol(new, dtype)
         sdfg.add_symbol(name, original[name])
     sdfg.add_state_before(
         sdfg.start_block,
@@ -1215,7 +1229,17 @@ def change_and_propagate_fp_types(
     | None = None,
     constant_type: dace.dtypes.typeclass | None = None,
     report: bool = False,
+    preserve_interface: bool = True,
 ) -> None:
+    """Retarget the floating-point types of ``sdfg``: pin ``initial_types`` (top-level array name ->
+    type), propagate them through the dataflow under ``promotion_rules`` and insert the casts the result
+    needs.
+
+    With ``preserve_interface`` (the default) a non-transient array of the root SDFG whose type changed
+    keeps its type for the caller: the program works on a transient ``fp_casted_<name>_<type>`` copied
+    in at the start and out at the end. Without it the argument itself takes the new type, and the
+    caller passes (and reads back) data of that type.
+    """
 
     # Use default promotion rules if none are provided.
     rules = DEFAULT_PROMOTION_RULES if promotion_rules is None else promotion_rules
@@ -1331,7 +1355,7 @@ def change_and_propagate_fp_types(
     for sd in sdfgs:
         for name, stype in list(sd.symbols.items()):
             if _is_fp(stype):
-                sd.symbols[name] = inferred[_sym(sd, name)]
+                _set_symbol_type(sd, name, inferred[_sym(sd, name)])
     _cast_symbol_definitions(sdfgs)
 
     for sd in sdfgs:
@@ -1359,7 +1383,7 @@ def change_and_propagate_fp_types(
         for name, orig_dtype in original_nontransients.items()
         if sdfg.arrays[name].dtype != orig_dtype
     }
-    if not changed_interface:
+    if not changed_interface or not preserve_interface:
         return
 
     repl_dict = {
