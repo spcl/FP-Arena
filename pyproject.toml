@@ -25,7 +25,7 @@ keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision"
 # (any extended-based branch), install FP-Arena with `--no-deps` and ensure
 # that DaCe is importable; see the README.
 dependencies = [
-    "dace @ git+https://github.com/spcl/dace.git@extended",
+    "dace @ git+https://github.com/spcl/dace.git@21f1ed0009098827eca7a8c1bc894ee03df81f8a",
     "numpy",
     "ordered-set",
     "scipy",
