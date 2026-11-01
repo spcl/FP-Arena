@@ -11,6 +11,7 @@ from typing import Any
 
 import dace
 import numpy as np
+
 from corpus.cloudsc.cloudsc_reference_data import (
     REFERENCE_KLEV,
     REFERENCE_KLON,
@@ -18,7 +19,6 @@ from corpus.cloudsc.cloudsc_reference_data import (
     reference_input_distributions,
     reference_scalar_args,
 )
-
 from fp_arena.search import ExperimentConfig
 from fp_arena.search.inputs import make_call_args
 from fp_arena.search.runner import (
@@ -121,8 +121,8 @@ def timestep_snr_floor(
 
 
 if __name__ == "__main__":
-    from pathlib import Path
+    from corpus.build_cloudsc import build_cloudsc_sdfg
 
-    sdfg = dace.SDFG.from_file(Path(__file__).resolve().parent / "CLOUDSC-CPU.sdfg")
+    sdfg = build_cloudsc_sdfg()
     for name, db in timestep_snr_floor(sdfg, outputs=True).items():
         print(f"  noise floor {name:18s} {db:8.2f} dB", flush=True)

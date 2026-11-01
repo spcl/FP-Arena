@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 
-import dace as dc
-
+from corpus.build_cloudsc import build_cloudsc_sdfg
 from corpus.cloudsc.cloudsc_noise_floor import CLOUDSC_STATES, timestep_snr_floor
 from corpus.cloudsc.cloudsc_reference_data import (
     REFERENCE_KLEV,
@@ -35,9 +33,6 @@ KLEV = REFERENCE_KLEV
 
 # Physics step in seconds; None keeps input.h5's ptsphy (3600 s).
 PTSPHY: float | None = None
-
-# canon_cpu from the dace extended branch (tests/corpus/cloudsc/reproduce.py).
-SDFG_PATH = Path(__file__).resolve().parent.parent / "corpus" / "cloudsc" / "CLOUDSC-CPU.sdfg"
 
 
 def main() -> None:
@@ -77,7 +72,7 @@ def main() -> None:
     if args.all_outputs:
         tag += "_all_outputs"
 
-    sdfg = dc.SDFG.from_file(SDFG_PATH)
+    sdfg = build_cloudsc_sdfg()
 
     scalar_args = reference_scalar_args(sdfg)
     if PTSPHY is not None:
@@ -116,8 +111,8 @@ def main() -> None:
         knobs=knob_selection,
         reference="fp64",
         n_samples=1,
-        n_warmup=2,
-        n_reps=4,
+        n_warmup=3,
+        n_reps=10,
         objective="kernel",
         compute_budget=args.max_configs,
         prune_above_feasible=args.prune_above_feasible,
