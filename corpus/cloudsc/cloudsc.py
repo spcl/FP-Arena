@@ -1,9 +1,5 @@
-# Copyright 2019-2026 ETH Zurich and the FP-Arena authors. All rights reserved.
-
-"""
-The CloudSc kernel.
-Copied From: https://github.com/spcl/dace/blob/main/tests/corpus/cloudsc/cloudsc.py
-"""
+# Copyright 2019-2026 ETH Zurich and the DaCe authors. All rights reserved.
+"""Copied from https://github.com/spcl/dace/blob/21f1ed0009098827eca7a8c1bc894ee03df81f8a/tests/corpus/cloudsc/cloudsc.py"""
 
 """Inlined CloudSC (ECMWF dwarf-p-cloudsc) cloud microphysics kernel as a single ``dace.program``.
 
@@ -11,8 +7,10 @@ Callback-free and self-contained, so ``cloudsc_py.to_sdfg()`` yields a large, wi
 SDFG that compiles and runs standalone. Input data generation lives in
 ``generate_data_for_cloudsc.py``.
 """
-import dace
+
 import numpy as np
+import dace
+from pathlib import Path
 
 klon = dace.symbol("klon", dtype=dace.int32)
 klev = dace.symbol("klev", dtype=dace.int32)
@@ -215,6 +213,13 @@ def cloudsc_py(
     zacust = np.ndarray(shape=(klon,), dtype=np.float64)
     zmf = np.ndarray(shape=(klon,), dtype=np.float64)
     zrho = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp1 = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp2 = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp3 = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp4 = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp5 = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp6 = np.ndarray(shape=(klon,), dtype=np.float64)
+    ztmp7 = np.ndarray(shape=(klon,), dtype=np.float64)
     zalfawm = np.ndarray(shape=(klon,), dtype=np.float64)
     zsolab = np.ndarray(shape=(klon,), dtype=np.float64)
     zsolac = np.ndarray(shape=(klon,), dtype=np.float64)
@@ -223,6 +228,7 @@ def cloudsc_py(
     zda = np.ndarray(shape=(klon,), dtype=np.float64)
     zdp = np.ndarray(shape=(klon,), dtype=np.float64)
     zpaphd = np.ndarray(shape=(klon,), dtype=np.float64)
+    zmin = np.ndarray(shape=(klon,), dtype=np.float64)
     zsupsat = np.ndarray(shape=(klon,), dtype=np.float64)
     zmeltmax = np.ndarray(shape=(klon,), dtype=np.float64)
     zfrzmax = np.ndarray(shape=(klon,), dtype=np.float64)
@@ -241,6 +247,7 @@ def cloudsc_py(
     zraincld = np.ndarray(shape=(klon,), dtype=np.float64)
     zsnowrime = np.ndarray(shape=(klon,), dtype=np.float64)
     zsnowcld = np.ndarray(shape=(klon,), dtype=np.float64)
+    zrg = np.ndarray(shape=(klon,), dtype=np.float64)
     psum_solqa = np.ndarray(shape=(klon,), dtype=np.float64)
     llflag = np.ndarray(shape=(klon,), dtype=np.float64)
     llrainliq = np.ndarray(shape=(klon,), dtype=np.int32)
@@ -254,7 +261,9 @@ def cloudsc_py(
     zli = np.ndarray(shape=(klev, klon), dtype=np.float64)
     za = np.ndarray(shape=(klev, klon), dtype=np.float64)
     zaorig = np.ndarray(shape=(klev, klon), dtype=np.float64)
+    llindex1 = np.ndarray(shape=(nclv, klon), dtype=np.int32)
     llindex3 = np.ndarray(shape=(nclv, nclv, klon), dtype=np.int32)
+    iorder = np.ndarray(shape=(nclv, klon), dtype=np.int32)
     zliqfrac = np.ndarray(shape=(klev, klon), dtype=np.float64)
     zicefrac = np.ndarray(shape=(klev, klon), dtype=np.float64)
     zqx = np.ndarray(shape=(nclv, klev, klon), dtype=np.float64)
@@ -293,7 +302,9 @@ def cloudsc_py(
     ievapsnow = 1
     idepice = 1
     zqtmst = 1.0 / ptsphy
+    zgdcp = ydcst_rg / ydcst_rcpd
     zrdcp = ydcst_rd / ydcst_rcpd
+    zcons1a = ydcst_rcpd / (ydcst_rlmlt * ydcst_rg * yrecldp_rtaumel)
     zepsec = 1e-14
     zrg_r = 1.0 / ydcst_rg
     zrldcp = 1.0 / (ydthf_ralsdcp - ydthf_ralvdcp)
@@ -307,7 +318,6 @@ def cloudsc_py(
     imelt[ncldqr - 1] = ncldqs
     imelt[ncldqi - 1] = ncldqr
     imelt[ncldqs - 1] = ncldqr
-
     for jk in range(1, klev + 1):
         for jl in range(kidia, kfdia + 1):
             tendency_loc_t[jk - 1, jl - 1] = 0.0
@@ -334,31 +344,19 @@ def cloudsc_py(
     llfall[ncldqi - 1] = False
     for jk in range(1, klev + 1):
         for jl in range(kidia, kfdia + 1):
-            ztp1[jk - 1, jl - 1] = (
-                pt[jk - 1, jl - 1] + ptsphy * tendency_tmp_t[jk - 1, jl - 1]
-            )
-            zqx[ncldqv - 1, jk - 1, jl - 1] = (
-                pq[jk - 1, jl - 1] + ptsphy * tendency_tmp_q[jk - 1, jl - 1]
-            )
-            zqx0[ncldqv - 1, jk - 1, jl - 1] = (
-                pq[jk - 1, jl - 1] + ptsphy * tendency_tmp_q[jk - 1, jl - 1]
-            )
-            za[jk - 1, jl - 1] = (
-                pa[jk - 1, jl - 1] + ptsphy * tendency_tmp_a[jk - 1, jl - 1]
-            )
-            zaorig[jk - 1, jl - 1] = (
-                pa[jk - 1, jl - 1] + ptsphy * tendency_tmp_a[jk - 1, jl - 1]
-            )
+            ztp1[jk - 1, jl - 1] = pt[jk - 1, jl - 1] + ptsphy * tendency_tmp_t[jk - 1, jl - 1]
+            zqx[ncldqv - 1, jk - 1, jl - 1] = pq[jk - 1, jl - 1] + ptsphy * tendency_tmp_q[jk - 1, jl - 1]
+            zqx0[ncldqv - 1, jk - 1, jl - 1] = pq[jk - 1, jl - 1] + ptsphy * tendency_tmp_q[jk - 1, jl - 1]
+            za[jk - 1, jl - 1] = pa[jk - 1, jl - 1] + ptsphy * tendency_tmp_a[jk - 1, jl - 1]
+            zaorig[jk - 1, jl - 1] = pa[jk - 1, jl - 1] + ptsphy * tendency_tmp_a[jk - 1, jl - 1]
     for jm in range(1, nclv - 1 + 1):
         for jk in range(1, klev + 1):
             for jl in range(kidia, kfdia + 1):
                 zqx[jm - 1, jk - 1, jl - 1] = (
-                    pclv[jm - 1, jk - 1, jl - 1]
-                    + ptsphy * tendency_tmp_cld[jm - 1, jk - 1, jl - 1]
+                    pclv[jm - 1, jk - 1, jl - 1] + ptsphy * tendency_tmp_cld[jm - 1, jk - 1, jl - 1]
                 )
                 zqx0[jm - 1, jk - 1, jl - 1] = (
-                    pclv[jm - 1, jk - 1, jl - 1]
-                    + ptsphy * tendency_tmp_cld[jm - 1, jk - 1, jl - 1]
+                    pclv[jm - 1, jk - 1, jl - 1] + ptsphy * tendency_tmp_cld[jm - 1, jk - 1, jl - 1]
                 )
     for jm in range(1, nclv + 1):
         for jk in range(1, klev + 1 + 1):
@@ -376,120 +374,68 @@ def cloudsc_py(
     for jk in range(1, klev + 1):
         for jl in range(kidia, kfdia + 1):
             if (
-                zqx[ncldql - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
-                < yrecldp_rlmin
+                zqx[ncldql - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1] < yrecldp_rlmin
                 or za[jk - 1, jl - 1] < yrecldp_ramin
             ):
-                zlneg[ncldql - 1, jk - 1, jl - 1] = (
-                    zlneg[ncldql - 1, jk - 1, jl - 1] + zqx[ncldql - 1, jk - 1, jl - 1]
-                )
+                zlneg[ncldql - 1, jk - 1, jl - 1] = zlneg[ncldql - 1, jk - 1, jl - 1] + zqx[ncldql - 1, jk - 1, jl - 1]
                 zqadj = zqx[ncldql - 1, jk - 1, jl - 1] * zqtmst
                 tendency_loc_q[jk - 1, jl - 1] = tendency_loc_q[jk - 1, jl - 1] + zqadj
-                tendency_loc_t[jk - 1, jl - 1] = (
-                    tendency_loc_t[jk - 1, jl - 1] - ydthf_ralvdcp * zqadj
-                )
-                zqx[ncldqv - 1, jk - 1, jl - 1] = (
-                    zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[ncldql - 1, jk - 1, jl - 1]
-                )
+                tendency_loc_t[jk - 1, jl - 1] = tendency_loc_t[jk - 1, jl - 1] - ydthf_ralvdcp * zqadj
+                zqx[ncldqv - 1, jk - 1, jl - 1] = zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[ncldql - 1, jk - 1, jl - 1]
                 zqx[ncldql - 1, jk - 1, jl - 1] = 0.0
-                zlneg[ncldqi - 1, jk - 1, jl - 1] = (
-                    zlneg[ncldqi - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
-                )
+                zlneg[ncldqi - 1, jk - 1, jl - 1] = zlneg[ncldqi - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
                 zqadj = zqx[ncldqi - 1, jk - 1, jl - 1] * zqtmst
                 tendency_loc_q[jk - 1, jl - 1] = tendency_loc_q[jk - 1, jl - 1] + zqadj
-                tendency_loc_t[jk - 1, jl - 1] = (
-                    tendency_loc_t[jk - 1, jl - 1] - ydthf_ralsdcp * zqadj
-                )
-                zqx[ncldqv - 1, jk - 1, jl - 1] = (
-                    zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
-                )
+                tendency_loc_t[jk - 1, jl - 1] = tendency_loc_t[jk - 1, jl - 1] - ydthf_ralsdcp * zqadj
+                zqx[ncldqv - 1, jk - 1, jl - 1] = zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
                 zqx[ncldqi - 1, jk - 1, jl - 1] = 0.0
                 za[jk - 1, jl - 1] = 0.0
     for jm in range(1, nclv - 1 + 1):
         for jk in range(1, klev + 1):
             for jl in range(kidia, kfdia + 1):
                 if zqx[jm - 1, jk - 1, jl - 1] < yrecldp_rlmin:
-                    zlneg[jm - 1, jk - 1, jl - 1] = (
-                        zlneg[jm - 1, jk - 1, jl - 1] + zqx[jm - 1, jk - 1, jl - 1]
-                    )
+                    zlneg[jm - 1, jk - 1, jl - 1] = zlneg[jm - 1, jk - 1, jl - 1] + zqx[jm - 1, jk - 1, jl - 1]
                     zqadj = zqx[jm - 1, jk - 1, jl - 1] * zqtmst
-                    tendency_loc_q[jk - 1, jl - 1] = (
-                        tendency_loc_q[jk - 1, jl - 1] + zqadj
-                    )
+                    tendency_loc_q[jk - 1, jl - 1] = tendency_loc_q[jk - 1, jl - 1] + zqadj
                     if iphase[jm - 1] == 1:
-                        tendency_loc_t[jk - 1, jl - 1] = (
-                            tendency_loc_t[jk - 1, jl - 1] - ydthf_ralvdcp * zqadj
-                        )
+                        tendency_loc_t[jk - 1, jl - 1] = tendency_loc_t[jk - 1, jl - 1] - ydthf_ralvdcp * zqadj
                     if iphase[jm - 1] == 2:
-                        tendency_loc_t[jk - 1, jl - 1] = (
-                            tendency_loc_t[jk - 1, jl - 1] - ydthf_ralsdcp * zqadj
-                        )
-                    zqx[ncldqv - 1, jk - 1, jl - 1] = (
-                        zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[jm - 1, jk - 1, jl - 1]
-                    )
+                        tendency_loc_t[jk - 1, jl - 1] = tendency_loc_t[jk - 1, jl - 1] - ydthf_ralsdcp * zqadj
+                    zqx[ncldqv - 1, jk - 1, jl - 1] = zqx[ncldqv - 1, jk - 1, jl - 1] + zqx[jm - 1, jk - 1, jl - 1]
                     zqx[jm - 1, jk - 1, jl - 1] = 0.0
     for jk in range(1, klev + 1):
         for jl in range(kidia, kfdia + 1):
             zfoealfa[jk - 1, jl - 1] = min(
                 1.0,
-                (
-                    (
-                        max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                        - ydthf_rtice
-                    )
-                    * ydthf_rtwat_rtice_r
-                )
-                ** 2,
+                ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r) ** 2,
             )
             zfoeewmt[jk - 1, jl - 1] = min(
                 ydthf_r2es
                 * (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
-                    * np.exp(
-                        ydthf_r3les
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
-                    )
+                    * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les))
                     + (
                         1.0
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
                         )
                     )
-                    * np.exp(
-                        ydthf_r3ies
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
-                    )
+                    * np.exp(ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies))
                 )
                 / pap[jk - 1, jl - 1],
                 0.5,
             )
             zqsmix[jk - 1, jl - 1] = zfoeewmt[jk - 1, jl - 1]
-            zqsmix[jk - 1, jl - 1] = zqsmix[jk - 1, jl - 1] / (
-                1.0 - ydcst_retv * zqsmix[jk - 1, jl - 1]
-            )
+            zqsmix[jk - 1, jl - 1] = zqsmix[jk - 1, jl - 1] / (1.0 - ydcst_retv * zqsmix[jk - 1, jl - 1])
             zalfa = max(0.0, 1.0 * np.sign(ztp1[jk - 1, jl - 1] - ydcst_rtt))
             zfoeew[jk - 1, jl - 1] = min(
                 (
@@ -497,18 +443,14 @@ def cloudsc_py(
                     * (
                         ydthf_r2es
                         * np.exp(
-                            ydthf_r3les
-                            * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                            / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
+                            ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
                         )
                     )
                     + (1.0 - zalfa)
                     * (
                         ydthf_r2es
                         * np.exp(
-                            ydthf_r3ies
-                            * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                            / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
+                            ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
                         )
                     )
                 )
@@ -516,33 +458,21 @@ def cloudsc_py(
                 0.5,
             )
             zfoeew[jk - 1, jl - 1] = min(0.5, zfoeew[jk - 1, jl - 1])
-            zqsice[jk - 1, jl - 1] = zfoeew[jk - 1, jl - 1] / (
-                1.0 - ydcst_retv * zfoeew[jk - 1, jl - 1]
-            )
+            zqsice[jk - 1, jl - 1] = zfoeew[jk - 1, jl - 1] / (1.0 - ydcst_retv * zfoeew[jk - 1, jl - 1])
             zfoeeliqt[jk - 1, jl - 1] = min(
                 ydthf_r2es
-                * np.exp(
-                    ydthf_r3les
-                    * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                    / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
-                )
+                * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les))
                 / pap[jk - 1, jl - 1],
                 0.5,
             )
             zqsliq[jk - 1, jl - 1] = zfoeeliqt[jk - 1, jl - 1]
-            zqsliq[jk - 1, jl - 1] = zqsliq[jk - 1, jl - 1] / (
-                1.0 - ydcst_retv * zqsliq[jk - 1, jl - 1]
-            )
+            zqsliq[jk - 1, jl - 1] = zqsliq[jk - 1, jl - 1] / (1.0 - ydcst_retv * zqsliq[jk - 1, jl - 1])
     for jk in range(1, klev + 1):
         for jl in range(kidia, kfdia + 1):
             za[jk - 1, jl - 1] = max(0.0, min(1.0, za[jk - 1, jl - 1]))
-            zli[jk - 1, jl - 1] = (
-                zqx[ncldql - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
-            )
+            zli[jk - 1, jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1] + zqx[ncldqi - 1, jk - 1, jl - 1]
             if zli[jk - 1, jl - 1] > yrecldp_rlmin:
-                zliqfrac[jk - 1, jl - 1] = (
-                    zqx[ncldql - 1, jk - 1, jl - 1] / zli[jk - 1, jl - 1]
-                )
+                zliqfrac[jk - 1, jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1] / zli[jk - 1, jl - 1]
                 zicefrac[jk - 1, jl - 1] = 1.0 - zliqfrac[jk - 1, jl - 1]
             else:
                 zliqfrac[jk - 1, jl - 1] = 0.0
@@ -553,11 +483,7 @@ def cloudsc_py(
     for jk in range(1, klev - 1 + 1):
         for jl in range(kidia, kfdia + 1):
             zsig = pap[jk - 1, jl - 1] * zpaphd[jl - 1]
-            if (
-                zsig > 0.1
-                and zsig < 0.4
-                and (ztp1[jk - 1, jl - 1] > ztp1[jk + 1 - 1, jl - 1])
-            ):
+            if zsig > 0.1 and zsig < 0.4 and (ztp1[jk - 1, jl - 1] > ztp1[jk + 1 - 1, jl - 1]):
                 ztrpaus[jl - 1] = zsig
     for jl in range(kidia, kfdia + 1):
         zanewm1[jl - 1] = 0.0
@@ -607,9 +533,7 @@ def cloudsc_py(
             zdtgdp[jl - 1] = ptsphy * zgdp[jl - 1]
             zrdtgdp[jl - 1] = zdp[jl - 1] * (1.0 / (ptsphy * ydcst_rg))
             if jk > 1:
-                zdtgdpf[jl - 1] = (
-                    ptsphy * ydcst_rg / (pap[jk - 1, jl - 1] - pap[jk - 1 - 1, jl - 1])
-                )
+                zdtgdpf[jl - 1] = ptsphy * ydcst_rg / (pap[jk - 1, jl - 1] - pap[jk - 1 - 1, jl - 1])
             zfacw = ydthf_r5les / (ztp1[jk - 1, jl - 1] - ydthf_r4les) ** 2
             zcor = 1.0 / (1.0 - ydcst_retv * zfoeeliqt[jk - 1, jl - 1])
             zdqsliqdt[jl - 1] = zfacw * zcor * zqsliq[jk - 1, jl - 1]
@@ -628,13 +552,7 @@ def cloudsc_py(
                 + (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
                     * ydthf_ralvdcp
@@ -643,13 +561,7 @@ def cloudsc_py(
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
@@ -660,19 +572,13 @@ def cloudsc_py(
                 * zdqsmixdt[jl - 1]
             )
             zevaplimmix[jl - 1] = max(
-                (zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1])
-                / zcorqsmix[jl - 1],
-                0.0,
+                (zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) / zcorqsmix[jl - 1], 0.0
             )
             zevaplimliq[jl - 1] = max(
-                (zqsliq[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1])
-                / zcorqsliq[jl - 1],
-                0.0,
+                (zqsliq[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) / zcorqsliq[jl - 1], 0.0
             )
             zevaplimice[jl - 1] = max(
-                (zqsice[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1])
-                / zcorqsice[jl - 1],
-                0.0,
+                (zqsice[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) / zcorqsice[jl - 1], 0.0
             )
             ztmpa = 1.0 / max(za[jk - 1, jl - 1], zepsec)
             zliqcld[jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1] * ztmpa
@@ -681,30 +587,18 @@ def cloudsc_py(
         for jl in range(kidia, kfdia + 1):
             if zqx[ncldql - 1, jk - 1, jl - 1] < yrecldp_rlmin:
                 zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = zqx[ncldql - 1, jk - 1, jl - 1]
-                zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = -zqx[
-                    ncldql - 1, jk - 1, jl - 1
-                ]
+                zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = -zqx[ncldql - 1, jk - 1, jl - 1]
             if zqx[ncldqi - 1, jk - 1, jl - 1] < yrecldp_rlmin:
                 zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = zqx[ncldqi - 1, jk - 1, jl - 1]
-                zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = -zqx[
-                    ncldqi - 1, jk - 1, jl - 1
-                ]
+                zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = -zqx[ncldqi - 1, jk - 1, jl - 1]
         for jl in range(kidia, kfdia + 1):
             zfokoop[jl - 1] = min(
                 ydthf_rkoop1 - ydthf_rkoop2 * ztp1[jk - 1, jl - 1],
                 ydthf_r2es
-                * np.exp(
-                    ydthf_r3les
-                    * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                    / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
-                )
+                * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les))
                 / (
                     ydthf_r2es
-                    * np.exp(
-                        ydthf_r3ies
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
-                    )
+                    * np.exp(ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies))
                 ),
             )
         for jl in range(kidia, kfdia + 1):
@@ -716,42 +610,24 @@ def cloudsc_py(
                 zfaci = ptsphy / yrecldp_rkooptau
             if za[jk - 1, jl - 1] > 1.0 - yrecldp_ramin:
                 zsupsat[jl - 1] = max(
-                    (zqx[ncldqv - 1, jk - 1, jl - 1] - zfac * zqsice[jk - 1, jl - 1])
-                    / zcorqsice[jl - 1],
-                    0.0,
+                    (zqx[ncldqv - 1, jk - 1, jl - 1] - zfac * zqsice[jk - 1, jl - 1]) / zcorqsice[jl - 1], 0.0
                 )
             else:
-                zqp1env = (
-                    zqx[ncldqv - 1, jk - 1, jl - 1]
-                    - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]
-                ) / max(1.0 - za[jk - 1, jl - 1], zepsilon)
+                zqp1env = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]) / max(
+                    1.0 - za[jk - 1, jl - 1], zepsilon
+                )
                 zsupsat[jl - 1] = max(
-                    (1.0 - za[jk - 1, jl - 1])
-                    * (zqp1env - zfac * zqsice[jk - 1, jl - 1])
-                    / zcorqsice[jl - 1],
-                    0.0,
+                    (1.0 - za[jk - 1, jl - 1]) * (zqp1env - zfac * zqsice[jk - 1, jl - 1]) / zcorqsice[jl - 1], 0.0
                 )
             if zsupsat[jl - 1] > zepsec:
                 if ztp1[jk - 1, jl - 1] > yrecldp_rthomo:
-                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldql - 1, jl - 1] + zsupsat[jl - 1]
-                    )
-                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldql - 1, ncldqv - 1, jl - 1] - zsupsat[jl - 1]
-                    )
-                    zqxfg[ncldql - 1, jl - 1] = (
-                        zqxfg[ncldql - 1, jl - 1] + zsupsat[jl - 1]
-                    )
+                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = zsolqa[ncldqv - 1, ncldql - 1, jl - 1] + zsupsat[jl - 1]
+                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = zsolqa[ncldql - 1, ncldqv - 1, jl - 1] - zsupsat[jl - 1]
+                    zqxfg[ncldql - 1, jl - 1] = zqxfg[ncldql - 1, jl - 1] + zsupsat[jl - 1]
                 else:
-                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] + zsupsat[jl - 1]
-                    )
-                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] - zsupsat[jl - 1]
-                    )
-                    zqxfg[ncldqi - 1, jl - 1] = (
-                        zqxfg[ncldqi - 1, jl - 1] + zsupsat[jl - 1]
-                    )
+                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] + zsupsat[jl - 1]
+                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] - zsupsat[jl - 1]
+                    zqxfg[ncldqi - 1, jl - 1] = zqxfg[ncldqi - 1, jl - 1] + zsupsat[jl - 1]
                 zsolac[jl - 1] = (1.0 - za[jk - 1, jl - 1]) * zfaci
             if psupsat[jk - 1, jl - 1] > zepsec:
                 if ztp1[jk - 1, jl - 1] > yrecldp_rthomo:
@@ -759,107 +635,67 @@ def cloudsc_py(
                         zsolqa[ncldql - 1, ncldql - 1, jl - 1] + psupsat[jk - 1, jl - 1]
                     )
                     zpsupsatsrce[ncldql - 1, jl - 1] = psupsat[jk - 1, jl - 1]
-                    zqxfg[ncldql - 1, jl - 1] = (
-                        zqxfg[ncldql - 1, jl - 1] + psupsat[jk - 1, jl - 1]
-                    )
+                    zqxfg[ncldql - 1, jl - 1] = zqxfg[ncldql - 1, jl - 1] + psupsat[jk - 1, jl - 1]
                 else:
                     zsolqa[ncldqi - 1, ncldqi - 1, jl - 1] = (
                         zsolqa[ncldqi - 1, ncldqi - 1, jl - 1] + psupsat[jk - 1, jl - 1]
                     )
                     zpsupsatsrce[ncldqi - 1, jl - 1] = psupsat[jk - 1, jl - 1]
-                    zqxfg[ncldqi - 1, jl - 1] = (
-                        zqxfg[ncldqi - 1, jl - 1] + psupsat[jk - 1, jl - 1]
-                    )
+                    zqxfg[ncldqi - 1, jl - 1] = zqxfg[ncldqi - 1, jl - 1] + psupsat[jk - 1, jl - 1]
                 zsolac[jl - 1] = (1.0 - za[jk - 1, jl - 1]) * zfaci
         if jk < klev and jk >= yrecldp_ncldtop:
             for jl in range(kidia, kfdia + 1):
                 plude[jk - 1, jl - 1] = plude[jk - 1, jl - 1] * zdtgdp[jl - 1]
-                if (
-                    ldcum[jl - 1]
-                    and plude[jk - 1, jl - 1] > yrecldp_rlmin
-                    and (plu[jk + 1 - 1, jl - 1] > zepsec)
-                ):
-                    zsolac[jl - 1] = (
-                        zsolac[jl - 1] + plude[jk - 1, jl - 1] / plu[jk + 1 - 1, jl - 1]
-                    )
+                if ldcum[jl - 1] and plude[jk - 1, jl - 1] > yrecldp_rlmin and (plu[jk + 1 - 1, jl - 1] > zepsec):
+                    zsolac[jl - 1] = zsolac[jl - 1] + plude[jk - 1, jl - 1] / plu[jk + 1 - 1, jl - 1]
                     zalfaw = zfoealfa[jk - 1, jl - 1]
                     zconvsrce[ncldql - 1, jl - 1] = zalfaw * plude[jk - 1, jl - 1]
-                    zconvsrce[ncldqi - 1, jl - 1] = (1.0 - zalfaw) * plude[
-                        jk - 1, jl - 1
-                    ]
+                    zconvsrce[ncldqi - 1, jl - 1] = (1.0 - zalfaw) * plude[jk - 1, jl - 1]
                     zsolqa[ncldql - 1, ncldql - 1, jl - 1] = (
-                        zsolqa[ncldql - 1, ncldql - 1, jl - 1]
-                        + zconvsrce[ncldql - 1, jl - 1]
+                        zsolqa[ncldql - 1, ncldql - 1, jl - 1] + zconvsrce[ncldql - 1, jl - 1]
                     )
                     zsolqa[ncldqi - 1, ncldqi - 1, jl - 1] = (
-                        zsolqa[ncldqi - 1, ncldqi - 1, jl - 1]
-                        + zconvsrce[ncldqi - 1, jl - 1]
+                        zsolqa[ncldqi - 1, ncldqi - 1, jl - 1] + zconvsrce[ncldqi - 1, jl - 1]
                     )
                 else:
                     plude[jk - 1, jl - 1] = 0.0
                 if ldcum[jl - 1]:
                     zsolqa[ncldqs - 1, ncldqs - 1, jl - 1] = (
-                        zsolqa[ncldqs - 1, ncldqs - 1, jl - 1]
-                        + psnde[jk - 1, jl - 1] * zdtgdp[jl - 1]
+                        zsolqa[ncldqs - 1, ncldqs - 1, jl - 1] + psnde[jk - 1, jl - 1] * zdtgdp[jl - 1]
                     )
         if jk > yrecldp_ncldtop:
             for jl in range(kidia, kfdia + 1):
-                zmf[jl - 1] = max(
-                    0.0, (pmfu[jk - 1, jl - 1] + pmfd[jk - 1, jl - 1]) * zdtgdp[jl - 1]
-                )
+                zmf[jl - 1] = max(0.0, (pmfu[jk - 1, jl - 1] + pmfd[jk - 1, jl - 1]) * zdtgdp[jl - 1])
                 zacust[jl - 1] = zmf[jl - 1] * zanewm1[jl - 1]
             for jm in range(1, nclv + 1):
                 if not llfall[jm - 1] and iphase[jm - 1] > 0:
                     for jl in range(kidia, kfdia + 1):
                         zlcust[jm - 1, jl - 1] = zmf[jl - 1] * zqxnm1[jm - 1, jl - 1]
-                        zconvsrce[jm - 1, jl - 1] = (
-                            zconvsrce[jm - 1, jl - 1] + zlcust[jm - 1, jl - 1]
-                        )
+                        zconvsrce[jm - 1, jl - 1] = zconvsrce[jm - 1, jl - 1] + zlcust[jm - 1, jl - 1]
             for jl in range(kidia, kfdia + 1):
-                zdtdp = (
-                    zrdcp
-                    * 0.5
-                    * (ztp1[jk - 1 - 1, jl - 1] + ztp1[jk - 1, jl - 1])
-                    / paph[jk - 1, jl - 1]
-                )
+                zdtdp = zrdcp * 0.5 * (ztp1[jk - 1 - 1, jl - 1] + ztp1[jk - 1, jl - 1]) / paph[jk - 1, jl - 1]
                 zdtforc = zdtdp * (pap[jk - 1, jl - 1] - pap[jk - 1 - 1, jl - 1])
                 zdqs[jl - 1] = zanewm1[jl - 1] * zdtforc * zdqsmixdt[jl - 1]
             for jm in range(1, nclv + 1):
                 if not llfall[jm - 1] and iphase[jm - 1] > 0:
                     for jl in range(kidia, kfdia + 1):
                         zlfinal = max(0.0, zlcust[jm - 1, jl - 1] - zdqs[jl - 1])
-                        zevap = min(
-                            zlcust[jm - 1, jl - 1] - zlfinal, zevaplimmix[jl - 1]
-                        )
+                        zevap = min(zlcust[jm - 1, jl - 1] - zlfinal, zevaplimmix[jl - 1])
                         zlfinal = zlcust[jm - 1, jl - 1] - zevap
                         zlfinalsum[jl - 1] = zlfinalsum[jl - 1] + zlfinal
-                        zsolqa[jm - 1, jm - 1, jl - 1] = (
-                            zsolqa[jm - 1, jm - 1, jl - 1] + zlcust[jm - 1, jl - 1]
-                        )
-                        zsolqa[jm - 1, ncldqv - 1, jl - 1] = (
-                            zsolqa[jm - 1, ncldqv - 1, jl - 1] + zevap
-                        )
-                        zsolqa[ncldqv - 1, jm - 1, jl - 1] = (
-                            zsolqa[ncldqv - 1, jm - 1, jl - 1] - zevap
-                        )
+                        zsolqa[jm - 1, jm - 1, jl - 1] = zsolqa[jm - 1, jm - 1, jl - 1] + zlcust[jm - 1, jl - 1]
+                        zsolqa[jm - 1, ncldqv - 1, jl - 1] = zsolqa[jm - 1, ncldqv - 1, jl - 1] + zevap
+                        zsolqa[ncldqv - 1, jm - 1, jl - 1] = zsolqa[ncldqv - 1, jm - 1, jl - 1] - zevap
             for jl in range(kidia, kfdia + 1):
                 if zlfinalsum[jl - 1] < zepsec:
                     zacust[jl - 1] = 0.0
                 zsolac[jl - 1] = zsolac[jl - 1] + zacust[jl - 1]
         for jl in range(kidia, kfdia + 1):
             if jk < klev:
-                zmfdn = max(
-                    0.0,
-                    (pmfu[jk + 1 - 1, jl - 1] + pmfd[jk + 1 - 1, jl - 1])
-                    * zdtgdp[jl - 1],
-                )
+                zmfdn = max(0.0, (pmfu[jk + 1 - 1, jl - 1] + pmfd[jk + 1 - 1, jl - 1]) * zdtgdp[jl - 1])
                 zsolab[jl - 1] = zsolab[jl - 1] + zmfdn
-                zsolqb[ncldql - 1, ncldql - 1, jl - 1] = (
-                    zsolqb[ncldql - 1, ncldql - 1, jl - 1] + zmfdn
-                )
-                zsolqb[ncldqi - 1, ncldqi - 1, jl - 1] = (
-                    zsolqb[ncldqi - 1, ncldqi - 1, jl - 1] + zmfdn
-                )
+                zsolqb[ncldql - 1, ncldql - 1, jl - 1] = zsolqb[ncldql - 1, ncldql - 1, jl - 1] + zmfdn
+                zsolqb[ncldqi - 1, ncldqi - 1, jl - 1] = zsolqb[ncldqi - 1, ncldqi - 1, jl - 1] + zmfdn
                 zconvsink[ncldql - 1, jl - 1] = zmfdn
                 zconvsink[ncldqi - 1, jl - 1] = zmfdn
         for jl in range(kidia, kfdia + 1):
@@ -868,29 +704,23 @@ def cloudsc_py(
                 zldifdt[jl - 1] = yrecldp_rcldiff_convi * zldifdt[jl - 1]
         for jl in range(kidia, kfdia + 1):
             if zli[jk - 1, jl - 1] > zepsec:
-                ze = zldifdt[jl - 1] * max(
-                    zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1], 0.0
-                )
+                ze = zldifdt[jl - 1] * max(zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1], 0.0)
                 zleros = za[jk - 1, jl - 1] * ze
                 zleros = min(zleros, zevaplimmix[jl - 1])
                 zleros = min(zleros, zli[jk - 1, jl - 1])
                 zaeros = zleros / zlicld[jl - 1]
                 zsolac[jl - 1] = zsolac[jl - 1] - zaeros
                 zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = (
-                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1]
-                    + zliqfrac[jk - 1, jl - 1] * zleros
+                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1] + zliqfrac[jk - 1, jl - 1] * zleros
                 )
                 zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = (
-                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1]
-                    - zliqfrac[jk - 1, jl - 1] * zleros
+                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1] - zliqfrac[jk - 1, jl - 1] * zleros
                 )
                 zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = (
-                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1]
-                    + zicefrac[jk - 1, jl - 1] * zleros
+                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] + zicefrac[jk - 1, jl - 1] * zleros
                 )
                 zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = (
-                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1]
-                    - zicefrac[jk - 1, jl - 1] * zleros
+                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] - zicefrac[jk - 1, jl - 1] * zleros
                 )
         for jl in range(kidia, kfdia + 1):
             zdtdp = zrdcp * ztp1[jk - 1, jl - 1] / pap[jk - 1, jl - 1]
@@ -898,15 +728,10 @@ def cloudsc_py(
             zmfdn = 0.0
             if jk < klev:
                 zmfdn = pmfu[jk + 1 - 1, jl - 1] + pmfd[jk + 1 - 1, jl - 1]
-            zwtot = pvervel[jk - 1, jl - 1] + 0.5 * ydcst_rg * (
-                pmfu[jk - 1, jl - 1] + pmfd[jk - 1, jl - 1] + zmfdn
-            )
+            zwtot = pvervel[jk - 1, jl - 1] + 0.5 * ydcst_rg * (pmfu[jk - 1, jl - 1] + pmfd[jk - 1, jl - 1] + zmfdn)
             zwtot = min(zdpmxdt, max(-zdpmxdt, zwtot))
             zzzdt = phrsw[jk - 1, jl - 1] + phrlw[jk - 1, jl - 1]
-            zdtdiab = (
-                min(zdpmxdt * zdtdp, max(-zdpmxdt * zdtdp, zzzdt)) * ptsphy
-                + ydthf_ralfdcp * zldefr[jl - 1]
-            )
+            zdtdiab = min(zdpmxdt * zdtdp, max(-zdpmxdt * zdtdp, zzzdt)) * ptsphy + ydthf_ralfdcp * zldefr[jl - 1]
             zdtforc = zdtdp * zwtot * ptsphy + zdtdiab
             zqold[jl - 1] = zqsmix[jk - 1, jl - 1]
             ztold[jl - 1] = ztp1[jk - 1, jl - 1]
@@ -920,42 +745,22 @@ def cloudsc_py(
                 * (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
-                    * np.exp(
-                        ydthf_r3les
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
-                    )
+                    * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les))
                     + (
                         1.0
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
                         )
                     )
-                    * np.exp(
-                        ydthf_r3ies
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
-                    )
+                    * np.exp(ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies))
                 )
                 * zqp
             )
@@ -969,13 +774,7 @@ def cloudsc_py(
                 * (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
                     * ydthf_r5alvcp
@@ -985,13 +784,7 @@ def cloudsc_py(
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
@@ -1006,13 +799,7 @@ def cloudsc_py(
                 + (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
                     * ydthf_ralvdcp
@@ -1021,13 +808,7 @@ def cloudsc_py(
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
@@ -1043,42 +824,22 @@ def cloudsc_py(
                 * (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
-                    * np.exp(
-                        ydthf_r3les
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
-                    )
+                    * np.exp(ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les))
                     + (
                         1.0
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
                         )
                     )
-                    * np.exp(
-                        ydthf_r3ies
-                        * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                        / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
-                    )
+                    * np.exp(ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies))
                 )
                 * zqp
             )
@@ -1092,13 +853,7 @@ def cloudsc_py(
                 * (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
                     * ydthf_r5alvcp
@@ -1108,13 +863,7 @@ def cloudsc_py(
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
@@ -1129,13 +878,7 @@ def cloudsc_py(
                 + (
                     min(
                         1.0,
-                        (
-                            (
-                                max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1]))
-                                - ydthf_rtice
-                            )
-                            * ydthf_rtwat_rtice_r
-                        )
+                        ((max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice) * ydthf_rtwat_rtice_r)
                         ** 2,
                     )
                     * ydthf_ralvdcp
@@ -1144,13 +887,7 @@ def cloudsc_py(
                         - min(
                             1.0,
                             (
-                                (
-                                    max(
-                                        ydthf_rtice,
-                                        min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                    )
-                                    - ydthf_rtice
-                                )
+                                (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                 * ydthf_rtwat_rtice_r
                             )
                             ** 2,
@@ -1169,36 +906,27 @@ def cloudsc_py(
             if zdqs[jl - 1] > 0.0:
                 zlevap = za[jk - 1, jl - 1] * min(zdqs[jl - 1], zlicld[jl - 1])
                 zlevap = min(zlevap, zevaplimmix[jl - 1])
-                zlevap = min(
-                    zlevap,
-                    max(zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1], 0.0),
-                )
+                zlevap = min(zlevap, max(zqsmix[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1], 0.0))
                 zlevapl[jl - 1] = zliqfrac[jk - 1, jl - 1] * zlevap
                 zlevapi[jl - 1] = zicefrac[jk - 1, jl - 1] * zlevap
                 zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = (
-                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1]
-                    + zliqfrac[jk - 1, jl - 1] * zlevap
+                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1] + zliqfrac[jk - 1, jl - 1] * zlevap
                 )
                 zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = (
-                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1]
-                    - zliqfrac[jk - 1, jl - 1] * zlevap
+                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1] - zliqfrac[jk - 1, jl - 1] * zlevap
                 )
                 zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = (
-                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1]
-                    + zicefrac[jk - 1, jl - 1] * zlevap
+                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] + zicefrac[jk - 1, jl - 1] * zlevap
                 )
                 zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = (
-                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1]
-                    - zicefrac[jk - 1, jl - 1] * zlevap
+                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] - zicefrac[jk - 1, jl - 1] * zlevap
                 )
         for jl in range(kidia, kfdia + 1):
             if za[jk - 1, jl - 1] > zepsec and zdqs[jl - 1] <= -yrecldp_rlmin:
                 zlcond1[jl - 1] = max(-zdqs[jl - 1], 0.0)
                 if za[jk - 1, jl - 1] > 0.99:
                     zcor = 1.0 / (1.0 - ydcst_retv * zqsmix[jk - 1, jl - 1])
-                    zcdmax = (
-                        zqx[ncldqv - 1, jk - 1, jl - 1] - zqsmix[jk - 1, jl - 1]
-                    ) / (
+                    zcdmax = (zqx[ncldqv - 1, jk - 1, jl - 1] - zqsmix[jk - 1, jl - 1]) / (
                         1.0
                         + zcor
                         * zqsmix[jk - 1, jl - 1]
@@ -1206,13 +934,7 @@ def cloudsc_py(
                             min(
                                 1.0,
                                 (
-                                    (
-                                        max(
-                                            ydthf_rtice,
-                                            min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                        )
-                                        - ydthf_rtice
-                                    )
+                                    (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                     * ydthf_rtwat_rtice_r
                                 )
                                 ** 2,
@@ -1224,13 +946,7 @@ def cloudsc_py(
                                 - min(
                                     1.0,
                                     (
-                                        (
-                                            max(
-                                                ydthf_rtice,
-                                                min(ydthf_rtwat, ztp1[jk - 1, jl - 1]),
-                                            )
-                                            - ydthf_rtice
-                                        )
+                                        (max(ydthf_rtice, min(ydthf_rtwat, ztp1[jk - 1, jl - 1])) - ydthf_rtice)
                                         * ydthf_rtwat_rtice_r
                                     )
                                     ** 2,
@@ -1241,49 +957,37 @@ def cloudsc_py(
                         )
                     )
                 else:
-                    zcdmax = (
-                        zqx[ncldqv - 1, jk - 1, jl - 1]
-                        - za[jk - 1, jl - 1] * zqsmix[jk - 1, jl - 1]
-                    ) / za[jk - 1, jl - 1]
+                    zcdmax = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsmix[jk - 1, jl - 1]) / za[
+                        jk - 1, jl - 1
+                    ]
                 zlcond1[jl - 1] = max(min(zlcond1[jl - 1], zcdmax), 0.0)
                 zlcond1[jl - 1] = za[jk - 1, jl - 1] * zlcond1[jl - 1]
                 if zlcond1[jl - 1] < yrecldp_rlmin:
                     zlcond1[jl - 1] = 0.0
                 if ztp1[jk - 1, jl - 1] > yrecldp_rthomo:
-                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldql - 1, jl - 1] + zlcond1[jl - 1]
-                    )
-                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldql - 1, ncldqv - 1, jl - 1] - zlcond1[jl - 1]
-                    )
-                    zqxfg[ncldql - 1, jl - 1] = (
-                        zqxfg[ncldql - 1, jl - 1] + zlcond1[jl - 1]
-                    )
+                    zsolqa[ncldqv - 1, ncldql - 1, jl - 1] = zsolqa[ncldqv - 1, ncldql - 1, jl - 1] + zlcond1[jl - 1]
+                    zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = zsolqa[ncldql - 1, ncldqv - 1, jl - 1] - zlcond1[jl - 1]
+                    zqxfg[ncldql - 1, jl - 1] = zqxfg[ncldql - 1, jl - 1] + zlcond1[jl - 1]
                 else:
-                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] + zlcond1[jl - 1]
-                    )
-                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] - zlcond1[jl - 1]
-                    )
-                    zqxfg[ncldqi - 1, jl - 1] = (
-                        zqxfg[ncldqi - 1, jl - 1] + zlcond1[jl - 1]
-                    )
+                    zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] + zlcond1[jl - 1]
+                    zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] - zlcond1[jl - 1]
+                    zqxfg[ncldqi - 1, jl - 1] = zqxfg[ncldqi - 1, jl - 1] + zlcond1[jl - 1]
         for jl in range(kidia, kfdia + 1):
             if zdqs[jl - 1] <= -yrecldp_rlmin and za[jk - 1, jl - 1] < 1.0 - zepsec:
                 zsigk = pap[jk - 1, jl - 1] / paph[klev + 1 - 1, jl - 1]
                 if zsigk > 0.8:
-                    zrhc = (
-                        yrecldp_ramid
-                        + (1.0 - yrecldp_ramid) * ((zsigk - 0.8) / 0.2) ** 2
-                    )
+                    zrhc = yrecldp_ramid + (1.0 - yrecldp_ramid) * ((zsigk - 0.8) / 0.2) ** 2
                 else:
                     zrhc = yrecldp_ramid
-                if yrecldp_nssopt == 0 or yrecldp_nssopt == 1:
-                    zqe = (
-                        zqx[ncldqv - 1, jk - 1, jl - 1]
-                        - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]
-                    ) / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                if yrecldp_nssopt == 0:
+                    zqe = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]) / max(
+                        zepsec, 1.0 - za[jk - 1, jl - 1]
+                    )
+                    zqe = max(0.0, zqe)
+                elif yrecldp_nssopt == 1:
+                    zqe = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]) / max(
+                        zepsec, 1.0 - za[jk - 1, jl - 1]
+                    )
                     zqe = max(0.0, zqe)
                 elif yrecldp_nssopt == 2:
                     zqe = zqx[ncldqv - 1, jk - 1, jl - 1]
@@ -1293,10 +997,7 @@ def cloudsc_py(
                     zfac = 1.0
                 else:
                     zfac = zfokoop[jl - 1]
-                if (
-                    zqe >= zrhc * zqsice[jk - 1, jl - 1] * zfac
-                    and zqe < zqsice[jk - 1, jl - 1] * zfac
-                ):
+                if zqe >= zrhc * zqsice[jk - 1, jl - 1] * zfac and zqe < zqsice[jk - 1, jl - 1] * zfac:
                     zacond = (
                         -(1.0 - za[jk - 1, jl - 1])
                         * zfac
@@ -1305,11 +1006,7 @@ def cloudsc_py(
                     )
                     zacond = min(zacond, 1.0 - za[jk - 1, jl - 1])
                     zlcond2[jl - 1] = -zfac * zdqs[jl - 1] * 0.5 * zacond
-                    zzdl = (
-                        2.0
-                        * (zfac * zqsice[jk - 1, jl - 1] - zqe)
-                        / max(zepsec, 1.0 - za[jk - 1, jl - 1])
-                    )
+                    zzdl = 2.0 * (zfac * zqsice[jk - 1, jl - 1] - zqe) / max(zepsec, 1.0 - za[jk - 1, jl - 1])
                     if zfac * zdqs[jl - 1] < -zzdl:
                         zlcondlim = (
                             (za[jk - 1, jl - 1] - 1.0) * zfac * zdqs[jl - 1]
@@ -1318,10 +1015,7 @@ def cloudsc_py(
                         )
                         zlcond2[jl - 1] = min(zlcond2[jl - 1], zlcondlim)
                     zlcond2[jl - 1] = max(zlcond2[jl - 1], 0.0)
-                    if (
-                        zlcond2[jl - 1] < yrecldp_rlmin
-                        or 1.0 - za[jk - 1, jl - 1] < zepsec
-                    ):
+                    if zlcond2[jl - 1] < yrecldp_rlmin or 1.0 - za[jk - 1, jl - 1] < zepsec:
                         zlcond2[jl - 1] = 0.0
                         zacond = 0.0
                     if zlcond2[jl - 1] == 0.0:
@@ -1334,9 +1028,7 @@ def cloudsc_py(
                         zsolqa[ncldql - 1, ncldqv - 1, jl - 1] = (
                             zsolqa[ncldql - 1, ncldqv - 1, jl - 1] - zlcond2[jl - 1]
                         )
-                        zqxfg[ncldql - 1, jl - 1] = (
-                            zqxfg[ncldql - 1, jl - 1] + zlcond2[jl - 1]
-                        )
+                        zqxfg[ncldql - 1, jl - 1] = zqxfg[ncldql - 1, jl - 1] + zlcond2[jl - 1]
                     else:
                         zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] = (
                             zsolqa[ncldqv - 1, ncldqi - 1, jl - 1] + zlcond2[jl - 1]
@@ -1344,129 +1036,78 @@ def cloudsc_py(
                         zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] = (
                             zsolqa[ncldqi - 1, ncldqv - 1, jl - 1] - zlcond2[jl - 1]
                         )
-                        zqxfg[ncldqi - 1, jl - 1] = (
-                            zqxfg[ncldqi - 1, jl - 1] + zlcond2[jl - 1]
-                        )
+                        zqxfg[ncldqi - 1, jl - 1] = zqxfg[ncldqi - 1, jl - 1] + zlcond2[jl - 1]
         if idepice == 1:
             for jl in range(kidia, kfdia + 1):
-                if (
-                    za[jk - 1 - 1, jl - 1] < yrecldp_rcldtopcf
-                    and za[jk - 1, jl - 1] >= yrecldp_rcldtopcf
-                ):
+                if za[jk - 1 - 1, jl - 1] < yrecldp_rcldtopcf and za[jk - 1, jl - 1] >= yrecldp_rcldtopcf:
                     zcldtopdist[jl - 1] = 0.0
                 else:
-                    zcldtopdist[jl - 1] = zcldtopdist[jl - 1] + zdp[jl - 1] / (
-                        zrho[jl - 1] * ydcst_rg
-                    )
-                if (
-                    ztp1[jk - 1, jl - 1] < ydcst_rtt
-                    and zqxfg[ncldql - 1, jl - 1] > yrecldp_rlmin
-                ):
+                    zcldtopdist[jl - 1] = zcldtopdist[jl - 1] + zdp[jl - 1] / (zrho[jl - 1] * ydcst_rg)
+                if ztp1[jk - 1, jl - 1] < ydcst_rtt and zqxfg[ncldql - 1, jl - 1] > yrecldp_rlmin:
                     zvpice = (
                         ydthf_r2es
                         * np.exp(
-                            ydthf_r3ies
-                            * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                            / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
+                            ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
                         )
                         * ydcst_rv
                         / ydcst_rd
                     )
                     zvpliq = zvpice * zfokoop[jl - 1]
-                    zicenuclei[jl - 1] = 1000.0 * np.exp(
-                        12.96 * (zvpliq - zvpice) / zvpliq - 0.639
-                    )
+                    zicenuclei[jl - 1] = 1000.0 * np.exp(12.96 * (zvpliq - zvpice) / zvpliq - 0.639)
                     zadd = (
                         ydcst_rlstt
                         * (ydcst_rlstt / (ydcst_rv * ztp1[jk - 1, jl - 1]) - 1.0)
                         / (0.024 * ztp1[jk - 1, jl - 1])
                     )
-                    zbdd = (
-                        ydcst_rv
-                        * ztp1[jk - 1, jl - 1]
-                        * pap[jk - 1, jl - 1]
-                        / (2.21 * zvpice)
-                    )
+                    zbdd = ydcst_rv * ztp1[jk - 1, jl - 1] * pap[jk - 1, jl - 1] / (2.21 * zvpice)
                     zcvds = (
                         7.8
                         * (zicenuclei[jl - 1] / zrho[jl - 1]) ** 0.666
                         * (zvpliq - zvpice)
                         / (8.87 * (zadd + zbdd) * zvpice)
                     )
-                    zice0 = max(
-                        zicecld[jl - 1],
-                        zicenuclei[jl - 1] * yrecldp_riceinit / zrho[jl - 1],
-                    )
+                    zice0 = max(zicecld[jl - 1], zicenuclei[jl - 1] * yrecldp_riceinit / zrho[jl - 1])
                     zinew = (0.666 * zcvds * ptsphy + zice0**0.666) ** 1.5
                     zdepos = max(za[jk - 1, jl - 1] * (zinew - zice0), 0.0)
                     zdepos = min(zdepos, zqxfg[ncldql - 1, jl - 1])
                     zinfactor = min(zicenuclei[jl - 1] / 15000.0, 1.0)
                     zdepos = zdepos * min(
                         zinfactor
-                        + (1.0 - zinfactor)
-                        * (
-                            yrecldp_rdepliqrefrate
-                            + zcldtopdist[jl - 1] / yrecldp_rdepliqrefdepth
-                        ),
+                        + (1.0 - zinfactor) * (yrecldp_rdepliqrefrate + zcldtopdist[jl - 1] / yrecldp_rdepliqrefdepth),
                         1.0,
                     )
-                    zsolqa[ncldql - 1, ncldqi - 1, jl - 1] = (
-                        zsolqa[ncldql - 1, ncldqi - 1, jl - 1] + zdepos
-                    )
-                    zsolqa[ncldqi - 1, ncldql - 1, jl - 1] = (
-                        zsolqa[ncldqi - 1, ncldql - 1, jl - 1] - zdepos
-                    )
+                    zsolqa[ncldql - 1, ncldqi - 1, jl - 1] = zsolqa[ncldql - 1, ncldqi - 1, jl - 1] + zdepos
+                    zsolqa[ncldqi - 1, ncldql - 1, jl - 1] = zsolqa[ncldqi - 1, ncldql - 1, jl - 1] - zdepos
                     zqxfg[ncldqi - 1, jl - 1] = zqxfg[ncldqi - 1, jl - 1] + zdepos
                     zqxfg[ncldql - 1, jl - 1] = zqxfg[ncldql - 1, jl - 1] - zdepos
         elif idepice == 2:
             for jl in range(kidia, kfdia + 1):
-                if (
-                    za[jk - 1 - 1, jl - 1] < yrecldp_rcldtopcf
-                    and za[jk - 1, jl - 1] >= yrecldp_rcldtopcf
-                ):
+                if za[jk - 1 - 1, jl - 1] < yrecldp_rcldtopcf and za[jk - 1, jl - 1] >= yrecldp_rcldtopcf:
                     zcldtopdist[jl - 1] = 0.0
                 else:
-                    zcldtopdist[jl - 1] = zcldtopdist[jl - 1] + zdp[jl - 1] / (
-                        zrho[jl - 1] * ydcst_rg
-                    )
-                if (
-                    ztp1[jk - 1, jl - 1] < ydcst_rtt
-                    and zqxfg[ncldql - 1, jl - 1] > yrecldp_rlmin
-                ):
+                    zcldtopdist[jl - 1] = zcldtopdist[jl - 1] + zdp[jl - 1] / (zrho[jl - 1] * ydcst_rg)
+                if ztp1[jk - 1, jl - 1] < ydcst_rtt and zqxfg[ncldql - 1, jl - 1] > yrecldp_rlmin:
                     zvpice = (
                         ydthf_r2es
                         * np.exp(
-                            ydthf_r3ies
-                            * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                            / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
+                            ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
                         )
                         * ydcst_rv
                         / ydcst_rd
                     )
                     zvpliq = zvpice * zfokoop[jl - 1]
-                    zicenuclei[jl - 1] = 1000.0 * np.exp(
-                        12.96 * (zvpliq - zvpice) / zvpliq - 0.639
-                    )
-                    zice0 = max(
-                        zicecld[jl - 1],
-                        zicenuclei[jl - 1] * yrecldp_riceinit / zrho[jl - 1],
-                    )
+                    zicenuclei[jl - 1] = 1000.0 * np.exp(12.96 * (zvpliq - zvpice) / zvpliq - 0.639)
+                    zice0 = max(zicecld[jl - 1], zicenuclei[jl - 1] * yrecldp_riceinit / zrho[jl - 1])
                     ztcg = 1.0
                     zfacx1i = 1.0
                     zaplusb = (
                         yrecldp_rcl_apb1 * zvpice
                         - yrecldp_rcl_apb2 * zvpice * ztp1[jk - 1, jl - 1]
-                        + pap[jk - 1, jl - 1]
-                        * yrecldp_rcl_apb3
-                        * ztp1[jk - 1, jl - 1] ** 3.0
+                        + pap[jk - 1, jl - 1] * yrecldp_rcl_apb3 * ztp1[jk - 1, jl - 1] ** 3.0
                     )
                     zcorrfac = (1.0 / zrho[jl - 1]) ** 0.5
-                    zcorrfac2 = (ztp1[jk - 1, jl - 1] / 273.0) ** 1.5 * (
-                        393.0 / (ztp1[jk - 1, jl - 1] + 120.0)
-                    )
-                    zpr02 = (
-                        zrho[jl - 1] * zice0 * yrecldp_rcl_const1i / (ztcg * zfacx1i)
-                    )
+                    zcorrfac2 = (ztp1[jk - 1, jl - 1] / 273.0) ** 1.5 * (393.0 / (ztp1[jk - 1, jl - 1] + 120.0))
+                    zpr02 = zrho[jl - 1] * zice0 * yrecldp_rcl_const1i / (ztcg * zfacx1i)
                     zterm1 = (
                         (zvpliq - zvpice)
                         * ztp1[jk - 1, jl - 1] ** 2.0
@@ -1490,19 +1131,11 @@ def cloudsc_py(
                     zinfactor = min(zicenuclei[jl - 1] / 15000.0, 1.0)
                     zdepos = zdepos * min(
                         zinfactor
-                        + (1.0 - zinfactor)
-                        * (
-                            yrecldp_rdepliqrefrate
-                            + zcldtopdist[jl - 1] / yrecldp_rdepliqrefdepth
-                        ),
+                        + (1.0 - zinfactor) * (yrecldp_rdepliqrefrate + zcldtopdist[jl - 1] / yrecldp_rdepliqrefdepth),
                         1.0,
                     )
-                    zsolqa[ncldql - 1, ncldqi - 1, jl - 1] = (
-                        zsolqa[ncldql - 1, ncldqi - 1, jl - 1] + zdepos
-                    )
-                    zsolqa[ncldqi - 1, ncldql - 1, jl - 1] = (
-                        zsolqa[ncldqi - 1, ncldql - 1, jl - 1] - zdepos
-                    )
+                    zsolqa[ncldql - 1, ncldqi - 1, jl - 1] = zsolqa[ncldql - 1, ncldqi - 1, jl - 1] + zdepos
+                    zsolqa[ncldqi - 1, ncldql - 1, jl - 1] = zsolqa[ncldqi - 1, ncldql - 1, jl - 1] - zdepos
                     zqxfg[ncldqi - 1, jl - 1] = zqxfg[ncldqi - 1, jl - 1] + zdepos
                     zqxfg[ncldql - 1, jl - 1] = zqxfg[ncldql - 1, jl - 1] - zdepos
         for jl in range(kidia, kfdia + 1):
@@ -1514,15 +1147,9 @@ def cloudsc_py(
             if llfall[jm - 1] or jm == ncldqi:
                 for jl in range(kidia, kfdia + 1):
                     if jk > yrecldp_ncldtop:
-                        zfallsrce[jm - 1, jl - 1] = (
-                            zpfplsx[jm - 1, jk - 1, jl - 1] * zdtgdp[jl - 1]
-                        )
-                        zsolqa[jm - 1, jm - 1, jl - 1] = (
-                            zsolqa[jm - 1, jm - 1, jl - 1] + zfallsrce[jm - 1, jl - 1]
-                        )
-                        zqxfg[jm - 1, jl - 1] = (
-                            zqxfg[jm - 1, jl - 1] + zfallsrce[jm - 1, jl - 1]
-                        )
+                        zfallsrce[jm - 1, jl - 1] = zpfplsx[jm - 1, jk - 1, jl - 1] * zdtgdp[jl - 1]
+                        zsolqa[jm - 1, jm - 1, jl - 1] = zsolqa[jm - 1, jm - 1, jl - 1] + zfallsrce[jm - 1, jl - 1]
+                        zqxfg[jm - 1, jl - 1] = zqxfg[jm - 1, jl - 1] + zfallsrce[jm - 1, jl - 1]
                         zqpretot[jl - 1] = zqpretot[jl - 1] + zqxfg[jm - 1, jl - 1]
                     if yrecldp_laericesed and jm == ncldqi:
                         zre_ice = pre_ice[jk - 1, jl - 1]
@@ -1546,23 +1173,16 @@ def cloudsc_py(
                 zcovpclr[jl - 1] = 0.0
                 zcovpmax[jl - 1] = 0.0
         for jl in range(kidia, kfdia + 1):
-            if ztp1[jk - 1, jl - 1] <= ydcst_rtt and zcovptot[jl - 1] > zepsec:
-                zzco = (
-                    ptsphy
-                    * yrecldp_rsnowlin1
-                    * np.exp(yrecldp_rsnowlin2 * (ztp1[jk - 1, jl - 1] - ydcst_rtt))
-                )
-                if yrecldp_laericeauto:
-                    zlcrit = picrit_aer[jk - 1, jl - 1]
-                    zzco = zzco * (yrecldp_rnice / pnice[jk - 1, jl - 1]) ** 0.333
-                else:
-                    zlcrit = yrecldp_rlcritsnow
-                zsnowaut[jl - 1] = zzco * (
-                    1.0 - np.exp(-((zicecld[jl - 1] / zlcrit) ** 2))
-                )
-                zsolqb[ncldqi - 1, ncldqs - 1, jl - 1] = (
-                    zsolqb[ncldqi - 1, ncldqs - 1, jl - 1] + zsnowaut[jl - 1]
-                )
+            if ztp1[jk - 1, jl - 1] <= ydcst_rtt:
+                if zicecld[jl - 1] > zepsec:
+                    zzco = ptsphy * yrecldp_rsnowlin1 * np.exp(yrecldp_rsnowlin2 * (ztp1[jk - 1, jl - 1] - ydcst_rtt))
+                    if yrecldp_laericeauto:
+                        zlcrit = picrit_aer[jk - 1, jl - 1]
+                        zzco = zzco * (yrecldp_rnice / pnice[jk - 1, jl - 1]) ** 0.333
+                    else:
+                        zlcrit = yrecldp_rlcritsnow
+                    zsnowaut[jl - 1] = zzco * (1.0 - np.exp(-((zicecld[jl - 1] / zlcrit) ** 2)))
+                    zsolqb[ncldqi - 1, ncldqs - 1, jl - 1] = zsolqb[ncldqi - 1, ncldqs - 1, jl - 1] + zsnowaut[jl - 1]
             if zliqcld[jl - 1] > zepsec:
                 if iwarmrain == 1:
                     zzco = yrecldp_rkconv * ptsphy
@@ -1573,19 +1193,16 @@ def cloudsc_py(
                         zlcrit = yrecldp_rclcrit_land
                     else:
                         zlcrit = yrecldp_rclcrit_sea
-                    zprecip = (
-                        zpfplsx[ncldqs - 1, jk - 1, jl - 1]
-                        + zpfplsx[ncldqr - 1, jk - 1, jl - 1]
-                    ) / max(zepsec, zcovptot[jl - 1])
+                    zprecip = (zpfplsx[ncldqs - 1, jk - 1, jl - 1] + zpfplsx[ncldqr - 1, jk - 1, jl - 1]) / max(
+                        zepsec, zcovptot[jl - 1]
+                    )
                     zcfpr = 1.0 + yrecldp_rprc1 * np.sqrt(max(zprecip, 0.0))
                     if yrecldp_laerliqcoll:
                         zcfpr = zcfpr * (yrecldp_rccn / pccn[jk - 1, jl - 1]) ** 0.333
                     zzco = zzco * zcfpr
                     zlcrit = zlcrit / max(zcfpr, zepsec)
                     if zliqcld[jl - 1] / zlcrit < 20.0:
-                        zrainaut[jl - 1] = zzco * (
-                            1.0 - np.exp(-((zliqcld[jl - 1] / zlcrit) ** 2))
-                        )
+                        zrainaut[jl - 1] = zzco * (1.0 - np.exp(-((zliqcld[jl - 1] / zlcrit) ** 2)))
                     else:
                         zrainaut[jl - 1] = zzco
                     if ztp1[jk - 1, jl - 1] <= ydcst_rtt:
@@ -1612,9 +1229,7 @@ def cloudsc_py(
                             * zliqcld[jl - 1] ** yrecldp_rcl_kkbauq
                             * zconst**yrecldp_rcl_kkbaun
                         )
-                        zrainaut[jl - 1] = min(
-                            zrainaut[jl - 1], zqxfg[ncldql - 1, jl - 1]
-                        )
+                        zrainaut[jl - 1] = min(zrainaut[jl - 1], zqxfg[ncldql - 1, jl - 1])
                         if zrainaut[jl - 1] < zepsec:
                             zrainaut[jl - 1] = 0.0
                         zrainacc[jl - 1] = (
@@ -1624,9 +1239,7 @@ def cloudsc_py(
                             * yrecldp_rcl_kkaac
                             * (zliqcld[jl - 1] * zraincld[jl - 1]) ** yrecldp_rcl_kkbac
                         )
-                        zrainacc[jl - 1] = min(
-                            zrainacc[jl - 1], zqxfg[ncldql - 1, jl - 1]
-                        )
+                        zrainacc[jl - 1] = min(zrainacc[jl - 1], zqxfg[ncldql - 1, jl - 1])
                         if zrainacc[jl - 1] < zepsec:
                             zrainacc[jl - 1] = 0.0
                     else:
@@ -1669,8 +1282,7 @@ def cloudsc_py(
                             * ptsphy
                             * yrecldp_rcl_const7s
                             * zfallcorr
-                            * (zrho[jl - 1] * zsnowcld[jl - 1] * yrecldp_rcl_const1s)
-                            ** yrecldp_rcl_const8s
+                            * (zrho[jl - 1] * zsnowcld[jl - 1] * yrecldp_rcl_const1s) ** yrecldp_rcl_const8s
                         )
                         zsnowrime[jl - 1] = min(zsnowrime[jl - 1], 1.0)
                         zsolqb[ncldql - 1, ncldqs - 1, jl - 1] = (
@@ -1680,18 +1292,11 @@ def cloudsc_py(
             zicetot[jl - 1] = zqxfg[ncldqi - 1, jl - 1] + zqxfg[ncldqs - 1, jl - 1]
             zmeltmax[jl - 1] = 0.0
             if zicetot[jl - 1] > zepsec and ztp1[jk - 1, jl - 1] > ydcst_rtt:
-                zsubsat = max(
-                    zqsice[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1], 0.0
-                )
+                zsubsat = max(zqsice[jk - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1], 0.0)
                 ztdmtw0 = (
                     ztp1[jk - 1, jl - 1]
                     - ydcst_rtt
-                    - zsubsat
-                    * (
-                        ztw1
-                        + ztw2 * (pap[jk - 1, jl - 1] - ztw3)
-                        - ztw4 * (ztp1[jk - 1, jl - 1] - ztw5)
-                    )
+                    - zsubsat * (ztw1 + ztw2 * (pap[jk - 1, jl - 1] - ztw3) - ztw4 * (ztp1[jk - 1, jl - 1] - ztw5))
                 )
                 zcons1 = abs(ptsphy * (1.0 + 0.5 * ztdmtw0) / yrecldp_rtaumel)
                 zmeltmax[jl - 1] = max(ztdmtw0 * zcons1 * zrldcp, 0.0)
@@ -1702,29 +1307,14 @@ def cloudsc_py(
                         zalfa2 = zqxfg[jm - 1, jl - 1] / zicetot[jl - 1]
                         zmelt = min(zqxfg[jm - 1, jl - 1], zalfa2 * zmeltmax[jl - 1])
                         zqxfg[jm - 1, jl - 1] = zqxfg[jm - 1, jl - 1] - zmelt
-                        zqxfg[imelt[jm - 1] - 1, jl - 1] = (
-                            zqxfg[imelt[jm - 1] - 1, jl - 1] + zmelt
-                        )
-                        zsolqa[jm - 1, imelt[jm - 1] - 1, jl - 1] = (
-                            zsolqa[jm - 1, imelt[jm - 1] - 1, jl - 1] + zmelt
-                        )
-                        zsolqa[imelt[jm - 1] - 1, jm - 1, jl - 1] = (
-                            zsolqa[imelt[jm - 1] - 1, jm - 1, jl - 1] - zmelt
-                        )
+                        zqxfg[imelt[jm - 1] - 1, jl - 1] = zqxfg[imelt[jm - 1] - 1, jl - 1] + zmelt
+                        zsolqa[jm - 1, imelt[jm - 1] - 1, jl - 1] = zsolqa[jm - 1, imelt[jm - 1] - 1, jl - 1] + zmelt
+                        zsolqa[imelt[jm - 1] - 1, jm - 1, jl - 1] = zsolqa[imelt[jm - 1] - 1, jm - 1, jl - 1] - zmelt
         for jl in range(kidia, kfdia + 1):
             if zqx[ncldqr - 1, jk - 1, jl - 1] > zepsec:
-                if (
-                    ztp1[jk - 1, jl - 1] <= ydcst_rtt
-                    and ztp1[jk - 1 - 1, jl - 1] > ydcst_rtt
-                ):
-                    zqpretot[jl - 1] = max(
-                        zqx[ncldqs - 1, jk - 1, jl - 1]
-                        + zqx[ncldqr - 1, jk - 1, jl - 1],
-                        zepsec,
-                    )
-                    prainfrac_toprfz[jl - 1] = (
-                        zqx[ncldqr - 1, jk - 1, jl - 1] / zqpretot[jl - 1]
-                    )
+                if ztp1[jk - 1, jl - 1] <= ydcst_rtt and ztp1[jk - 1 - 1, jl - 1] > ydcst_rtt:
+                    zqpretot[jl - 1] = max(zqx[ncldqs - 1, jk - 1, jl - 1] + zqx[ncldqr - 1, jk - 1, jl - 1], zepsec)
+                    prainfrac_toprfz[jl - 1] = zqx[ncldqr - 1, jk - 1, jl - 1] / zqpretot[jl - 1]
                     if prainfrac_toprfz[jl - 1] > 0.8:
                         llrainliq[jl - 1] = True
                     else:
@@ -1732,8 +1322,7 @@ def cloudsc_py(
                 if ztp1[jk - 1, jl - 1] < ydcst_rtt:
                     if prainfrac_toprfz[jl - 1] > 0.8:
                         zlambda = (
-                            yrecldp_rcl_fac1
-                            / (zrho[jl - 1] * zqx[ncldqr - 1, jk - 1, jl - 1])
+                            yrecldp_rcl_fac1 / (zrho[jl - 1] * zqx[ncldqr - 1, jk - 1, jl - 1])
                         ) ** yrecldp_rcl_fac2
                         ztemp = yrecldp_rcl_fzrab * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
                         zfrz = (
@@ -1744,22 +1333,12 @@ def cloudsc_py(
                         )
                         zfrzmax[jl - 1] = max(zfrz, 0.0)
                     else:
-                        zcons1 = abs(
-                            ptsphy
-                            * (1.0 + 0.5 * (ydcst_rtt - ztp1[jk - 1, jl - 1]))
-                            / yrecldp_rtaumel
-                        )
-                        zfrzmax[jl - 1] = max(
-                            (ydcst_rtt - ztp1[jk - 1, jl - 1]) * zcons1 * zrldcp, 0.0
-                        )
+                        zcons1 = abs(ptsphy * (1.0 + 0.5 * (ydcst_rtt - ztp1[jk - 1, jl - 1])) / yrecldp_rtaumel)
+                        zfrzmax[jl - 1] = max((ydcst_rtt - ztp1[jk - 1, jl - 1]) * zcons1 * zrldcp, 0.0)
                     if zfrzmax[jl - 1] > zepsec:
                         zfrz = min(zqx[ncldqr - 1, jk - 1, jl - 1], zfrzmax[jl - 1])
-                        zsolqa[ncldqr - 1, ncldqs - 1, jl - 1] = (
-                            zsolqa[ncldqr - 1, ncldqs - 1, jl - 1] + zfrz
-                        )
-                        zsolqa[ncldqs - 1, ncldqr - 1, jl - 1] = (
-                            zsolqa[ncldqs - 1, ncldqr - 1, jl - 1] - zfrz
-                        )
+                        zsolqa[ncldqr - 1, ncldqs - 1, jl - 1] = zsolqa[ncldqr - 1, ncldqs - 1, jl - 1] + zfrz
+                        zsolqa[ncldqs - 1, ncldqr - 1, jl - 1] = zsolqa[ncldqs - 1, ncldqr - 1, jl - 1] - zfrz
         for jl in range(kidia, kfdia + 1):
             zfrzmax[jl - 1] = max((yrecldp_rthomo - ztp1[jk - 1, jl - 1]) * zrldcp, 0.0)
 
@@ -1774,14 +1353,13 @@ def cloudsc_py(
                 )
         if ievaprain == 1:
             for jl in range(kidia, kfdia + 1):
-                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[
-                    jl - 1
-                ] / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[jl - 1] / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zzrh = min(max(zzrh, yrecldp_rprecrhmax), 1.0)
-                zqe = (
-                    zqx[ncldqv - 1, jk - 1, jl - 1]
-                    - za[jk - 1, jl - 1] * zqsliq[jk - 1, jl - 1]
-                ) / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zqe = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsliq[jk - 1, jl - 1]) / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zqe = max(0.0, min(zqe, zqsliq[jk - 1, jl - 1]))
                 llo1 = (
                     zcovpclr[jl - 1] > zepsec
@@ -1805,43 +1383,25 @@ def cloudsc_py(
                     )
                     zbeta = ydcst_rg * yrecldp_rpecons * 0.5 * zbeta1**0.5777
                     zdenom = 1.0 + zbeta * ptsphy * zcorqsliq[jl - 1]
-                    zdpr = (
-                        zcovpclr[jl - 1]
-                        * zbeta
-                        * (zqsliq[jk - 1, jl - 1] - zqe)
-                        / zdenom
-                        * zdp[jl - 1]
-                        * zrg_r
-                    )
+                    zdpr = zcovpclr[jl - 1] * zbeta * (zqsliq[jk - 1, jl - 1] - zqe) / zdenom * zdp[jl - 1] * zrg_r
                     zdpevap = zdpr * zdtgdp[jl - 1]
                     zevap = min(zdpevap, zqxfg[ncldqr - 1, jl - 1])
-                    zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] + zevap
-                    )
-                    zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] - zevap
-                    )
+                    zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] = zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] + zevap
+                    zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] = zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] - zevap
                     zcovptot[jl - 1] = max(
                         yrecldp_rcovpmin,
                         zcovptot[jl - 1]
-                        - max(
-                            0.0,
-                            (zcovptot[jl - 1] - za[jk - 1, jl - 1])
-                            * zevap
-                            / zqxfg[ncldqr - 1, jl - 1],
-                        ),
+                        - max(0.0, (zcovptot[jl - 1] - za[jk - 1, jl - 1]) * zevap / zqxfg[ncldqr - 1, jl - 1]),
                     )
                     zqxfg[ncldqr - 1, jl - 1] = zqxfg[ncldqr - 1, jl - 1] - zevap
         elif ievaprain == 2:
             for jl in range(kidia, kfdia + 1):
-                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[
-                    jl - 1
-                ] / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[jl - 1] / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zzrh = min(max(zzrh, yrecldp_rprecrhmax), 1.0)
                 zzrh = min(0.8, zzrh)
-                zqe = max(
-                    0.0, min(zqx[ncldqv - 1, jk - 1, jl - 1], zqsliq[jk - 1, jl - 1])
-                )
+                zqe = max(0.0, min(zqx[ncldqv - 1, jk - 1, jl - 1], zqsliq[jk - 1, jl - 1]))
                 llo1 = (
                     zcovpclr[jl - 1] > zepsec
                     and zqxfg[ncldqr - 1, jl - 1] > zepsec
@@ -1856,27 +1416,18 @@ def cloudsc_py(
                         * (
                             ydthf_r2es
                             * np.exp(
-                                ydthf_r3les
-                                * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                                / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
+                                ydthf_r3les * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4les)
                             )
                         )
                     )
-                    zlambda = (
-                        yrecldp_rcl_fac1 / (zrho[jl - 1] * zpreclr)
-                    ) ** yrecldp_rcl_fac2
+                    zlambda = (yrecldp_rcl_fac1 / (zrho[jl - 1] * zpreclr)) ** yrecldp_rcl_fac2
                     zevap_denom = (
                         yrecldp_rcl_cdenom1 * zesatliq
                         - yrecldp_rcl_cdenom2 * ztp1[jk - 1, jl - 1] * zesatliq
-                        + yrecldp_rcl_cdenom3
-                        * ztp1[jk - 1, jl - 1] ** 3.0
-                        * pap[jk - 1, jl - 1]
+                        + yrecldp_rcl_cdenom3 * ztp1[jk - 1, jl - 1] ** 3.0 * pap[jk - 1, jl - 1]
                     )
-                    zcorr2 = (
-                        (ztp1[jk - 1, jl - 1] / 273.0) ** 1.5
-                        * 393.0
-                        / (ztp1[jk - 1, jl - 1] + 120.0)
-                    )
+                    zcorr2 = (ztp1[jk - 1, jl - 1] / 273.0) ** 1.5 * 393.0 / (ztp1[jk - 1, jl - 1] + 120.0)
+                    zka = yrecldp_rcl_ka273 * zcorr2
                     zsubsat = max(zzrh * zqsliq[jk - 1, jl - 1] - zqe, 0.0)
                     zbeta = (
                         0.5
@@ -1895,33 +1446,23 @@ def cloudsc_py(
                     zdenom = 1.0 + zbeta * ptsphy
                     zdpevap = zcovpclr[jl - 1] * zbeta * ptsphy * zsubsat / zdenom
                     zevap = min(zdpevap, zqxfg[ncldqr - 1, jl - 1])
-                    zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] + zevap
-                    )
-                    zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] - zevap
-                    )
+                    zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] = zsolqa[ncldqr - 1, ncldqv - 1, jl - 1] + zevap
+                    zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] = zsolqa[ncldqv - 1, ncldqr - 1, jl - 1] - zevap
                     zcovptot[jl - 1] = max(
                         yrecldp_rcovpmin,
                         zcovptot[jl - 1]
-                        - max(
-                            0.0,
-                            (zcovptot[jl - 1] - za[jk - 1, jl - 1])
-                            * zevap
-                            / zqxfg[ncldqr - 1, jl - 1],
-                        ),
+                        - max(0.0, (zcovptot[jl - 1] - za[jk - 1, jl - 1]) * zevap / zqxfg[ncldqr - 1, jl - 1]),
                     )
                     zqxfg[ncldqr - 1, jl - 1] = zqxfg[ncldqr - 1, jl - 1] - zevap
         if ievapsnow == 1:
             for jl in range(kidia, kfdia + 1):
-                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[
-                    jl - 1
-                ] / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[jl - 1] / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zzrh = min(max(zzrh, yrecldp_rprecrhmax), 1.0)
-                zqe = (
-                    zqx[ncldqv - 1, jk - 1, jl - 1]
-                    - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]
-                ) / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zqe = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]) / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zqe = max(0.0, min(zqe, zqsice[jk - 1, jl - 1]))
                 llo1 = (
                     zcovpclr[jl - 1] > zepsec
@@ -1945,43 +1486,26 @@ def cloudsc_py(
                     )
                     zbeta = ydcst_rg * yrecldp_rpecons * zbeta1**0.5777
                     zdenom = 1.0 + zbeta * ptsphy * zcorqsice[jl - 1]
-                    zdpr = (
-                        zcovpclr[jl - 1]
-                        * zbeta
-                        * (zqsice[jk - 1, jl - 1] - zqe)
-                        / zdenom
-                        * zdp[jl - 1]
-                        * zrg_r
-                    )
+                    zdpr = zcovpclr[jl - 1] * zbeta * (zqsice[jk - 1, jl - 1] - zqe) / zdenom * zdp[jl - 1] * zrg_r
                     zdpevap = zdpr * zdtgdp[jl - 1]
                     zevap = min(zdpevap, zqxfg[ncldqs - 1, jl - 1])
-                    zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] + zevap
-                    )
-                    zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] - zevap
-                    )
+                    zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] = zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] + zevap
+                    zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] = zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] - zevap
                     zcovptot[jl - 1] = max(
                         yrecldp_rcovpmin,
                         zcovptot[jl - 1]
-                        - max(
-                            0.0,
-                            (zcovptot[jl - 1] - za[jk - 1, jl - 1])
-                            * zevap
-                            / zqxfg[ncldqs - 1, jl - 1],
-                        ),
+                        - max(0.0, (zcovptot[jl - 1] - za[jk - 1, jl - 1]) * zevap / zqxfg[ncldqs - 1, jl - 1]),
                     )
                     zqxfg[ncldqs - 1, jl - 1] = zqxfg[ncldqs - 1, jl - 1] - zevap
         elif ievapsnow == 2:
             for jl in range(kidia, kfdia + 1):
-                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[
-                    jl - 1
-                ] / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zzrh = yrecldp_rprecrhmax + (1.0 - yrecldp_rprecrhmax) * zcovpmax[jl - 1] / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zzrh = min(max(zzrh, yrecldp_rprecrhmax), 1.0)
-                zqe = (
-                    zqx[ncldqv - 1, jk - 1, jl - 1]
-                    - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]
-                ) / max(zepsec, 1.0 - za[jk - 1, jl - 1])
+                zqe = (zqx[ncldqv - 1, jk - 1, jl - 1] - za[jk - 1, jl - 1] * zqsice[jk - 1, jl - 1]) / max(
+                    zepsec, 1.0 - za[jk - 1, jl - 1]
+                )
                 zqe = max(0.0, min(zqe, zqsice[jk - 1, jl - 1]))
                 llo1 = (
                     zcovpclr[jl - 1] > zepsec
@@ -1993,9 +1517,7 @@ def cloudsc_py(
                     zvpice = (
                         ydthf_r2es
                         * np.exp(
-                            ydthf_r3ies
-                            * (ztp1[jk - 1, jl - 1] - ydcst_rtt)
-                            / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
+                            ydthf_r3ies * (ztp1[jk - 1, jl - 1] - ydcst_rtt) / (ztp1[jk - 1, jl - 1] - ydthf_r4ies)
                         )
                         * ydcst_rv
                         / ydcst_rd
@@ -2005,17 +1527,11 @@ def cloudsc_py(
                     zaplusb = (
                         yrecldp_rcl_apb1 * zvpice
                         - yrecldp_rcl_apb2 * zvpice * ztp1[jk - 1, jl - 1]
-                        + pap[jk - 1, jl - 1]
-                        * yrecldp_rcl_apb3
-                        * ztp1[jk - 1, jl - 1] ** 3
+                        + pap[jk - 1, jl - 1] * yrecldp_rcl_apb3 * ztp1[jk - 1, jl - 1] ** 3
                     )
                     zcorrfac = (1.0 / zrho[jl - 1]) ** 0.5
-                    zcorrfac2 = (ztp1[jk - 1, jl - 1] / 273.0) ** 1.5 * (
-                        393.0 / (ztp1[jk - 1, jl - 1] + 120.0)
-                    )
-                    zpr02 = (
-                        zrho[jl - 1] * zpreclr * yrecldp_rcl_const1s / (ztcg * zfacx1s)
-                    )
+                    zcorrfac2 = (ztp1[jk - 1, jl - 1] / 273.0) ** 1.5 * (393.0 / (ztp1[jk - 1, jl - 1] + 120.0))
+                    zpr02 = zrho[jl - 1] * zpreclr * yrecldp_rcl_const1s / (ztcg * zfacx1s)
                     zterm1 = (
                         (zqsice[jk - 1, jl - 1] - zqe)
                         * ztp1[jk - 1, jl - 1] ** 2
@@ -2037,33 +1553,20 @@ def cloudsc_py(
                     zdpevap = max(zcovpclr[jl - 1] * zterm1 * zterm2 * ptsphy, 0.0)
                     zevap = min(zdpevap, zevaplimice[jl - 1])
                     zevap = min(zevap, zqx[ncldqs - 1, jk - 1, jl - 1])
-                    zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] = (
-                        zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] + zevap
-                    )
-                    zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] = (
-                        zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] - zevap
-                    )
+                    zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] = zsolqa[ncldqs - 1, ncldqv - 1, jl - 1] + zevap
+                    zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] = zsolqa[ncldqv - 1, ncldqs - 1, jl - 1] - zevap
                     zcovptot[jl - 1] = max(
                         yrecldp_rcovpmin,
                         zcovptot[jl - 1]
-                        - max(
-                            0.0,
-                            (zcovptot[jl - 1] - za[jk - 1, jl - 1])
-                            * zevap
-                            / zqx[ncldqs - 1, jk - 1, jl - 1],
-                        ),
+                        - max(0.0, (zcovptot[jl - 1] - za[jk - 1, jl - 1]) * zevap / zqx[ncldqs - 1, jk - 1, jl - 1]),
                     )
                     zqxfg[ncldqs - 1, jl - 1] = zqxfg[ncldqs - 1, jl - 1] - zevap
         for jm in range(1, nclv + 1):
             if llfall[jm - 1]:
                 for jl in range(kidia, kfdia + 1):
                     if zqxfg[jm - 1, jl - 1] < yrecldp_rlmin:
-                        zsolqa[jm - 1, ncldqv - 1, jl - 1] = (
-                            zsolqa[jm - 1, ncldqv - 1, jl - 1] + zqxfg[jm - 1, jl - 1]
-                        )
-                        zsolqa[ncldqv - 1, jm - 1, jl - 1] = (
-                            zsolqa[ncldqv - 1, jm - 1, jl - 1] - zqxfg[jm - 1, jl - 1]
-                        )
+                        zsolqa[jm - 1, ncldqv - 1, jl - 1] = zsolqa[jm - 1, ncldqv - 1, jl - 1] + zqxfg[jm - 1, jl - 1]
+                        zsolqa[ncldqv - 1, jm - 1, jl - 1] = zsolqa[ncldqv - 1, jm - 1, jl - 1] - zqxfg[jm - 1, jl - 1]
         for jl in range(kidia, kfdia + 1):
             zanew = (za[jk - 1, jl - 1] + zsolac[jl - 1]) / (1.0 + zsolab[jl - 1])
             zanew = min(zanew, 1.0)
@@ -2080,9 +1583,7 @@ def cloudsc_py(
         for jm in range(1, nclv + 1):
             for jn in range(1, nclv + 1):
                 for jl in range(kidia, kfdia + 1):
-                    zsinksum[jm - 1, jl - 1] = (
-                        zsinksum[jm - 1, jl - 1] - zsolqa[jn - 1, jm - 1, jl - 1]
-                    )
+                    zsinksum[jm - 1, jl - 1] = zsinksum[jm - 1, jl - 1] - zsolqa[jn - 1, jm - 1, jl - 1]
         for jm in range(1, nclv + 1):
             for jl in range(kidia, kfdia + 1):
                 zmax = max(zqx[jm - 1, jk - 1, jl - 1], zepsec)
@@ -2096,9 +1597,7 @@ def cloudsc_py(
                 psum_solqa[jl - 1] = 0.0
             for jn in range(1, nclv + 1):
                 for jl in range(kidia, kfdia + 1):
-                    psum_solqa[jl - 1] = (
-                        psum_solqa[jl - 1] + zsolqa[jn - 1, jm - 1, jl - 1]
-                    )
+                    psum_solqa[jl - 1] = psum_solqa[jl - 1] + zsolqa[jn - 1, jm - 1, jl - 1]
             for jl in range(kidia, kfdia + 1):
                 zsinksum[jm - 1, jl - 1] = zsinksum[jm - 1, jl - 1] - psum_solqa[jl - 1]
             for jl in range(kidia, kfdia + 1):
@@ -2109,12 +1608,8 @@ def cloudsc_py(
                 zzratio = zratio[jm - 1, jl - 1]
                 for jn in range(1, nclv + 1):
                     if zsolqa[jn - 1, jm - 1, jl - 1] < 0.0:
-                        zsolqa[jn - 1, jm - 1, jl - 1] = (
-                            zsolqa[jn - 1, jm - 1, jl - 1] * zzratio
-                        )
-                        zsolqa[jm - 1, jn - 1, jl - 1] = (
-                            zsolqa[jm - 1, jn - 1, jl - 1] * zzratio
-                        )
+                        zsolqa[jn - 1, jm - 1, jl - 1] = zsolqa[jn - 1, jm - 1, jl - 1] * zzratio
+                        zsolqa[jm - 1, jn - 1, jl - 1] = zsolqa[jm - 1, jn - 1, jl - 1] * zzratio
         for jm in range(1, nclv + 1):
             for jn in range(1, nclv + 1):
                 if jn == jm:
@@ -2122,8 +1617,7 @@ def cloudsc_py(
                         zqlhs[jm - 1, jn - 1, jl - 1] = 1.0 + zfallsink[jm - 1, jl - 1]
                         for jo in range(1, nclv + 1):
                             zqlhs[jm - 1, jn - 1, jl - 1] = (
-                                zqlhs[jm - 1, jn - 1, jl - 1]
-                                + zsolqb[jn - 1, jo - 1, jl - 1]
+                                zqlhs[jm - 1, jn - 1, jl - 1] + zsolqb[jn - 1, jo - 1, jl - 1]
                             )
                 else:
                     for jl in range(kidia, kfdia + 1):
@@ -2137,46 +1631,31 @@ def cloudsc_py(
         for jn in range(1, nclv - 1 + 1):
             for jm in range(jn + 1, nclv + 1):
                 for jl in range(kidia, kfdia + 1):
-                    zqlhs[jn - 1, jm - 1, jl - 1] = (
-                        zqlhs[jn - 1, jm - 1, jl - 1] / zqlhs[jn - 1, jn - 1, jl - 1]
-                    )
+                    zqlhs[jn - 1, jm - 1, jl - 1] = zqlhs[jn - 1, jm - 1, jl - 1] / zqlhs[jn - 1, jn - 1, jl - 1]
         for jn in range(1, nclv - 1 + 1):
             for jm in range(jn + 1, nclv + 1):
                 for ik in range(jn + 1, nclv + 1):
                     for jl in range(kidia, kfdia + 1):
                         zqlhs[ik - 1, jm - 1, jl - 1] = (
                             zqlhs[ik - 1, jm - 1, jl - 1]
-                            - zqlhs[jn - 1, jm - 1, jl - 1]
-                            * zqlhs[ik - 1, jn - 1, jl - 1]
+                            - zqlhs[jn - 1, jm - 1, jl - 1] * zqlhs[ik - 1, jn - 1, jl - 1]
                         )
         for jn in range(2, nclv + 1):
             for jm in range(1, jn - 1 + 1):
                 for jl in range(kidia, kfdia + 1):
-                    zqxn[jn - 1, jl - 1] = (
-                        zqxn[jn - 1, jl - 1]
-                        - zqlhs[jm - 1, jn - 1, jl - 1] * zqxn[jm - 1, jl - 1]
-                    )
+                    zqxn[jn - 1, jl - 1] = zqxn[jn - 1, jl - 1] - zqlhs[jm - 1, jn - 1, jl - 1] * zqxn[jm - 1, jl - 1]
         for jl in range(kidia, kfdia + 1):
-            zqxn[nclv - 1, jl - 1] = (
-                zqxn[nclv - 1, jl - 1] / zqlhs[nclv - 1, nclv - 1, jl - 1]
-            )
+            zqxn[nclv - 1, jl - 1] = zqxn[nclv - 1, jl - 1] / zqlhs[nclv - 1, nclv - 1, jl - 1]
         for jn in range(nclv - 1, 1 + -1, -1):
             for jm in range(jn + 1, nclv + 1):
                 for jl in range(kidia, kfdia + 1):
-                    zqxn[jn - 1, jl - 1] = (
-                        zqxn[jn - 1, jl - 1]
-                        - zqlhs[jm - 1, jn - 1, jl - 1] * zqxn[jm - 1, jl - 1]
-                    )
+                    zqxn[jn - 1, jl - 1] = zqxn[jn - 1, jl - 1] - zqlhs[jm - 1, jn - 1, jl - 1] * zqxn[jm - 1, jl - 1]
             for jl in range(kidia, kfdia + 1):
-                zqxn[jn - 1, jl - 1] = (
-                    zqxn[jn - 1, jl - 1] / zqlhs[jn - 1, jn - 1, jl - 1]
-                )
+                zqxn[jn - 1, jl - 1] = zqxn[jn - 1, jl - 1] / zqlhs[jn - 1, jn - 1, jl - 1]
         for jn in range(1, nclv - 1 + 1):
             for jl in range(kidia, kfdia + 1):
                 if zqxn[jn - 1, jl - 1] < zepsec:
-                    zqxn[ncldqv - 1, jl - 1] = (
-                        zqxn[ncldqv - 1, jl - 1] + zqxn[jn - 1, jl - 1]
-                    )
+                    zqxn[ncldqv - 1, jl - 1] = zqxn[ncldqv - 1, jl - 1] + zqxn[jn - 1, jl - 1]
                     zqxn[jn - 1, jl - 1] = 0.0
         for jm in range(1, nclv + 1):
             for jl in range(kidia, kfdia + 1):
@@ -2184,14 +1663,9 @@ def cloudsc_py(
                 zqxn2d[jm - 1, jk - 1, jl - 1] = zqxn[jm - 1, jl - 1]
         for jm in range(1, nclv + 1):
             for jl in range(kidia, kfdia + 1):
-                zpfplsx[jm - 1, jk + 1 - 1, jl - 1] = (
-                    zfallsink[jm - 1, jl - 1] * zqxn[jm - 1, jl - 1] * zrdtgdp[jl - 1]
-                )
+                zpfplsx[jm - 1, jk + 1 - 1, jl - 1] = zfallsink[jm - 1, jl - 1] * zqxn[jm - 1, jl - 1] * zrdtgdp[jl - 1]
         for jl in range(kidia, kfdia + 1):
-            zqpretot[jl - 1] = (
-                zpfplsx[ncldqs - 1, jk + 1 - 1, jl - 1]
-                + zpfplsx[ncldqr - 1, jk + 1 - 1, jl - 1]
-            )
+            zqpretot[jl - 1] = zpfplsx[ncldqs - 1, jk + 1 - 1, jl - 1] + zpfplsx[ncldqr - 1, jk + 1 - 1, jl - 1]
         for jl in range(kidia, kfdia + 1):
             if zqpretot[jl - 1] < zepsec:
                 zcovptot[jl - 1] = 0.0
@@ -2201,19 +1675,14 @@ def cloudsc_py(
                     zpsupsatsrce[jm - 1, jl - 1]
                     + zconvsrce[jm - 1, jl - 1]
                     + zfallsrce[jm - 1, jl - 1]
-                    - (zfallsink[jm - 1, jl - 1] + zconvsink[jm - 1, jl - 1])
-                    * zqxn[jm - 1, jl - 1]
+                    - (zfallsink[jm - 1, jl - 1] + zconvsink[jm - 1, jl - 1]) * zqxn[jm - 1, jl - 1]
                 )
             if iphase[jm - 1] == 1:
                 for jl in range(kidia, kfdia + 1):
                     tendency_loc_t[jk - 1, jl - 1] = (
                         tendency_loc_t[jk - 1, jl - 1]
                         + ydthf_ralvdcp
-                        * (
-                            zqxn[jm - 1, jl - 1]
-                            - zqx[jm - 1, jk - 1, jl - 1]
-                            - zfluxq[jm - 1, jl - 1]
-                        )
+                        * (zqxn[jm - 1, jl - 1] - zqx[jm - 1, jk - 1, jl - 1] - zfluxq[jm - 1, jl - 1])
                         * zqtmst
                     )
             if iphase[jm - 1] == 2:
@@ -2221,11 +1690,7 @@ def cloudsc_py(
                     tendency_loc_t[jk - 1, jl - 1] = (
                         tendency_loc_t[jk - 1, jl - 1]
                         + ydthf_ralsdcp
-                        * (
-                            zqxn[jm - 1, jl - 1]
-                            - zqx[jm - 1, jk - 1, jl - 1]
-                            - zfluxq[jm - 1, jl - 1]
-                        )
+                        * (zqxn[jm - 1, jl - 1] - zqx[jm - 1, jk - 1, jl - 1] - zfluxq[jm - 1, jl - 1])
                         * zqtmst
                     )
             for jl in range(kidia, kfdia + 1):
@@ -2235,24 +1700,15 @@ def cloudsc_py(
                 )
         for jl in range(kidia, kfdia + 1):
             tendency_loc_q[jk - 1, jl - 1] = (
-                tendency_loc_q[jk - 1, jl - 1]
-                + (zqxn[ncldqv - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) * zqtmst
+                tendency_loc_q[jk - 1, jl - 1] + (zqxn[ncldqv - 1, jl - 1] - zqx[ncldqv - 1, jk - 1, jl - 1]) * zqtmst
             )
-            tendency_loc_a[jk - 1, jl - 1] = (
-                tendency_loc_a[jk - 1, jl - 1] + zda[jl - 1] * zqtmst
-            )
+            tendency_loc_a[jk - 1, jl - 1] = tendency_loc_a[jk - 1, jl - 1] + zda[jl - 1] * zqtmst
         for jl in range(kidia, kfdia + 1):
             pcovptot[jk - 1, jl - 1] = zcovptot[jl - 1]
     for jk in range(1, klev + 1 + 1):
         for jl in range(kidia, kfdia + 1):
-            pfplsl[jk - 1, jl - 1] = (
-                zpfplsx[ncldqr - 1, jk - 1, jl - 1]
-                + zpfplsx[ncldql - 1, jk - 1, jl - 1]
-            )
-            pfplsn[jk - 1, jl - 1] = (
-                zpfplsx[ncldqs - 1, jk - 1, jl - 1]
-                + zpfplsx[ncldqi - 1, jk - 1, jl - 1]
-            )
+            pfplsl[jk - 1, jl - 1] = zpfplsx[ncldqr - 1, jk - 1, jl - 1] + zpfplsx[ncldql - 1, jk - 1, jl - 1]
+            pfplsn[jk - 1, jl - 1] = zpfplsx[ncldqs - 1, jk - 1, jl - 1] + zpfplsx[ncldqi - 1, jk - 1, jl - 1]
     for jl in range(kidia, kfdia + 1):
         pfsqlf[1 - 1, jl - 1] = 0.0
         pfsqif[1 - 1, jl - 1] = 0.0
@@ -2266,9 +1722,7 @@ def cloudsc_py(
         pfsqitur[1 - 1, jl - 1] = 0.0
     for jk in range(1, klev + 1):
         for jl in range(kidia, kfdia + 1):
-            zgdph_r = (
-                -zrg_r * (paph[jk + 1 - 1, jl - 1] - paph[jk - 1, jl - 1]) * zqtmst
-            )
+            zgdph_r = -zrg_r * (paph[jk + 1 - 1, jl - 1] - paph[jk - 1, jl - 1]) * zqtmst
             pfsqlf[jk + 1 - 1, jl - 1] = pfsqlf[jk - 1, jl - 1]
             pfsqif[jk + 1 - 1, jl - 1] = pfsqif[jk - 1, jl - 1]
             pfsqrf[jk + 1 - 1, jl - 1] = pfsqlf[jk - 1, jl - 1]
@@ -2290,25 +1744,13 @@ def cloudsc_py(
                 )
                 * zgdph_r
             )
-            pfcqlng[jk + 1 - 1, jl - 1] = (
-                pfcqlng[jk + 1 - 1, jl - 1]
-                + zlneg[ncldql - 1, jk - 1, jl - 1] * zgdph_r
-            )
-            pfsqltur[jk + 1 - 1, jl - 1] = (
-                pfsqltur[jk + 1 - 1, jl - 1] + pvfl[jk - 1, jl - 1] * ptsphy * zgdph_r
-            )
+            pfcqlng[jk + 1 - 1, jl - 1] = pfcqlng[jk + 1 - 1, jl - 1] + zlneg[ncldql - 1, jk - 1, jl - 1] * zgdph_r
+            pfsqltur[jk + 1 - 1, jl - 1] = pfsqltur[jk + 1 - 1, jl - 1] + pvfl[jk - 1, jl - 1] * ptsphy * zgdph_r
             pfsqrf[jk + 1 - 1, jl - 1] = (
                 pfsqrf[jk + 1 - 1, jl - 1]
-                + (
-                    zqxn2d[ncldqr - 1, jk - 1, jl - 1]
-                    - zqx0[ncldqr - 1, jk - 1, jl - 1]
-                )
-                * zgdph_r
+                + (zqxn2d[ncldqr - 1, jk - 1, jl - 1] - zqx0[ncldqr - 1, jk - 1, jl - 1]) * zgdph_r
             )
-            pfcqrng[jk + 1 - 1, jl - 1] = (
-                pfcqrng[jk + 1 - 1, jl - 1]
-                + zlneg[ncldqr - 1, jk - 1, jl - 1] * zgdph_r
-            )
+            pfcqrng[jk + 1 - 1, jl - 1] = pfcqrng[jk + 1 - 1, jl - 1] + zlneg[ncldqr - 1, jk - 1, jl - 1] * zgdph_r
             pfsqif[jk + 1 - 1, jl - 1] = (
                 pfsqif[jk + 1 - 1, jl - 1]
                 + (
@@ -2319,26 +1761,59 @@ def cloudsc_py(
                 )
                 * zgdph_r
             )
-            pfcqnng[jk + 1 - 1, jl - 1] = (
-                pfcqnng[jk + 1 - 1, jl - 1]
-                + zlneg[ncldqi - 1, jk - 1, jl - 1] * zgdph_r
-            )
-            pfsqitur[jk + 1 - 1, jl - 1] = (
-                pfsqitur[jk + 1 - 1, jl - 1] + pvfi[jk - 1, jl - 1] * ptsphy * zgdph_r
-            )
+            pfcqnng[jk + 1 - 1, jl - 1] = pfcqnng[jk + 1 - 1, jl - 1] + zlneg[ncldqi - 1, jk - 1, jl - 1] * zgdph_r
+            pfsqitur[jk + 1 - 1, jl - 1] = pfsqitur[jk + 1 - 1, jl - 1] + pvfi[jk - 1, jl - 1] * ptsphy * zgdph_r
             pfsqsf[jk + 1 - 1, jl - 1] = (
                 pfsqsf[jk + 1 - 1, jl - 1]
-                + (
-                    zqxn2d[ncldqs - 1, jk - 1, jl - 1]
-                    - zqx0[ncldqs - 1, jk - 1, jl - 1]
-                )
-                * zgdph_r
+                + (zqxn2d[ncldqs - 1, jk - 1, jl - 1] - zqx0[ncldqs - 1, jk - 1, jl - 1]) * zgdph_r
             )
-            pfcqsng[jk + 1 - 1, jl - 1] = (
-                pfcqsng[jk + 1 - 1, jl - 1]
-                + zlneg[ncldqs - 1, jk - 1, jl - 1] * zgdph_r
-            )
+            pfcqsng[jk + 1 - 1, jl - 1] = pfcqsng[jk + 1 - 1, jl - 1] + zlneg[ncldqs - 1, jk - 1, jl - 1] * zgdph_r
     for jk in range(1, klev + 1 + 1):
         for jl in range(kidia, kfdia + 1):
             pfhpsl[jk - 1, jl - 1] = -ydcst_rlvtt * pfplsl[jk - 1, jl - 1]
             pfhpsn[jk - 1, jl - 1] = -ydcst_rlstt * pfplsn[jk - 1, jl - 1]
+
+
+if __name__ == "__main__":
+    # Imported here, not at module scope: this file is also the kernel corpus, and
+    # importing it to reach `cloudsc_py` must not require the transformation stack.
+    from dace.transformation.passes import ScalarToSymbolPromotion
+    from dace.transformation.layout.split_array import SplitArray
+
+    NAME_ORDER = ["ncldql", "ncldqi", "ncldqr", "ncldqs", "ncldqv"]
+    NAME_MAP = {i: NAME_ORDER[i] for i in range(5)}
+    # Split along the first dimension (size = nclv-1) into separate 2D arrays
+    symbol_map = {
+        "nclv": 5,
+        "ncldql": 1,
+        "ncldqi": 2,
+        "ncldqr": 3,
+        "ncldqs": 4,
+        "ncldqv": 5,
+    }
+    name_map = {"nclv": NAME_ORDER}
+
+    load_if_existing = False
+
+    if load_if_existing and Path("./cloudsc_pydace_unsimplified.sdfgz").exists():
+        print("SDFG already exists, skipping generation")
+        sdfg = dace.SDFG.from_file("cloudsc_pydace_unsimplified.sdfgz")
+        sdfg.validate()
+    else:
+        sdfg = cloudsc_py.to_sdfg(simplify=False)
+        sdfg.save("cloudsc_pydace_unsimplified.sdfgz", compress=True)
+        sdfg.validate()
+
+    if load_if_existing and Path("./cloudsc_pydace_simplified_symbolic.sdfgz").exists():
+        sdfg = dace.SDFG.from_file("cloudsc_pydace_simplified_symbolic.sdfgz")
+        sdfg.validate()
+    else:
+        sdfg.simplify(skip={"ScalarToSymbolPromotion"})
+        sdfg.save("cloudsc_pydace_simplified.sdfgz", compress=True)
+        sdfg.validate()
+        ScalarToSymbolPromotion().apply_pass(sdfg, {})
+        sdfg.save("cloudsc_pydace_simplified_symbolic.sdfgz", compress=True)
+
+    sdfg.validate()
+    SplitArray(symbol_map=symbol_map, name_map=name_map).apply_pass(sdfg, {})
+    sdfg.save("cloudsc_split.sdfgz", compress=True)

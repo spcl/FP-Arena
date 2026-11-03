@@ -5,7 +5,7 @@
 
 CloudSC-specific, so it lives with the corpus rather than in ``dace/transformation/passes``. Ported
 from the velocity-tendencies ``OffloadVelocityToGPU`` (SC26-Layout-AD E7) and adapted to CloudSC's
-block structure. Four phases, in order:
+block structure. Five phases, in order:
 
 1. **Assign schedules.** CloudSC's outermost map is the per-block loop (``DO IBL = 1, NBLOCKS``),
    which must NOT become a kernel -- it orchestrates one kernel launch per block. So instead of
@@ -20,6 +20,8 @@ block structure. Four phases, in order:
    through NestedSDFG connector bindings. A transient read on a host interstate edge (a branch guard
    or edge assignment) is the exception: it is kept host and given a ``gpu_<name>`` mirror instead
    (:func:`mirror_host_needed_transients`), since a device buffer can't be read on the host edge.
+5. **Parallelize level kernels over the columns** (:func:`parallelize_level_kernels`). A kernel over
+   the levels alone fits into one block, so it would run all columns on a single SM.
 
 ``Sequential``, not ``Default``, for the block map: ``dace.sdfg.infer_types`` resolves a
 ``Default``-schedule map from the storage of its incident memlets (``SCOPEDEFAULT_SCHEDULE``,
@@ -96,7 +98,101 @@ def offload_cloudsc_to_gpu(
     mirror_host_needed_transients(sdfg)
     promote_transients_to_gpu(sdfg)
     propagate_gpu_storage_into_nested_sdfgs(sdfg)
+    parallelize_level_kernels(sdfg)
     sdfg.validate()
+
+
+# Phase 5: level kernels
+
+
+def parallelize_level_kernels(sdfg: dace.SDFG) -> int:
+    """Turn every kernel over the levels whose body walks the columns into a kernel over the columns.
+
+    Two shapes occur: a level map around a sequential column map, whose ranges are swapped, and a
+    level map around ``Fill`` nodes of a column range, which becomes a column map around ``Fill``
+    nodes of a level range. Each thread then writes only its own column. Any other kernel over the
+    levels stays as it is.
+
+    :param sdfg: The offloaded SDFG.
+    :return: The number of kernels rewritten.
+    """
+    rewritten = 0
+    for state in sdfg.states():
+        scope_children = state.scope_children()
+        for entry in state.nodes():
+            if not is_level_kernel(entry):
+                continue
+            children = scope_children[entry]
+            inner = [n for n in children if isinstance(n, nodes.MapEntry)]
+            fills = [n for n in children if isinstance(n, nodes.LibraryNode)]
+            if len(inner) == 1 and not fills:
+                rewritten += swap_level_and_column_maps(entry, inner[0])
+            elif fills and not inner:
+                rewritten += fill_one_column_per_thread(state, entry, fills)
+    return rewritten
+
+
+def is_level_kernel(node: nodes.Node) -> bool:
+    """Whether ``node`` opens a one-dimensional kernel over the levels."""
+    if not isinstance(node, nodes.MapEntry):
+        return False
+    level_range = str(node.map.range)
+    return (
+        node.map.schedule == dtypes.ScheduleType.GPU_Device
+        and len(node.map.params) == 1
+        and "klev" in level_range
+        and "kfdia" not in level_range
+    )
+
+
+def swap_level_and_column_maps(level: nodes.MapEntry, column: nodes.MapEntry) -> bool:
+    """Swap the ranges of a level map and the column map right inside it, if they are independent."""
+    column_range = str(column.map.range)
+    independent = (
+        len(column.map.params) == 1
+        and "kfdia" in column_range
+        and level.map.params[0] not in column_range
+    )
+    if not independent:
+        return False
+    level.map.params, column.map.params = column.map.params, level.map.params
+    level.map.range, column.map.range = column.map.range, level.map.range
+    return True
+
+
+def fill_one_column_per_thread(
+    state: SDFGState, level: nodes.MapEntry, fills: list[nodes.LibraryNode]
+) -> bool:
+    """Make ``level`` a column map around ``fills``, if each fills one column range per level.
+
+    The map keeps its parameter, which now names the column.
+    """
+    param = symbolic.pystr_to_symbolic(level.map.params[0])
+    written = [
+        edge
+        for fill in fills
+        for edge in state.out_edges(fill)
+        if edge.data.data is not None
+    ]
+    # Compared as text: the same symbol can differ in its assumptions between two expressions.
+    level_index = str(param - 1)
+    if not all(
+        len(edge.data.subset) == 3
+        and str(edge.data.subset[1][0]) == level_index
+        and str(edge.data.subset[1][1]) == level_index
+        and "kfdia" in str(edge.data.subset[2])
+        for edge in written
+    ):
+        return False
+    first, last, _ = level.map.range[0]
+    column = written[0].data.subset[2]
+    for edge in written:
+        species = edge.data.subset[0]
+        edge.data.subset = subsets.Range(
+            [species, (first - 1, last - 1, 1), (param - 1, param - 1, 1)]
+        )
+    level.map.range = subsets.Range([(column[0] + 1, column[1] + 1, 1)])
+    return True
 
 
 # Phase 0: default stream and dynamic map ranges

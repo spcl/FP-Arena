@@ -80,6 +80,15 @@ def _constants() -> dict[str, float | int]:
     return constants
 
 
+PEELED_LEVEL_SYMBOLS = {
+    "iphase_index_3_0": 1,
+    "iphase_index_3_1": 2,
+    "iphase_index_3_2": 1,
+    "llfall_index_1": 0,
+    "llfall_index_1_3": 1,
+}
+
+
 def reference_free_symbols(
     sdfg: Any, klon: int, klev: int = REFERENCE_KLEV
 ) -> dict[str, float | int]:
@@ -94,6 +103,7 @@ def reference_free_symbols(
         **CLOUDSC_SPECIES,
         "kidia": 1,
         "kfdia": int(klon),
+        **PEELED_LEVEL_SYMBOLS,
         **_constants(),
     }
     free = {str(s) for s in sdfg.free_symbols}
