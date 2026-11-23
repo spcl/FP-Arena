@@ -31,7 +31,7 @@ slug="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 # pins: each `>=` lower bound rises to the newest PyPI version, and a [tool.uv.sources] git pin moves to that release's
 # tag. When anything moved, the bump is committed and pushed and the script stops: rerun it once CI on that commit is
 # green, so the CI gate below always covers the bumped pins. Release order (dependencies first): dace-extended, fp-arena,
-# dace-relayout and dace-alloy, hpcagent-bench and hpcagent-agent, tactics.
+# dace-relayout and dace-alloy, hpcagent-bench, tactics.
 bumps="$(python3 - "${dry}" <<'EOF'
 import json
 import pathlib
@@ -43,7 +43,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-OURS = ["dace-extended", "fp-arena", "dace-relayout", "dace-alloy", "tactics", "hpcagent-bench", "hpcagent-agent"]
+OURS = ["dace-extended", "fp-arena", "dace-relayout", "dace-alloy", "tactics", "hpcagent-bench"]
 TAG_PREFIX = {"dace-extended": "extended-v"}
 dry = sys.argv[1] == "1"
 path = pathlib.Path("pyproject.toml")
