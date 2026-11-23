@@ -27,11 +27,14 @@ git fetch -q origin main --tags
 head="$(git rev-parse HEAD)"
 [[ "${head}" == "$(git rev-parse origin/main)" ]] || die "main is not origin/main; pull or push first"
 slug="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+pins_pr="$(gh pr list -R "${slug}" --state open --json number,headRefName,url -q '.[] | select(.headRefName | startswith("pins/")) | .url')"
+[[ -z "${pins_pr}" ]] || die "a pin-bump PR is open (${pins_pr}): merge it once its CI is green, then rerun"
 
 # Phase 1: our packages this repository depends on move to their newest releases first, so a release never ships stale
 # pins: each `>=` lower bound rises to the newest PyPI version, and a [tool.uv.sources] git pin moves to that release's
-# tag. When anything moved, the bump is committed and pushed and the script stops: rerun it once CI on that commit is
-# green, so the CI gate below always covers the bumped pins. Release order (dependencies first): dace-extended, fp-arena,
+# tag. A pin bump is a change like any other, tested where it lands: when anything moved, the bump goes to a pins/*
+# branch and a pull request to main, and the script stops. Merge the PR once its CI is green, then rerun; when that CI
+# fails because a dependency's release broke this repository, fix it in the dependency and release that again. Release order (dependencies first): dace-extended, fp-arena,
 # dace-relayout and dace-alloy, hpcagent-bench, tactics.
 bumps="$(python3 - "${dry}" <<'EOF'
 import json
@@ -100,14 +103,19 @@ if [[ -n "${bumps}" ]]; then
     echo "=== our packages' newest releases ==="
     echo "${bumps}"
     if ((dry)); then
-        echo "dry run: a release first commits these bumps and stops for CI"
+        echo "dry run: a release first opens a pull request with these bumps and stops for its CI"
         exit 0
     fi
     [[ ! -f uv.lock ]] || uv lock -q --refresh
+    branch="pins/$(date +%Y%m%d-%H%M%S)"
+    git switch -q -c "${branch}"
     git add -A
     git commit -q -m "Pin the newest releases of our packages" -m "${bumps}"
-    git push -q origin main
-    echo "pushed the bumped pins as $(git rev-parse --short HEAD); rerun $0 once CI on it is green"
+    git push -q origin "${branch}"
+    pr="$(gh pr create -R "${slug}" --base main --head "${branch}" --title "Pin the newest releases of our packages" \
+        --body "${bumps}")"
+    git switch -q main
+    echo "opened ${pr}; merge it once its CI is green, then rerun $0"
     exit 0
 fi
 
