@@ -8,6 +8,8 @@
 # dists attached. Both uploads run here, from one build; no workflow uploads anything.
 #   helpers/release_patch.sh            # release
 #   helpers/release_patch.sh --dry-run  # print the plan and build + check the current tree; change nothing
+#   helpers/release_patch.sh --github-only  # everything but the PyPI upload: the GitHub release carries the dists (no
+#                                       # TWINE_* needed); the next run without it first uploads exactly those to PyPI
 # Needs gh (authenticated), uv, and for the upload TWINE_USER and TWINE_TOKEN in the environment (never in a file).
 # The same script lives in dace-relayout, dace-alloy, tactics and fp-arena; keep the copies identical.
 set -euo pipefail
@@ -15,10 +17,12 @@ ulimit -c 0
 die() { echo "release_patch.sh: $*" >&2; exit 1; }
 cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 dry=0
+github_only=0
 case "${1:-}" in
     --dry-run) dry=1 ;;
+    --github-only) github_only=1 ;;
     "") ;;
-    *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--dry-run | --github-only]" >&2; exit 2 ;;
 esac
 
 [[ "$(git branch --show-current)" == main ]] || die "not on main"
@@ -125,6 +129,22 @@ old="$(project version)"
 [[ "${old}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || die "version '${old}' is not X.Y.Z"
 new="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
 tag="v${new}"
+# A release made with --github-only reaches PyPI on the next run without it: exactly the dists its GitHub release
+# carries, before anything new is released.
+if [[ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/${old}/json")" == 404 ]] &&
+    gh release view "v${old}" -R "${slug}" >/dev/null 2>&1; then
+    if ((dry || github_only)); then
+        echo "v${old} is on GitHub only; a run without --github-only uploads its dists to PyPI first"
+    else
+        [[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] || die "TWINE_USER and TWINE_TOKEN must be set"
+        pending="$(mktemp -d "${TMPDIR:-/tmp}/release-pending.XXXXXX")"
+        gh release download "v${old}" -R "${slug}" -D "${pending}" -p '*.whl' -p '*.tar.gz'
+        TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" \
+            uvx twine upload --non-interactive --skip-existing "${pending}"/*
+        rm -rf "${pending}"
+        echo "uploaded the GitHub-only v${old}: https://pypi.org/project/${name}/${old}/"
+    fi
+fi
 git rev-parse -q --verify "refs/tags/${tag}" >/dev/null && die "tag ${tag} exists already"
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/${new}/json")" == 404 ]] ||
     die "${name} ${new} is on PyPI already"
@@ -150,7 +170,8 @@ if ((dry)); then
     echo "dry run: nothing changed; rerun without --dry-run to release ${tag}"
     exit 0
 fi
-[[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] || die "TWINE_USER and TWINE_TOKEN must be set"
+((github_only)) || [[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] ||
+    die "TWINE_USER and TWINE_TOKEN must be set (or pass --github-only)"
 
 sed -i "0,/^version = \"${old}\"$/s//version = \"${new}\"/" pyproject.toml
 [[ "$(project version)" == "${new}" ]] || die "could not set version ${new} in pyproject.toml"
@@ -176,7 +197,12 @@ uv build -q -o "${work}/dist"
 uvx twine check --strict "${work}"/dist/*
 
 git push -q origin main "${tag}"
-TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" uvx twine upload --non-interactive "${work}"/dist/*
+((github_only)) ||
+    TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" uvx twine upload --non-interactive "${work}"/dist/*
 gh release create "${tag}" -R "${slug}" --verify-tag --title "${name} ${new}" --notes "${notes}" --generate-notes \
     "${work}"/dist/*
-echo "released ${name} ${new}: https://github.com/${slug}/releases/tag/${tag} https://pypi.org/project/${name}/${new}/"
+if ((github_only)); then
+    echo "released ${name} ${new} on GitHub only: https://github.com/${slug}/releases/tag/${tag}; rerun $0 to upload it to PyPI"
+else
+    echo "released ${name} ${new}: https://github.com/${slug}/releases/tag/${tag} https://pypi.org/project/${name}/${new}/"
+fi
