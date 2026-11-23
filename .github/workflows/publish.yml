@@ -12,6 +12,7 @@ on:
 jobs:
   pypi:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write
@@ -28,6 +29,8 @@ jobs:
           uv build
           uvx twine check --strict dist/*
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
       - name: Attach the uploaded files to the release
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
         env:
