@@ -23,11 +23,10 @@ classifiers = [
 ]
 keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision", "prototyping"]
 
-# DaCe extended, published on PyPI as dace-extended (import dace). To use your own
-# DaCe checkout (any extended-based branch), install FP-Arena with `--no-deps` and
-# ensure that DaCe is importable; see the README.
+# DaCe comes through one of two extras, never both (each installs the `dace` package): `extended` (dace-extended, the
+# whole of FP-Arena) or `dace` (spcl's dace; the types and change_and_propagate_fp_types, not fp_arena.search, which
+# needs extended's vectorization passes). With your own DaCe checkout, install FP-Arena without an extra.
 dependencies = [
-    "dace-extended>=1.0.0",
     "numpy",
     "ordered-set",
     "scipy",
@@ -35,6 +34,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+extended = ["dace-extended>=1.0.0"]
+dace = ["dace>=2.0.0b2"]
 testing = [
     "pytest",
     "pytest-xdist",
@@ -43,7 +44,7 @@ corpus = [
     "h5py",
 ]
 dev = [
-    "fp-arena[testing]",
+    "fp-arena[testing,extended]",
 ]
 
 [project.urls]

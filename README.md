@@ -8,21 +8,23 @@ time — no fork, no DaCe source changes.
 
 ## Install
 
-FP-Arena builds on DaCe [`extended`](https://github.com/spcl/dace/commits/extended/), published on PyPI as
-`dace-extended` (imported as `dace`):
+Pick the DaCe FP-Arena runs on with an extra; both install the `dace` package, so take exactly one:
 
 ```bash
-pip install fp-arena
+pip install "fp-arena[extended]"   # DaCe extended (PyPI dace-extended): all of FP-Arena
+pip install "fp-arena[dace]"       # spcl's dace: the types and change_and_propagate_fp_types; not fp_arena.search
 ```
+
+`fp_arena.search` uses DaCe extended's vectorization passes.
 
 The benchmark kernels the examples and tests use (heat3d, hdiff, vadv, CLOUDSC) live in `fp_arena.corpus`; their
 reference data (`.h5`, `.sdfg`) ships only with a checkout.
 
-Already have a DaCe checkout (any `extended`-based branch) you want to use? Install
-without pulling DaCe:
+Already have a DaCe checkout (any `extended`-based branch) you want to use? Install without an extra, which pulls no
+DaCe:
 
 ```bash
-pip install --no-deps git+https://github.com/spcl/FP-Arena.git   # or: pip install --no-deps -e .
+pip install fp-arena   # or, from a checkout: pip install -e .
 ```
 
 ## Quick start

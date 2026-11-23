@@ -33,12 +33,12 @@ jobs:
         # generated maps use OpenMP (libgomp).
         sudo apt-get install -y cmake ninja-build gcc g++ libgomp1 libmpfr-dev
 
-    - name: Install FP-Arena (DaCe extended from PyPI)
+    - name: Install FP-Arena[extended] (DaCe extended from PyPI)
       run: |
         rm -f ~/.dace.conf
         python -m pip install --upgrade pip
-        # dace-extended is FP-Arena's published dependency: CI tests what `pip install fp-arena` installs.
-        pip install ./fp-arena
+        # CI tests what `pip install fp-arena[extended]` installs (dace-extended from PyPI).
+        pip install "./fp-arena[extended]"
         pip install pytest
 
     - name: Run FP-Arena tests
