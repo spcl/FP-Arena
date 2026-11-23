@@ -4,10 +4,11 @@
 # Patch release vX.Y.Z -> vX.Y.(Z+1) of this repository's PyPI package, from a clean main that equals origin/main and
 # passed CI. It bumps [project] version in pyproject.toml (and relocks), adds a CHANGELOG.md section listing the
 # commits since the last tag unless one for the new version is already there, commits, tags, builds and checks the
-# wheel and sdist, pushes main and the tag, creates the GitHub release with the dists attached, and uploads to PyPI.
+# wheel and sdist, pushes main and the tag, and publishes the GitHub release. The published release fires
+# .github/workflows/publish.yml, which uploads the tag's build to PyPI (Trusted Publishing) and attaches it.
 #   helpers/release_patch.sh            # release
 #   helpers/release_patch.sh --dry-run  # print the plan and build + check the current tree; change nothing
-# Needs gh (authenticated), uv, and for the upload TWINE_USER and TWINE_TOKEN in the environment.
+# Needs gh (authenticated) and uv; no PyPI token.
 # The same script lives in dace-relayout, dace-alloy, tactics and fp-arena; keep the copies identical.
 set -euo pipefail
 ulimit -c 0
@@ -141,8 +142,6 @@ if ((dry)); then
     echo "dry run: nothing changed; rerun without --dry-run to release ${tag}"
     exit 0
 fi
-[[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] || die "TWINE_USER and TWINE_TOKEN must be set"
-
 sed -i "0,/^version = \"${old}\"$/s//version = \"${new}\"/" pyproject.toml
 [[ "$(project version)" == "${new}" ]] || die "could not set version ${new} in pyproject.toml"
 [[ ! -f uv.lock ]] || uv lock -q
@@ -167,6 +166,5 @@ uv build -q -o "${work}/dist"
 uvx twine check --strict "${work}"/dist/*
 
 git push -q origin main "${tag}"
-gh release create "${tag}" -R "${slug}" --title "${name} ${new}" --notes "${notes}" "${work}"/dist/*
-TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" uvx twine upload --non-interactive "${work}"/dist/*
-echo "released ${name} ${new}: https://github.com/${slug}/releases/tag/${tag} https://pypi.org/project/${name}/${new}/"
+gh release create "${tag}" -R "${slug}" --verify-tag --title "${name} ${new}" --notes "${notes}" --generate-notes
+echo "released ${name} ${new}: https://github.com/${slug}/releases/tag/${tag}; the Publish workflow uploads it to https://pypi.org/project/${name}/${new}/"
