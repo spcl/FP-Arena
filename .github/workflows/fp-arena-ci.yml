@@ -22,17 +22,6 @@ jobs:
       with:
         path: fp-arena
 
-    # DaCe is pulled from the extended branch, with submodules (the runtime
-    # headers FP-Arena's generated code includes -- e.g. moodycamel -- live in
-    # DaCe git submodules and a plain pip-from-git install would miss them).
-    - name: Checkout DaCe (extended)
-      uses: actions/checkout@v4
-      with:
-        repository: spcl/dace
-        ref: 21f1ed0009098827eca7a8c1bc894ee03df81f8a
-        submodules: recursive
-        path: dace
-
     - uses: actions/setup-python@v5
       with:
         python-version: '3.12'
@@ -44,16 +33,13 @@ jobs:
         # generated maps use OpenMP (libgomp).
         sudo apt-get install -y cmake ninja-build gcc g++ libgomp1 libmpfr-dev
 
-    - name: Install DaCe (extended) and FP-Arena
+    - name: Install FP-Arena (DaCe extended from PyPI)
       run: |
         rm -f ~/.dace.conf
         python -m pip install --upgrade pip
-        # DaCe from the branch checked out above (with submodules).
-        pip install -e ./dace
-        # FP-Arena without deps so it uses the DaCe just installed (any main),
-        # rather than re-pulling pinned main from git.
-        pip install --no-deps ./fp-arena
-        pip install pytest scipy tqdm
+        # dace-extended is FP-Arena's published dependency: CI tests what `pip install fp-arena` installs.
+        pip install ./fp-arena
+        pip install pytest
 
     - name: Run FP-Arena tests
       run: |

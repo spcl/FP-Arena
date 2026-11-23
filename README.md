@@ -8,11 +8,15 @@ time — no fork, no DaCe source changes.
 
 ## Install
 
-FP-Arena tracks the latest DaCe [`extended`](https://github.com/spcl/dace/commits/extended/):
+FP-Arena builds on DaCe [`extended`](https://github.com/spcl/dace/commits/extended/), published on PyPI as
+`dace-extended` (imported as `dace`):
 
 ```bash
-pip install git+https://github.com/spcl/FP-Arena.git
+pip install fp-arena
 ```
+
+The benchmark kernels the examples and tests use (heat3d, hdiff, vadv, CLOUDSC) live in `fp_arena.corpus`; their
+reference data (`.h5`, `.sdfg`) ships only with a checkout.
 
 Already have a DaCe checkout (any `extended`-based branch) you want to use? Install
 without pulling DaCe:

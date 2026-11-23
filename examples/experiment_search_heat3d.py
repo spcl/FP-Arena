@@ -32,7 +32,7 @@ from dace.transformation.dataflow import (
 )
 from dace.transformation.interstate import LoopToMap
 
-from corpus.heat3d import heat3d_kernel
+from fp_arena.corpus.heat3d import heat3d_kernel
 from fp_arena.search import (
     ErrorBudget,
     ExperimentConfig,

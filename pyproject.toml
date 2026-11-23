@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,24 +8,26 @@ version = "0.1.0"
 description = "A rapid-prototyping environment for custom floating-point types in DaCe"
 readme = "README.md"
 license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
     { name = "ETH Zurich and the FP-Arena authors" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Code Generators",
 ]
 keywords = ["dace", "floating-point", "stochastic-rounding", "reduced-precision", "prototyping"]
 
-# FP-Arena tracks the DaCe `extended` branch. To use your own DaCe checkout
-# (any extended-based branch), install FP-Arena with `--no-deps` and ensure
-# that DaCe is importable; see the README.
+# DaCe extended, published on PyPI as dace-extended (import dace). To use your own
+# DaCe checkout (any extended-based branch), install FP-Arena with `--no-deps` and
+# ensure that DaCe is importable; see the README.
 dependencies = [
-    "dace @ git+https://github.com/spcl/dace.git@extended",
+    "dace-extended>=1.0.0",
     "numpy",
     "ordered-set",
     "scipy",
@@ -48,10 +50,11 @@ dev = [
 Homepage = "https://github.com/spcl/FP-Arena"
 Repository = "https://github.com/spcl/FP-Arena"
 Issues = "https://github.com/spcl/FP-Arena/issues"
+Changelog = "https://github.com/spcl/FP-Arena/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["fp_arena*", "corpus*"]
+include = ["fp_arena*"]
 
 [tool.setuptools.package-data]
 fp_arena = ["runtime/include/**/*.h"]

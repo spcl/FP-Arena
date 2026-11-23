@@ -10,7 +10,7 @@ from dace.sdfg import nodes
 from dace.sdfg import utils as sdfg_utils
 from dace.transformation.dataflow import MapFusion
 
-from corpus.heat3d import heat3d_kernel
+from fp_arena.corpus.heat3d import heat3d_kernel
 from fp_arena.dtypes import mpfr
 from fp_arena.search.retarget import apply_target
 from fp_arena.transformations.change_and_propagate_fp_types import (
@@ -1160,7 +1160,7 @@ def test_constant_type_end_to_end_float32_precision():
 
 
 def test_heat3d_no_fp64_in_generated_code():
-    """heat3d (corpus/heat3d.py) lowered from fp64 to fp16: the generated
+    """heat3d (fp_arena/corpus/heat3d.py) lowered from fp64 to fp16: the generated
     C++ contains fp64 only at the preserved A/B interface."""
 
     sdfg = heat3d_kernel.to_sdfg(simplify=True)

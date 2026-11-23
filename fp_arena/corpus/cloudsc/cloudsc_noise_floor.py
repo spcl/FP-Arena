@@ -11,7 +11,7 @@ from typing import Any
 
 import dace
 import numpy as np
-from corpus.cloudsc.cloudsc_reference_data import (
+from fp_arena.corpus.cloudsc.cloudsc_reference_data import (
     REFERENCE_KLEV,
     REFERENCE_KLON,
     reference_free_symbols,

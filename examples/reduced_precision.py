@@ -4,7 +4,7 @@
 import dace as dc
 import numpy as np
 
-from corpus.heat3d import GRID_N, TSTEPS, heat3d_kernel
+from fp_arena.corpus.heat3d import GRID_N, TSTEPS, heat3d_kernel
 from fp_arena.transformations.change_and_propagate_fp_types import (
     change_and_propagate_fp_types,
 )
