@@ -11,7 +11,7 @@
 #   helpers/release_patch.sh --github-only  # everything but the PyPI upload: the GitHub release carries the dists (no
 #                                       # TWINE_* needed); the next run without it first uploads exactly those to PyPI
 # Needs gh (authenticated), uv, and for the upload TWINE_USER and TWINE_TOKEN in the environment (never in a file).
-# The same script lives in dace-relayout, dace-alloy, tactics and fp-arena; keep the copies identical.
+# The same script lives in dace-relayout, dace-alloy, dace-fortran, tactics and fp-arena; keep the copies identical.
 set -euo pipefail
 ulimit -c 0
 die() { echo "release_patch.sh: $*" >&2; exit 1; }
@@ -39,7 +39,7 @@ pins_pr="$(gh pr list -R "${slug}" --state open --json number,headRefName,url -q
 # dropped, so the package resolves to that PyPI release: our packages pin released versions, never git tags or commits.
 # A pin bump is a change like any other, tested where it lands: when anything moved, the bump goes to a pins/*
 # branch and a pull request to main, and the script stops. Merge the PR once its CI is green, then rerun; when that CI
-# fails because a dependency's release broke this repository, fix it in the dependency and release that again. Release order (dependencies first): dace-extended, fp-arena,
+# fails because a dependency's release broke this repository, fix it in the dependency and release that again. Release order (dependencies first): dace-extended, dace-fortran, fp-arena,
 # dace-relayout and dace-alloy, hpcagent-bench, tactics.
 bumps="$(python3 - "${dry}" <<'EOF'
 import json
@@ -51,7 +51,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-OURS = ["dace-extended", "fp-arena", "dace-relayout", "dace-alloy", "tactics", "hpcagent-bench"]
+OURS = ["dace-extended", "dace-fortran", "fp-arena", "dace-relayout", "dace-alloy", "tactics", "hpcagent-bench"]
 dry = sys.argv[1] == "1"
 path = pathlib.Path("pyproject.toml")
 text = path.read_text()
