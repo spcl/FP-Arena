@@ -111,7 +111,13 @@ if [[ -n "${bumps}" ]]; then
     exit 0
 fi
 
+((dry || github_only)) || [[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] ||
+    die "TWINE_USER and TWINE_TOKEN must be set (or pass --github-only)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/release-patch.XXXXXX")"
+trap 'rm -rf "${work}"' EXIT
 project() { python3 -c 'import sys, tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"][sys.argv[1]])' "$1"; }
+on_pypi() { [[ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/$1/json")" != 404 ]]; }
+upload() { TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" uvx twine upload --non-interactive "$@"; }
 name="$(project name)"
 old="$(project version)"
 [[ "${old}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || die "version '${old}' is not X.Y.Z"
@@ -119,27 +125,20 @@ new="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
 tag="v${new}"
 # A release made with --github-only reaches PyPI on the next run without it: exactly the dists its GitHub release
 # carries, before anything new is released.
-if [[ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/${old}/json")" == 404 ]] &&
-    gh release view "v${old}" -R "${slug}" >/dev/null 2>&1; then
+if ! on_pypi "${old}" && gh release view "v${old}" -R "${slug}" >/dev/null 2>&1; then
     if ((dry || github_only)); then
         echo "v${old} is on GitHub only; a run without --github-only uploads its dists to PyPI first"
     else
-        [[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] || die "TWINE_USER and TWINE_TOKEN must be set"
-        pending="$(mktemp -d "${TMPDIR:-/tmp}/release-pending.XXXXXX")"
-        gh release download "v${old}" -R "${slug}" -D "${pending}" -p '*.whl' -p '*.tar.gz'
-        TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" \
-            uvx twine upload --non-interactive --skip-existing "${pending}"/*
-        rm -rf "${pending}"
+        gh release download "v${old}" -R "${slug}" -D "${work}/pending" -p '*.whl' -p '*.tar.gz'
+        upload --skip-existing "${work}"/pending/*
         echo "uploaded the GitHub-only v${old}: https://pypi.org/project/${name}/${old}/"
     fi
 fi
 git rev-parse -q --verify "refs/tags/${tag}" >/dev/null && die "tag ${tag} exists already"
-[[ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/${new}/json")" == 404 ]] ||
-    die "${name} ${new} is on PyPI already"
-previous="v${old}"
-git rev-parse -q --verify "refs/tags/${previous}" >/dev/null || die "no tag ${previous} for the current version"
-commits="$(git log --no-merges --format='- %s (%h)' "${previous}..HEAD")"
-[[ -n "${commits}" ]] || { echo "${name}: no commits since ${previous}, nothing to release"; exit 0; }
+! on_pypi "${new}" || die "${name} ${new} is on PyPI already"
+git rev-parse -q --verify "refs/tags/v${old}" >/dev/null || die "no tag v${old} for the current version"
+commits="$(git log --no-merges --format='- %s (%h)' "v${old}..HEAD")"
+[[ -n "${commits}" ]] || { echo "${name}: no commits since v${old}, nothing to release"; exit 0; }
 
 # Only a commit every workflow passed on is released.
 runs="$(gh run list -R "${slug}" -c "${head}" -L 100 --json workflowName,status,conclusion)"
@@ -150,32 +149,21 @@ open="$(jq -r '.[] | select(.status != "completed" or (.conclusion != "success" 
 
 echo "=== ${name} ${old} -> ${new} (${slug}, main ${head:0:9}) ==="
 echo "${commits}"
-work="$(mktemp -d "${TMPDIR:-/tmp}/release-patch.XXXXXX")"
-trap 'rm -rf "${work}"' EXIT
 if ((dry)); then
     uv build -q -o "${work}/dist"
     uvx twine check --strict "${work}"/dist/*
     echo "dry run: nothing changed; rerun without --dry-run to release ${tag}"
     exit 0
 fi
-((github_only)) || [[ -n "${TWINE_USER:-}" && -n "${TWINE_TOKEN:-}" ]] ||
-    die "TWINE_USER and TWINE_TOKEN must be set (or pass --github-only)"
-
 sed -i "0,/^version = \"${old}\"$/s//version = \"${new}\"/" pyproject.toml
 [[ "$(project version)" == "${new}" ]] || die "could not set version ${new} in pyproject.toml"
 [[ ! -f uv.lock ]] || uv lock -q
 if ! grep -q "^## ${new} " CHANGELOG.md; then
-    section="## ${new} ($(date +%F))"$'\n\n'"${commits}"$'\n'
-    python3 - "${section}" <<'EOF'
-import pathlib
-import sys
-
-path = pathlib.Path("CHANGELOG.md")
-text = path.read_text()
-at = text.find("\n## ")
-at = len(text) if at < 0 else at + 1
-path.write_text(text[:at] + sys.argv[1] + "\n" + text[at:])
-EOF
+    # The new section goes above the newest one, or at the end.
+    SECTION="## ${new} ($(date +%F))"$'\n\n'"${commits}"$'\n' awk '
+        !done && /^## / { print ENVIRON["SECTION"]; done = 1 } { print } END { if (!done) print ENVIRON["SECTION"] }
+    ' CHANGELOG.md >"${work}/CHANGELOG.md"
+    mv "${work}/CHANGELOG.md" CHANGELOG.md
 fi
 notes="$(awk -v v="## ${new} " 'index($0, v) == 1 { on = 1; next } on && /^## / { exit } on' CHANGELOG.md)"
 git add -A
@@ -185,12 +173,8 @@ uv build -q -o "${work}/dist"
 uvx twine check --strict "${work}"/dist/*
 
 git push -q origin main "${tag}"
-((github_only)) ||
-    TWINE_USERNAME="${TWINE_USER}" TWINE_PASSWORD="${TWINE_TOKEN}" uvx twine upload --non-interactive "${work}"/dist/*
+((github_only)) || upload "${work}"/dist/*
 gh release create "${tag}" -R "${slug}" --verify-tag --title "${name} ${new}" --notes "${notes}" --generate-notes \
     "${work}"/dist/*
-if ((github_only)); then
-    echo "released ${name} ${new} on GitHub only: https://github.com/${slug}/releases/tag/${tag}; rerun $0 to upload it to PyPI"
-else
-    echo "released ${name} ${new}: https://github.com/${slug}/releases/tag/${tag} https://pypi.org/project/${name}/${new}/"
-fi
+echo "released ${name} ${new}: https://github.com/${slug}/releases/tag/${tag}"
+if ((github_only)); then echo "GitHub only: rerun $0 to upload it to PyPI"; else echo "https://pypi.org/project/${name}/${new}/"; fi
